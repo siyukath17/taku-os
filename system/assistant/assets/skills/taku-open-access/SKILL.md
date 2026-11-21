@@ -176,6 +176,49 @@ Pending requests use `/assistant-management?section=requests`. List returns `{th
 
 `readTaskDetail` takes a decimal string `taskId`, returns `{taskId,state,prompt,message}` or `TASK_NOT_FOUND/TASK_UNAVAILABLE`. `thread/usage` returns `{threadId,usage}`; null means upstream has not published it.
 
+## On-device ACP task runtime
+
+Background tasks run on Codex unless `runtime.json` selects the on-device ACP agent (`agy acp`).
+Root, system and shell callers only; other apps get `SecurityException: PERMISSION_DENIED`.
+
+```sh
+A=content://org.agentos.assistant.acp-runtime
+content call --uri $A --method acp --arg '{"action":"read"}'
+content call --uri $A --method acp --arg '{"action":"update","patch":{"default":"acp","acp":{"binary":"/data/local/agentos/acp/bin/agy","httpsProxy":"http://127.0.0.1:7890","extraArgs":[]}}}'
+content call --uri $A --method acp --arg '{"action":"update","expectedRevision":"REVISION","patch":{"default":null,"acp":{"httpsProxy":null}}}'
+content call --uri $A --method acp --arg '{"action":"signIn"}'
+content call --uri $A --method acp --arg '{"action":"signInStatus"}'
+content call --uri $A --method acp --arg '{"action":"signInCancel"}'
+```
+
+The result is `Bundle[{result={"ok":true,"result":{...}}}]` or `{"ok":false,"message":CODE}`. `read` returns
+`{path,exists,valid,revision,default,effectiveDefault,acp:{binary,httpsProxy,extraArgs,home,appDataDir,cwd,args,envNames,loginMethod}}`;
+`effectiveDefault` is what a task without request/env overrides would use (`acp` only with a binary).
+`acp.env` values are never returned, only `envNames`. `update` writes only `default` (`codex`|`acp`|null)
+and `acp.binary` (absolute path under `/data/local/agentos/`, `/system/`, `/system_ext/`, `/product/` or
+`/vendor/`, or ""; the broker runs it as root), `acp.httpsProxy` (`http|https|socks5|socks5h://host:port`, no
+credentials, or ""), `acp.extraArgs` (≤16 strings, ≤256 chars, never `--app-data-dir`; root/system callers only, ADB shell gets
+`PRIVILEGED_FIELD:acp.extraArgs`). `null` clears a
+field; all other keys in the file are kept. The write is atomic; pass `revision` from `read` as
+`expectedRevision` to refuse a concurrent change. Errors: `EMPTY_PATCH`, `INVALID_PATCH`, `UNKNOWN_FIELD:<key>`,
+`INVALID_DEFAULT`, `INVALID_ACP`, `INVALID_BINARY`, `BINARY_LOCATION_NOT_ALLOWED`, `INVALID_PROXY`, `PROXY_CREDENTIALS_NOT_ALLOWED`,
+`INVALID_EXTRA_ARGS`, `MANAGED_FLAG:<flag>`, `REVISION_CONFLICT`, `RUNTIME_CONFIG_INVALID` (a hand-edited file
+that does not parse is never overwritten), `RUNTIME_CONFIG_TOO_LARGE`, `UNKNOWN_ACTION`.
+
+A task that ends `needs_user` with `acp-auth.json` naming `oauth-personal` needs the agent's own Google
+sign-in. `signIn` (or the island's **Sign in** action) starts `agy authenticate oauth-personal` with the
+task runtime's private `HOME`/`--app-data-dir`, captures the official `https://accounts.google.com/…` URL
+from the agent's output and opens it with `am start -a android.intent.action.VIEW`. Finish sign-in in the
+browser, then poll `signInStatus`: `{state,method,urlHost,error,updatedAt}`, state `idle`, `starting`,
+`authenticating`, `browser_opened`, `signed_in`, `failed`, `timed_out` (10 min) or `cancelled`; errors
+`ACP_UNCONFIGURED`, `start-failed`, `initialize-error`, `method-unavailable`, `browser-launch-failed`,
+`authenticate-error`, `agent-exited`. Only one sign-in runs at a time (`alreadyRunning`). The login is
+stored by the agent in its own directory; Taku never reads, returns or logs the URL or any token.
+Resubmit the kept request afterwards.
+
+While an ACP task runs, its background-task notification also carries a `taku.island.v1` progress card
+(phase, current tool, plan progress; sign-in action on `needs_user`). Codex tasks are unchanged.
+
 ## Screen suggestions
 
 ```sh

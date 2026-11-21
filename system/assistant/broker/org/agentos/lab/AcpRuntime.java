@@ -136,6 +136,9 @@ final class AcpRuntime implements TaskRuntime {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("HOME", options.home);
         // A pinned on-device binary must never replace itself; the ROM owns its version.
+        // AGY_CLI_DISABLE_AUTO_UPDATE is the switch the android_arm64 agy binary checks ("Auto-update
+        // disabled via environment variable %s"); it has no CLI flag for this. The rest are generic.
+        env.put("AGY_CLI_DISABLE_AUTO_UPDATE", "1");
         env.put("AGY_DISABLE_AUTO_UPDATE", "1");
         env.put("DISABLE_AUTO_UPDATE", "1");
         env.put("NO_UPDATE_NOTIFIER", "1");
@@ -249,7 +252,7 @@ final class AcpRuntime implements TaskRuntime {
         String sessionId = "";
         boolean cancelSent, timedOut, inPrompt;
         long turnDeadline, stopDeadline;
-        String summary = "", phase = "starting", plan = "";
+        String summary = "", phase = "starting", plan = "", currentTool = "";
         long lastProgressWrite, lastIdle;
         int permissionsAllowed, permissionsRejected, ignoredLines;
 
@@ -603,6 +606,7 @@ final class AcpRuntime implements TaskRuntime {
                     JSONObject call = new JSONObject().put("title", update.optString("title", "tool"))
                             .put("kind", update.optString("kind", "other")).put("status", update.optString("status", "pending"));
                     toolCalls.put(toolId, call);
+                    currentTool = call.getString("title");
                     if (!"stopping".equals(phase)) phase = "tool";
                     progress("Working: " + clip(call.getString("title"), 80), true);
                     break;
@@ -614,6 +618,7 @@ final class AcpRuntime implements TaskRuntime {
                         toolCalls.put(update.optString("toolCallId"), call);
                     }
                     if (update.has("title") && !update.isNull("title")) call.put("title", update.optString("title"));
+                    currentTool = call.getString("title");
                     if (update.has("status") && !update.isNull("status")) call.put("status", update.optString("status"));
                     progress("Working: " + clip(call.getString("title"), 80), false);
                     break;
@@ -646,6 +651,8 @@ final class AcpRuntime implements TaskRuntime {
                     .put("runtime", "acp")
                     .put("phase", phase)
                     .put("summary", text)
+                    // Titles can quote commands or paths: redacted and clipped for the island.
+                    .put("tool", clip(redact(currentTool), 80))
                     .put("toolCalls", toolCalls.size())
                     .put("toolCallsCompleted", completedTools)
                     .put("plan", plan)

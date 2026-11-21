@@ -46,6 +46,16 @@ public final class TaskBroker {
 
     static final File RUNTIME_CONFIG = new File(ROOT, "runtime.json");
 
+    /** The agent's own oauth-personal sign-in, opened in the phone's browser. Status only, never credentials. */
+    static final AcpAuthHelper ACP_AUTH = new AcpAuthHelper(
+            new File(ROOT, "acp-login.json"), AcpProcessTransport.process(),
+            AcpAuthHelper.IntentLauncher.activityManager(), TimeUnit.MINUTES.toMillis(10));
+
+    /** NativeBridge op {@code acpRuntime}: runtime.json read/update and the sign-in trigger. */
+    static JSONObject acpRuntimeControl(JSONObject input) throws Exception {
+        return AcpRuntimeSettings.control(RUNTIME_CONFIG, input, ACP_AUTH);
+    }
+
     /** Codex unless runtime.json (or the request/env) positively selects a configured ACP agent. */
     static RuntimeRouter router() {
         return new RuntimeRouter(
@@ -64,11 +74,8 @@ public final class TaskBroker {
                                 System.err.println("acp idle: " + failure);
                             }
                         }),
-                () -> {
-                    if (!RUNTIME_CONFIG.isFile()) return null;
-                    if (RUNTIME_CONFIG.length() > 65536) throw new IOException("runtime.json too large");
-                    return new JSONObject(read(RUNTIME_CONFIG));
-                },
+                // Same loader and bounds as the acpRuntime settings interface.
+                () -> AcpRuntimeSettings.load(RUNTIME_CONFIG),
                 System.getenv());
     }
 

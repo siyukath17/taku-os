@@ -143,6 +143,7 @@ final class NativeBridge {
    case "memory":answer=MemoryBridge.control(input);break;
    case "imeReplies":answer=ImeReplies.control(input,uid);break;
    case "systemAi":answer=SystemAi.control(input);break;
+   case "acpRuntime":answer=TaskBroker.acpRuntimeControl(input);break;
    case "byok":answer=byok.control(input);break;
    case "ui":answer=SystemAi.ui(input);break;
    case "matter":answer=MatterBridge.control(input);break;

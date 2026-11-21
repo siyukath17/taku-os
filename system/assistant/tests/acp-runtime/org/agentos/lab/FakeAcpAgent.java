@@ -23,7 +23,24 @@ import java.util.concurrent.CountDownLatch;
  * model "crash, then a healthy fresh process".
  */
 final class FakeAcpAgent implements AcpProcessTransport {
-    enum Scenario { NORMAL, NEEDS_AUTH, PROMPT_AUTH, HANG_UNTIL_CANCEL, IGNORE_CANCEL, CRASH }
+    enum Scenario {
+        NORMAL, NEEDS_AUTH, PROMPT_AUTH, HANG_UNTIL_CANCEL, IGNORE_CANCEL, CRASH,
+        /** authenticate: URL on stderr, succeeds once the browser "visited" it. */
+        AUTH_URL_STDERR,
+        /** authenticate: URL JSON-escaped inside a protocol notification. */
+        AUTH_URL_JSON,
+        /** authenticate: URL, then an error. */
+        AUTH_ERROR,
+        /** authenticate: never answers. */
+        AUTH_SILENT,
+        /** initialize offers no oauth-personal. */
+        AUTH_NO_METHOD
+    }
+
+    static final String AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fake.apps.googleusercontent.com"
+            + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A4321%2Foauth2callback&response_type=code&state=st-1&code_challenge=cc";
+    /** Counted down by the test's IntentLauncher: the user finished the browser step. */
+    volatile CountDownLatch browserVisited = new CountDownLatch(1);
 
     final Deque<Scenario> scenarios = new ArrayDeque<>();
     final List<Launch> launches = new CopyOnWriteArrayList<>();
@@ -68,11 +85,14 @@ final class FakeAcpAgent implements AcpProcessTransport {
         volatile boolean destroyed;
         volatile Integer exit;
         Object promptId;
+        final PipedInputStream errReads = new PipedInputStream(1 << 16);
+        final PipedOutputStream errWrites = new PipedOutputStream();
 
         Process(Scenario scenario) throws IOException {
             this.scenario = scenario;
             agentWrites.connect(clientReads);
             clientWrites.connect(agentReads);
+            errWrites.connect(errReads);
             thread = new Thread(this::serve, "fake-acp-" + scenario);
             thread.setDaemon(true);
         }
@@ -107,7 +127,41 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 if (exit == null) exit = destroyed ? 143 : 1;
             } finally {
                 try { agentWrites.close(); } catch (IOException ignored) {}
+                try { errWrites.close(); } catch (IOException ignored) {}
             }
+        }
+
+        boolean auth() {
+            return scenario.name().startsWith("AUTH_");
+        }
+
+        void err(String line) throws IOException {
+            errWrites.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            errWrites.flush();
+        }
+
+        void authenticate(Object id) throws Exception {
+            // Noise first: a credential-looking line and a URL on a host that is not allowed.
+            err("debug: access_token=ya29.SECRETSECRET refresh_token=1//SECRETSECRETSECRETSECRET");
+            synchronized (agentWrites) {
+                agentWrites.write("see https://evil.example.com/phish?x=1 for help\n".getBytes(StandardCharsets.UTF_8));
+            }
+            switch (scenario) {
+                case AUTH_URL_JSON:
+                    send(new JSONObject().put("method", "auth/progress").put("params",
+                            new JSONObject().put("message", "Open " + AUTH_URL + " to continue")));
+                    break;
+                case AUTH_SILENT:
+                    // Stay alive (a dead writer thread reads as a closed pipe) and never answer.
+                    while (!destroyed) Thread.sleep(20);
+                    return;
+                default:
+                    err("Please visit the following URL to sign in: " + AUTH_URL + " .");
+            }
+            if (!browserVisited.await(5, java.util.concurrent.TimeUnit.SECONDS)) return;
+            if (scenario == Scenario.AUTH_ERROR)
+                send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32603).put("message", "login failed")));
+            else send(new JSONObject().put("id", id).put("result", new JSONObject()));
         }
 
         /** Returns true when the scripted agent "exits". */
@@ -120,7 +174,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
                             .put("protocolVersion", 1)
                             .put("agentCapabilities", new JSONObject().put("loadSession", false)
                                     .put("promptCapabilities", new JSONObject().put("image", true)))
-                            .put("authMethods", new JSONArray()
+                            .put("authMethods", scenario == Scenario.AUTH_NO_METHOD
+                                    ? new JSONArray().put(new JSONObject().put("id", "gemini-api-key").put("name", "Use API key"))
+                                    : new JSONArray()
                                     .put(new JSONObject().put("id", "oauth-personal").put("name", "Log in with Google"))
                                     .put(new JSONObject().put("id", "gemini-api-key").put("name", "Use API key")))
                             .put("agentInfo", new JSONObject().put("name", "fake-agy").put("version", "0"))));
@@ -130,6 +186,14 @@ final class FakeAcpAgent implements AcpProcessTransport {
                         send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32000).put("message", "Authentication required")));
                     else send(new JSONObject().put("id", id).put("result", new JSONObject().put("sessionId", "s-1")));
                     return false;
+                case "authenticate": {
+                    Thread t = new Thread(() -> {
+                        try { authenticate(id); } catch (Exception ignored) {}
+                    }, "fake-auth");
+                    t.setDaemon(true);
+                    t.start();
+                    return false;
+                }
                 case "session/prompt":
                     promptId = id;
                     return prompt();
@@ -200,7 +264,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
         @Override public InputStream stdout() { return clientReads; }
         @Override public OutputStream stdin() { return clientWrites; }
-        @Override public InputStream stderr() { return new java.io.ByteArrayInputStream("token=abc123 secret stuff\n".getBytes(StandardCharsets.UTF_8)); }
+        @Override public InputStream stderr() { return auth() ? errReads : new java.io.ByteArrayInputStream("token=abc123 secret stuff\n".getBytes(StandardCharsets.UTF_8)); }
         @Override public boolean alive() { return !destroyed && thread.isAlive(); }
         @Override public Integer exitCode() { return alive() ? null : (exit == null ? 0 : exit); }
 
@@ -210,6 +274,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
             try { clientWrites.close(); } catch (IOException ignored) {}
             thread.interrupt();
             try { agentWrites.close(); } catch (IOException ignored) {}
+            try { errWrites.close(); } catch (IOException ignored) {}
         }
     }
 }

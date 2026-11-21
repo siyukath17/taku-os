@@ -8,6 +8,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.Icon
+import android.os.Bundle
 import android.net.Uri
 import android.util.Log
 import java.util.concurrent.Executors
@@ -62,8 +64,11 @@ class TaskNotificationReceiver : BroadcastReceiver() {
                 .setOnlyAlertOnce(true)
                 .setOngoing(running)
                 .setAutoCancel(!running)
-                .build()
-            manager.notify(42, notice)
+            // ACP tasks also drive the Dynamic Island from progress.json; every other task keeps
+            // exactly the plain notification above (the projection returns null for them).
+            AcpIslandProjection.fromTaskDirectory(java.io.File(context.filesDir, "runtime/tasks/$id"), id)
+                ?.let { attachAcpIsland(context, notice, it, link) }
+            manager.notify(42, notice.build())
         } catch (failure: Exception) {
             Log.e("AgentOSNotify", "Cannot update task notification", failure)
         }
@@ -72,6 +77,34 @@ class TaskNotificationReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_TASK_ID = "task_id"
         private val PANEL_COMPLETIONS = Executors.newSingleThreadExecutor()
+
+        /** taku.island.v1 extras for an ACP task: payload, the "taku" glyph and its actions. */
+        private fun attachAcpIsland(
+            context: Context,
+            notice: Notification.Builder,
+            projection: AcpIslandProjection.Projection,
+            open: PendingIntent,
+        ) {
+            val actions = Bundle()
+            actions.putParcelable(AcpIslandProjection.OPEN,
+                Notification.Action.Builder(null as Icon?, "Open", open).build())
+            if (projection.signIn) {
+                val signIn = PendingIntent.getBroadcast(context, 2,
+                    Intent(AcpSignInReceiver.ACTION).setClass(context, AcpSignInReceiver::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val action = Notification.Action.Builder(null as Icon?, "Sign in", signIn).build()
+                actions.putParcelable(AcpIslandProjection.SIGN_IN, action)
+                notice.addAction(action)
+            }
+            notice.addExtras(Bundle().apply {
+                putString("taku.island.v1", projection.payload.toString())
+                putBundle("taku.island.pics", Bundle().apply {
+                    putParcelable(AcpIslandProjection.PIC,
+                        Icon.createWithResource("android", android.R.drawable.ic_dialog_info))
+                })
+                putBundle("taku.island.actions", actions)
+            })
+        }
 
         private fun taskNotifications(context: Context): NotificationManager {
             val manager = requireNotNull(context.getSystemService(NotificationManager::class.java))
