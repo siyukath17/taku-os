@@ -37,25 +37,39 @@ public final class TaskBroker {
     }
 
     static void write(File f, String t) throws Exception {
-        File tmp = new File(f.getPath() + ".tmp");
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(t.getBytes(StandardCharsets.UTF_8));
-            out.getFD().sync();
-        }
-        if (!tmp.renameTo(f)) throw new IOException("atomic write failed");
-        f.setReadable(true, false);
+        TaskRecords.write(f, t);
     }
 
     static void state(File dir, JSONObject r, String s, String m) throws Exception {
-        write(
-                new File(dir, "state.json"),
-                new JSONObject()
-                        .put("id", r.getString("id"))
-                        .put("state", s)
-                        .put("prompt", r.getString("prompt"))
-                        .put("message", m)
-                        .put("updatedAt", System.currentTimeMillis())
-                        .toString());
+        TaskRecords.state(dir, r, s, m);
+    }
+
+    static final File RUNTIME_CONFIG = new File(ROOT, "runtime.json");
+
+    /** Codex unless runtime.json (or the request/env) positively selects a configured ACP agent. */
+    static RuntimeRouter router() {
+        return new RuntimeRouter(
+                CodexTaskRuntime.INSTANCE,
+                acpConfig -> new AcpRuntime(
+                        AcpRuntime.Options.fromJson(acpConfig),
+                        AcpProcessTransport.process(),
+                        TaskBroker::notifyUser,
+                        () -> {
+                            // Keep native UI RPC and the shared Codex chat server serviced while
+                            // the ACP turn owns this loop, as CodexAppServer.run does in its turn.
+                            try {
+                                CodexAppServer.tick();
+                                controls();
+                            } catch (Exception failure) {
+                                System.err.println("acp idle: " + failure);
+                            }
+                        }),
+                () -> {
+                    if (!RUNTIME_CONFIG.isFile()) return null;
+                    if (RUNTIME_CONFIG.length() > 65536) throw new IOException("runtime.json too large");
+                    return new JSONObject(read(RUNTIME_CONFIG));
+                },
+                System.getenv());
     }
 
     static String command(String... a) throws Exception {
@@ -147,6 +161,8 @@ public final class TaskBroker {
         retirePanelCapabilities();
         AccountBridge.start();
         NativeBridge.start();
+        try { PhoneMcpHost.start(); }
+        catch (Exception unavailable) { System.err.println("phone mcp host unavailable: " + unavailable.getMessage()); }
         MagpieSettings.start();
         for (; ; ) {
             File[] dirs = TASKS.listFiles();
@@ -239,7 +255,10 @@ public final class TaskBroker {
         String primary = command("/system/bin/dumpsys", "activity", "activities");
         write(new File(dir, "activity-before.txt"), primary);
         r.put("displayId",id);
-        CodexAppServer.run(dir, r);
+        RuntimeRouter router = router();
+        RuntimeRouter.Route route = router.route(r);
+        write(new File(dir, "runtime-route.json"), route.json().toString());
+        router.select(route).run(dir, r);
         notifyUser(r.getString("id"));
     }
 }

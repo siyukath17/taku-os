@@ -1,0 +1,671 @@
+package org.agentos.lab;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Agent Client Protocol (ACP) client runtime: drives a local ACP agent (the on-device
+ * {@code android_arm64} {@code agy acp}) over newline-delimited JSON-RPC 2.0 on stdio.
+ *
+ * <p>Lifecycle per task, one agent process per task so a crash never leaks into the next task:
+ * {@code initialize} → {@code session/new} (with the phone MCP server declarations; an
+ * {@code auth_required} error becomes {@code needs_user}) → {@code session/prompt} while
+ * {@code session/update} notifications stream progress → {@code session/cancel} when the task's
+ * {@code cancel} file appears or the turn budget runs out → process reclaimed.
+ *
+ * <p>Credentials: this runtime never reads, writes, copies or embeds credentials. Sign-in is the
+ * agent's own {@code oauth-personal} flow, performed by the user in the phone's browser; the
+ * runtime only reports that sign-in is needed.
+ */
+final class AcpRuntime implements TaskRuntime {
+    static final int PROTOCOL_VERSION = 1;
+    /** ACP's {@code auth_required} error code. */
+    static final int AUTH_REQUIRED = -32000;
+    static final String DEFAULT_LOGIN_METHOD = "oauth-personal";
+    private static final int MAX_LINE_CHARS = 8 * 1024 * 1024;
+    private static final int MAX_TEXT_CHARS = 1024 * 1024;
+    private static final int MAX_SCREENSHOT_BYTES = 3_000_000;
+
+    interface Notifier {
+        void taskUpdated(String taskId);
+    }
+
+    /** Parsed {@code runtime.json "acp"} object. Paths are on-device paths. */
+    static final class Options {
+        String binary = "";
+        String home = "/data/local/agentos/acp/home";
+        String appDataDir = "/data/local/agentos/acp/app-data";
+        String cwd = "/data/local/agentos/work";
+        String httpsProxy = "";
+        String loginMethod = DEFAULT_LOGIN_METHOD;
+        List<String> args = new ArrayList<>(List.of("acp"));
+        List<String> extraArgs = new ArrayList<>();
+        Map<String, String> extraEnv = new LinkedHashMap<>();
+        JSONArray mcpServers = new JSONArray();
+        /** The taku_phone MCP relay (see PhoneMcpHost); null disables it. */
+        JSONObject phoneMcp = defaultPhoneMcp();
+        long turnLimitMillis = TimeUnit.MINUTES.toMillis(15);
+        long cancelGraceMillis = TimeUnit.SECONDS.toMillis(10);
+        long requestTimeoutMillis = TimeUnit.SECONDS.toMillis(60);
+        long progressIntervalMillis = 500;
+
+        static JSONObject defaultPhoneMcp() {
+            try {
+                return new JSONObject()
+                        .put("command", "/system/bin/app_process")
+                        .put("args", new JSONArray().put("/system/bin").put("org.agentos.lab.PhoneMcpHost").put("relay"))
+                        .put("env", new JSONObject().put("CLASSPATH", "/system_ext/framework/agentos-task-broker.jar"));
+            } catch (Exception impossible) {
+                throw new IllegalStateException(impossible);
+            }
+        }
+
+        static Options fromJson(JSONObject c) throws Exception {
+            Options o = new Options();
+            if (c == null) return o;
+            o.binary = c.optString("binary", o.binary).trim();
+            o.home = c.optString("home", o.home);
+            o.appDataDir = c.optString("appDataDir", o.appDataDir);
+            o.cwd = c.optString("cwd", o.cwd);
+            o.httpsProxy = c.optString("httpsProxy", o.httpsProxy);
+            o.loginMethod = c.optString("loginMethod", o.loginMethod);
+            if (c.optJSONArray("args") != null) o.args = strings(c.getJSONArray("args"));
+            if (c.optJSONArray("extraArgs") != null) o.extraArgs = strings(c.getJSONArray("extraArgs"));
+            JSONObject env = c.optJSONObject("env");
+            if (env != null) for (java.util.Iterator<String> it = env.keys(); it.hasNext(); ) { String key = it.next(); o.extraEnv.put(key, env.getString(key)); }
+            if (c.optJSONArray("mcpServers") != null) o.mcpServers = new JSONArray(c.getJSONArray("mcpServers").toString());
+            if (c.has("phoneMcp")) o.phoneMcp = c.optJSONObject("phoneMcp");
+            o.turnLimitMillis = c.optLong("turnLimitMillis", o.turnLimitMillis);
+            o.cancelGraceMillis = c.optLong("cancelGraceMillis", o.cancelGraceMillis);
+            o.requestTimeoutMillis = c.optLong("requestTimeoutMillis", o.requestTimeoutMillis);
+            o.progressIntervalMillis = c.optLong("progressIntervalMillis", o.progressIntervalMillis);
+            return o;
+        }
+
+        private static List<String> strings(JSONArray array) throws Exception {
+            List<String> out = new ArrayList<>();
+            for (int i = 0; i < array.length(); i++) out.add(array.getString(i));
+            return out;
+        }
+    }
+
+    private final Options options;
+    private final AcpProcessTransport transport;
+    private final Notifier notifier;
+    private final Runnable idle;
+
+    AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle) {
+        this.options = options;
+        this.transport = transport;
+        this.notifier = notifier == null ? id -> {} : notifier;
+        this.idle = idle == null ? () -> {} : idle;
+    }
+
+    @Override
+    public String name() {
+        return RuntimeRouter.ACP;
+    }
+
+    /** The agent command line and environment. Auto-update is always disabled. */
+    AcpProcessTransport.Launch launch() {
+        List<String> command = new ArrayList<>();
+        command.add(options.binary);
+        command.addAll(options.args);
+        if (!options.appDataDir.isEmpty()) {
+            command.add("--app-data-dir");
+            command.add(options.appDataDir);
+        }
+        command.addAll(options.extraArgs);
+        Map<String, String> env = new LinkedHashMap<>();
+        env.put("HOME", options.home);
+        // A pinned on-device binary must never replace itself; the ROM owns its version.
+        env.put("AGY_DISABLE_AUTO_UPDATE", "1");
+        env.put("DISABLE_AUTO_UPDATE", "1");
+        env.put("NO_UPDATE_NOTIFIER", "1");
+        if (!options.httpsProxy.isEmpty()) {
+            env.put("HTTPS_PROXY", options.httpsProxy);
+            env.put("https_proxy", options.httpsProxy);
+        }
+        env.putAll(options.extraEnv);
+        return new AcpProcessTransport.Launch(command, env, options.cwd.isEmpty() ? null : new File(options.cwd));
+    }
+
+    @Override
+    public void run(File directory, JSONObject request) throws Exception {
+        if (new File(directory, "cancel").exists()) {
+            finish(directory, request, "cancelled", "Cancelled before execution.", null);
+            return;
+        }
+        TaskRecords.state(directory, request, "running", "Starting the on-device agent…");
+        notifier.taskUpdated(request.getString("id"));
+        AcpProcessTransport.Connection connection;
+        try {
+            // Best effort: a missing working directory would otherwise fail the start opaquely.
+            for (String path : new String[]{options.home, options.appDataDir, options.cwd})
+                if (!path.isEmpty()) new File(path).mkdirs();
+            connection = transport.start(launch());
+        } catch (IOException startFailed) {
+            diagnostic(directory, "start-failed", startFailed.getMessage(), "");
+            finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);
+            return;
+        }
+        Turn turn = new Turn(directory, request, connection);
+        try {
+            turn.execute();
+        } finally {
+            connection.destroy(Math.min(2000, options.cancelGraceMillis));
+        }
+    }
+
+    // ---- terminal records -------------------------------------------------------------------
+
+    private void finish(File directory, JSONObject request, String status, String message, String reply) throws Exception {
+        if (reply != null || !"cancelled".equals(status))
+            TaskRecords.write(new File(directory, "result.txt"), new JSONObject()
+                    .put("status", "cancelled".equals(status) ? "failed" : status)
+                    .put("message", reply == null || reply.isEmpty() ? message : reply)
+                    .put("evidence", new JSONArray()).toString());
+        TaskRecords.state(directory, request, status, message);
+        TaskRecords.write(new File(directory, "done"), status);
+        notifier.taskUpdated(request.getString("id"));
+    }
+
+    private static void diagnostic(File directory, String type, String detail, String stderrTail) throws Exception {
+        TaskRecords.write(new File(directory, "diagnostic.json"), new JSONObject()
+                .put("runtime", "acp").put("type", type)
+                .put("detail", redact(detail == null ? "" : detail))
+                .put("stderrTail", redact(stderrTail)).toString());
+    }
+
+    /** Diagnostics may hold agent stderr; never persist anything that looks like a credential. */
+    static String redact(String s) {
+        String out = s.replaceAll("eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "[hidden]")
+                .replaceAll("ya29\\.[A-Za-z0-9_.-]+", "[hidden]")
+                .replaceAll("1//[A-Za-z0-9_-]{20,}", "[hidden]")
+                .replaceAll("AIza[A-Za-z0-9_-]{30,}", "[hidden]")
+                .replaceAll("(?i)(Bearer\\s+|(?:access_token|refresh_token|id_token|token|secret|password|api_key|code)[\"']?\\s*[=:]\\s*[\"']?)[^\\s&\"',}]+", "$1[hidden]");
+        return out.length() > 4000 ? out.substring(out.length() - 4000) : out;
+    }
+
+    // ---- protocol errors ----------------------------------------------------------------------
+
+    static final class AcpError extends IOException {
+        final int code;
+
+        AcpError(int code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    private static final class AgentExited extends IOException {
+        AgentExited(String detail) { super(detail); }
+    }
+
+    private static final class CancelledEarly extends IOException {
+        CancelledEarly() { super("cancelled"); }
+    }
+
+    private static final class StopUnconfirmed extends IOException {
+        StopUnconfirmed() { super("stop unconfirmed"); }
+    }
+
+    private static final class NoResponse extends IOException {
+        NoResponse(String method) { super("no response to " + method); }
+    }
+
+    // ---- one task's conversation with the agent -------------------------------------------------
+
+    private static final Object EOF = new Object();
+
+    private final class Turn {
+        final File directory;
+        final JSONObject request;
+        final AcpProcessTransport.Connection connection;
+        final BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
+        final StringBuilder stderrTail = new StringBuilder();
+        final StringBuilder reply = new StringBuilder();
+        final Map<String, JSONObject> toolCalls = new LinkedHashMap<>();
+        final String permissionMode;
+        final OutputStream out;
+        long nextId = 1;
+        String sessionId = "";
+        boolean cancelSent, timedOut, inPrompt;
+        long turnDeadline, stopDeadline;
+        String summary = "", phase = "starting", plan = "";
+        long lastProgressWrite, lastIdle;
+        int permissionsAllowed, permissionsRejected, ignoredLines;
+
+        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection) {
+            this.directory = directory;
+            this.request = request;
+            this.connection = connection;
+            this.permissionMode = request.optString("permissionMode", "full");
+            this.out = connection.stdin();
+            this.lastIdle = System.nanoTime() - TimeUnit.SECONDS.toNanos(1);
+            startReaders();
+        }
+
+        void startReaders() {
+            Thread stdout = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.stdout(), StandardCharsets.UTF_8))) {
+                    StringBuilder line = new StringBuilder();
+                    int c;
+                    while ((c = reader.read()) != -1) {
+                        if (c == '\n') {
+                            inbox.put(line.toString());
+                            line.setLength(0);
+                        } else if (line.length() < MAX_LINE_CHARS) {
+                            line.append((char) c);
+                        } else {
+                            inbox.put(new AgentExited("agent sent an oversized message"));
+                            return;
+                        }
+                    }
+                    if (line.length() > 0) inbox.put(line.toString());
+                } catch (Exception ignored) {
+                    // A broken pipe is the agent going away: report EOF below.
+                } finally {
+                    inbox.offer(EOF);
+                }
+            }, "acp-stdout");
+            stdout.setDaemon(true);
+            stdout.start();
+            Thread stderr = new Thread(() -> {
+                try (InputStream in = connection.stderr()) {
+                    if (in == null) return;
+                    byte[] buffer = new byte[4096];
+                    int n;
+                    while ((n = in.read(buffer)) != -1) synchronized (stderrTail) {
+                        stderrTail.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
+                        if (stderrTail.length() > 8192) stderrTail.delete(0, stderrTail.length() - 8192);
+                    }
+                } catch (Exception ignored) {
+                    // Diagnostics only.
+                }
+            }, "acp-stderr");
+            stderr.setDaemon(true);
+            stderr.start();
+        }
+
+        String stderr() {
+            synchronized (stderrTail) {
+                return stderrTail.toString();
+            }
+        }
+
+        void execute() throws Exception {
+            String id = request.getString("id");
+            try {
+                JSONObject init = call("initialize", new JSONObject()
+                        .put("protocolVersion", PROTOCOL_VERSION)
+                        .put("clientCapabilities", new JSONObject()
+                                .put("fs", new JSONObject().put("readTextFile", false).put("writeTextFile", false))
+                                .put("terminal", false))
+                        .put("clientInfo", new JSONObject().put("name", "taku-os").put("version", "1")));
+                if (init.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
+                    diagnostic(directory, "protocol-version", init.optString("protocolVersion"), stderr());
+                    finish(directory, request, "failed", "The on-device agent speaks an unsupported ACP version. Update the ROM's agent, then retry.", null);
+                    return;
+                }
+                JSONArray authMethods = init.optJSONArray("authMethods");
+                JSONObject session;
+                try {
+                    session = call("session/new", new JSONObject()
+                            .put("cwd", options.cwd)
+                            .put("mcpServers", mcpServers()));
+                } catch (AcpError error) {
+                    if (error.code == AUTH_REQUIRED) {
+                        needsUser(authMethods);
+                        return;
+                    }
+                    throw error;
+                }
+                sessionId = session.getString("sessionId");
+                TaskRecords.write(new File(directory, "runtime-info.json"), new JSONObject()
+                        .put("taskId", id)
+                        .put("runtime", "acp")
+                        .put("protocolVersion", PROTOCOL_VERSION)
+                        .put("agentInfo", init.optJSONObject("agentInfo") == null ? JSONObject.NULL : init.getJSONObject("agentInfo"))
+                        .put("sessionId", sessionId)
+                        .put("turnStarted", true)
+                        .toString());
+                JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", request.getString("prompt")));
+                JSONObject image = screenshot(init);
+                if (image != null) prompt.put(image);
+                phase = "working";
+                progress("Taku is working. You can continue using your phone.", true);
+                inPrompt = true;
+                turnDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.turnLimitMillis);
+                JSONObject result;
+                try {
+                    result = call("session/prompt", new JSONObject().put("sessionId", sessionId).put("prompt", prompt));
+                } catch (AcpError error) {
+                    if (error.code == AUTH_REQUIRED) {
+                        needsUser(authMethods);
+                        return;
+                    }
+                    throw error;
+                }
+                completed(result.optString("stopReason", ""));
+            } catch (CancelledEarly cancelled) {
+                finish(directory, request, "cancelled", "Cancelled before execution.", null);
+            } catch (StopUnconfirmed unconfirmed) {
+                diagnostic(directory, "stop-unconfirmed", "", stderr());
+                finish(directory, request, "failed", "Stopping was not confirmed by the agent; its process was ended. Check the results of any actions.", null);
+            } catch (AgentExited exited) {
+                Integer code = waitExit();
+                diagnostic(directory, "agent-exited", exited.getMessage() + " exit=" + code, stderr());
+                finish(directory, request, "failed", "The on-device agent stopped unexpectedly. Check the results of any actions before retrying.", reply.length() == 0 ? null : reply.toString());
+            } catch (NoResponse silent) {
+                diagnostic(directory, "no-response", silent.getMessage(), stderr());
+                finish(directory, request, "failed", "The on-device agent did not respond. Retry later.", null);
+            } catch (AcpError error) {
+                diagnostic(directory, "agent-error", error.code + " " + error.getMessage(), stderr());
+                finish(directory, request, "failed", "The on-device agent reported an error. Check the results before retrying.", null);
+            }
+        }
+
+        /** Configured servers plus the per-task phone tool relay, in ACP's stdio declaration shape. */
+        JSONArray mcpServers() throws Exception {
+            JSONArray servers = new JSONArray(options.mcpServers.toString());
+            JSONObject phone = options.phoneMcp;
+            if (phone == null || phone.optString("command", "").isEmpty()) return servers;
+            JSONArray env = new JSONArray();
+            JSONObject configured = phone.optJSONObject("env");
+            if (configured != null) for (java.util.Iterator<String> it = configured.keys(); it.hasNext(); ) {
+                String key = it.next();
+                env.put(new JSONObject().put("name", key).put("value", configured.getString(key)));
+            }
+            env.put(new JSONObject().put("name", "TAKU_MCP_TASK").put("value", request.getString("id")));
+            env.put(new JSONObject().put("name", "TAKU_MCP_PERMISSION").put("value", permissionMode));
+            JSONArray args = phone.optJSONArray("args");
+            return servers.put(new JSONObject()
+                    .put("name", "taku_phone")
+                    .put("command", phone.getString("command"))
+                    .put("args", args == null ? new JSONArray() : new JSONArray(args.toString()))
+                    .put("env", env));
+        }
+
+        Integer waitExit() {
+            for (int i = 0; i < 20 && connection.alive(); i++) {
+                try { Thread.sleep(25); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
+            }
+            return connection.exitCode();
+        }
+
+        void completed(String stopReason) throws Exception {
+            String text = reply.toString().trim();
+            String status, message;
+            switch (stopReason) {
+                case "end_turn":
+                    status = "completed";
+                    message = text.isEmpty() ? "This turn has ended." : headline(text);
+                    break;
+                case "cancelled":
+                    status = timedOut ? "failed" : "cancelled";
+                    message = timedOut ? "Execution timed out. Check the results of any actions." : "Stopped. Completed actions will not be automatically undone.";
+                    break;
+                case "refusal":
+                    status = "failed";
+                    message = "The agent declined this request.";
+                    break;
+                default:
+                    status = "failed";
+                    message = "The agent stopped early (" + (stopReason.isEmpty() ? "unknown" : stopReason) + "). Check the results of any actions.";
+            }
+            progress(message, true);
+            finish(directory, request, status, message, text.isEmpty() ? null : text);
+        }
+
+        void needsUser(JSONArray methods) throws Exception {
+            JSONArray ids = new JSONArray();
+            boolean login = false;
+            if (methods != null) for (int i = 0; i < methods.length(); i++) {
+                JSONObject method = methods.optJSONObject(i);
+                if (method == null) continue;
+                ids.put(method.optString("id"));
+                if (options.loginMethod.equals(method.optString("id"))) login = true;
+            }
+            TaskRecords.write(new File(directory, "acp-auth.json"), new JSONObject()
+                    .put("state", "needs_user")
+                    .put("methods", ids)
+                    .put("loginMethod", login ? options.loginMethod : JSONObject.NULL)
+                    .put("updatedAt", System.currentTimeMillis()).toString());
+            finish(directory, request, "needs_user", login
+                    ? "Sign in to the on-device agent first: open Taku settings and sign in with Google in this phone's browser. Your request was kept; resubmit it after signing in."
+                    : "The on-device agent needs sign-in, but offers no supported sign-in method. Your request was kept.", null);
+        }
+
+        JSONObject screenshot(JSONObject init) throws Exception {
+            JSONObject capabilities = init.optJSONObject("agentCapabilities");
+            JSONObject prompt = capabilities == null ? null : capabilities.optJSONObject("promptCapabilities");
+            File file = new File(request.optString("screenshot", ""));
+            if (prompt == null || !prompt.optBoolean("image") || !file.isFile() || file.length() > MAX_SCREENSHOT_BYTES) return null;
+            byte[] bytes = new byte[(int) file.length()];
+            try (FileInputStream in = new FileInputStream(file)) {
+                int off = 0, n;
+                while (off < bytes.length && (n = in.read(bytes, off, bytes.length - off)) > 0) off += n;
+            }
+            return new JSONObject().put("type", "image").put("mimeType", "image/png").put("data", Base64.getEncoder().encodeToString(bytes));
+        }
+
+        // ---- JSON-RPC ---------------------------------------------------------------------------
+
+        void send(JSONObject message) throws Exception {
+            byte[] line = (message.put("jsonrpc", "2.0").toString() + "\n").getBytes(StandardCharsets.UTF_8);
+            try {
+                synchronized (out) {
+                    out.write(line);
+                    out.flush();
+                }
+            } catch (IOException broken) {
+                throw new AgentExited("agent stdin closed");
+            }
+        }
+
+        JSONObject call(String method, JSONObject params) throws Exception {
+            long id = nextId++;
+            send(new JSONObject().put("id", id).put("method", method).put("params", params));
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.requestTimeoutMillis);
+            for (; ; ) {
+                if (inPrompt) supervise();
+                else {
+                    if (new File(directory, "cancel").exists()) throw new CancelledEarly();
+                    if (System.nanoTime() > deadline) throw new NoResponse(method);
+                }
+                Object next = inbox.poll(100, TimeUnit.MILLISECONDS);
+                runIdle();
+                if (next == null) continue;
+                if (next == EOF) throw new AgentExited("agent closed stdout during " + method);
+                if (next instanceof IOException) throw (IOException) next;
+                JSONObject message;
+                try {
+                    message = new JSONObject((String) next);
+                } catch (Exception notJson) {
+                    ignoredLines++; // Agents may log to stdout; protocol lines are JSON objects.
+                    continue;
+                }
+                boolean response = message.has("id") && !message.has("method");
+                if (response) {
+                    if (message.optLong("id", -1) != id) continue; // A late answer to an abandoned request.
+                    if (message.has("error")) {
+                        JSONObject error = message.optJSONObject("error");
+                        throw new AcpError(error == null ? -32603 : error.optInt("code", -32603),
+                                error == null ? "error" : error.optString("message", "error"));
+                    }
+                    JSONObject result = message.optJSONObject("result");
+                    return result == null ? new JSONObject() : result;
+                }
+                if (message.has("id")) agentRequest(message);
+                else notification(message);
+            }
+        }
+
+        /** Cancellation and the fixed turn budget; the budget is never renewed by activity. */
+        void supervise() throws Exception {
+            long now = System.nanoTime();
+            if (!cancelSent) {
+                boolean cancel = new File(directory, "cancel").exists();
+                if (cancel || now > turnDeadline) {
+                    timedOut = !cancel;
+                    send(new JSONObject().put("method", "session/cancel").put("params", new JSONObject().put("sessionId", sessionId)));
+                    cancelSent = true;
+                    stopDeadline = now + TimeUnit.MILLISECONDS.toNanos(options.cancelGraceMillis);
+                    phase = "stopping";
+                    progress("Stopping. Completed actions will not be automatically undone.", true);
+                }
+            } else if (now > stopDeadline) {
+                throw new StopUnconfirmed();
+            }
+        }
+
+        /** At most every 150ms, even while the agent streams continuously. */
+        void runIdle() {
+            long now = System.nanoTime();
+            if (now - lastIdle < TimeUnit.MILLISECONDS.toNanos(150)) return;
+            lastIdle = now;
+            try {
+                idle.run();
+            } catch (RuntimeException failure) {
+                System.err.println("acp idle hook: " + failure);
+            }
+        }
+
+        void agentRequest(JSONObject message) throws Exception {
+            Object id = message.get("id");
+            String method = message.optString("method");
+            if ("session/request_permission".equals(method)) {
+                send(new JSONObject().put("id", id).put("result", new JSONObject().put("outcome", permission(message.optJSONObject("params")))));
+                return;
+            }
+            // We declared no fs/terminal capabilities; anything else is unsupported.
+            send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32601).put("message", "Method not found: " + method)));
+        }
+
+        /** Map the task's permission mode onto the agent's offered options. */
+        JSONObject permission(JSONObject params) throws Exception {
+            if (cancelSent || params == null) return new JSONObject().put("outcome", "cancelled");
+            JSONArray offered = params.optJSONArray("options");
+            boolean allow = "full".equals(permissionMode);
+            String[] preference = allow ? new String[]{"allow_once", "allow_always"} : new String[]{"reject_once", "reject_always"};
+            if (offered != null) for (String kind : preference)
+                for (int i = 0; i < offered.length(); i++) {
+                    JSONObject option = offered.optJSONObject(i);
+                    if (option != null && kind.equals(option.optString("kind"))) {
+                        if (allow) permissionsAllowed++;
+                        else permissionsRejected++;
+                        return new JSONObject().put("outcome", "selected").put("optionId", option.optString("optionId"));
+                    }
+                }
+            permissionsRejected++;
+            return new JSONObject().put("outcome", "cancelled");
+        }
+
+        void notification(JSONObject message) throws Exception {
+            if (!"session/update".equals(message.optString("method"))) return;
+            JSONObject params = message.optJSONObject("params");
+            if (params == null || !sessionId.equals(params.optString("sessionId"))) return;
+            JSONObject update = params.optJSONObject("update");
+            if (update == null) return;
+            switch (update.optString("sessionUpdate")) {
+                case "agent_message_chunk": {
+                    JSONObject content = update.optJSONObject("content");
+                    if (content != null && "text".equals(content.optString("type")) && reply.length() < MAX_TEXT_CHARS)
+                        reply.append(content.optString("text"));
+                    if (!"stopping".equals(phase)) phase = "replying";
+                    progress("Writing the result…", false);
+                    break;
+                }
+                case "agent_thought_chunk":
+                    if (!"stopping".equals(phase)) phase = "thinking";
+                    progress("Thinking…", false);
+                    break;
+                case "tool_call": {
+                    String toolId = update.optString("toolCallId");
+                    JSONObject call = new JSONObject().put("title", update.optString("title", "tool"))
+                            .put("kind", update.optString("kind", "other")).put("status", update.optString("status", "pending"));
+                    toolCalls.put(toolId, call);
+                    if (!"stopping".equals(phase)) phase = "tool";
+                    progress("Working: " + clip(call.getString("title"), 80), true);
+                    break;
+                }
+                case "tool_call_update": {
+                    JSONObject call = toolCalls.get(update.optString("toolCallId"));
+                    if (call == null) {
+                        call = new JSONObject().put("title", "tool").put("kind", "other").put("status", "pending");
+                        toolCalls.put(update.optString("toolCallId"), call);
+                    }
+                    if (update.has("title") && !update.isNull("title")) call.put("title", update.optString("title"));
+                    if (update.has("status") && !update.isNull("status")) call.put("status", update.optString("status"));
+                    progress("Working: " + clip(call.getString("title"), 80), false);
+                    break;
+                }
+                case "plan": {
+                    JSONArray entries = update.optJSONArray("entries");
+                    int total = entries == null ? 0 : entries.length(), done = 0;
+                    for (int i = 0; i < total; i++)
+                        if ("completed".equals(entries.getJSONObject(i).optString("status"))) done++;
+                    plan = done + "/" + total;
+                    progress("Plan " + plan + " steps done", false);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        /** Throttled progress for the Dynamic Island: progress.json plus a short state message. */
+        void progress(String text, boolean force) throws Exception {
+            long now = System.currentTimeMillis();
+            boolean changed = !text.equals(summary);
+            if (!force && (!changed || now - lastProgressWrite < options.progressIntervalMillis)) return;
+            summary = text;
+            lastProgressWrite = now;
+            int completedTools = 0;
+            for (JSONObject call : toolCalls.values()) if ("completed".equals(call.optString("status"))) completedTools++;
+            TaskRecords.write(new File(directory, "progress.json"), new JSONObject()
+                    .put("taskId", request.getString("id"))
+                    .put("runtime", "acp")
+                    .put("phase", phase)
+                    .put("summary", text)
+                    .put("toolCalls", toolCalls.size())
+                    .put("toolCallsCompleted", completedTools)
+                    .put("plan", plan)
+                    .put("replyChars", reply.length())
+                    .put("permissionsAllowed", permissionsAllowed)
+                    .put("permissionsRejected", permissionsRejected)
+                    .put("updatedAt", now).toString());
+            TaskRecords.state(directory, request, "running", text);
+            if (changed) notifier.taskUpdated(request.getString("id"));
+        }
+    }
+
+    static String clip(String text, int max) {
+        return text.length() <= max ? text : text.substring(0, max - 1) + "…";
+    }
+
+    static String headline(String text) {
+        String first = text.strip();
+        int newline = first.indexOf('\n');
+        if (newline > 0) first = first.substring(0, newline).strip();
+        return clip(first, 240);
+    }
+}
