@@ -221,6 +221,29 @@ Resubmit the kept request afterwards.
 While an ACP task runs, its background-task notification also carries a `taku.island.v1` progress card
 (phase, current tool, plan progress; sign-in action on `needs_user`). Codex tasks are unchanged.
 
+### Remote T3 lane (`remote_t3`)
+
+`runtime.json` can also send background tasks to a remote T3 Code host (VPS/Mac). Same provider:
+
+```sh
+content call --uri $A --method acp --arg '{"action":"update","patch":{"default":"remote_t3","remoteT3":{"endpoint":"https://t3.example.ts.net","tokenEnv":"TAKU_REMOTE_T3_TOKEN","projectId":"taku","model":"claude-opus-5-5","pollIntervalMs":2000}}}'
+content call --uri $A --method acp --arg '{"action":"update","patch":{"remoteT3":{"model":"claude-sonnet-5-5"}}}'
+```
+
+`read` adds `remoteT3:{endpoint,tokenEnv,tokenFile,tokenSource,tokenPresent,projectId,environmentId,model,pollIntervalMs,requestTimeoutMs,turnLimitMs,configured,valid}`
+(or `{valid:false,configured:false,error}`); `effectiveDefault` is `remote_t3` only when an endpoint and a token reference are set.
+The token itself is never stored or returned: `tokenEnv` names a broker environment variable, `tokenFile` a single-token file under
+`/data/local/agentos/` or `/data/misc/agentos/` (setting one clears the other). `default` accepts `remote_t3`. Writable `remoteT3` keys:
+`endpoint` (`https://…`, or `http://127.0.0.1…`/`http://100.64–127.x.x…`; no credentials/query/fragment), `tokenEnv`, `tokenFile`,
+`projectId`, `environmentId` (`[A-Za-z0-9._:-]{1,128}`), `model` (`[A-Za-z0-9._:/@+-]{1,128}`), `pollIntervalMs` (250–60000).
+ADB shell may set only `projectId`, `environmentId`, `model`, `pollIntervalMs` (`PRIVILEGED_FIELD:remoteT3.endpoint|tokenEnv|tokenFile`).
+Errors: `INVALID_REMOTE_T3`, `UNKNOWN_FIELD:remoteT3.<key>`, `PLAINTEXT_TOKEN_NOT_ALLOWED`, `INVALID_ENDPOINT`, `INSECURE_ENDPOINT`,
+`ENDPOINT_CREDENTIALS_NOT_ALLOWED`, `INVALID_TOKEN_ENV`, `INVALID_TOKEN_FILE`, `TOKEN_FILE_LOCATION_NOT_ALLOWED`,
+`AMBIGUOUS_TOKEN_REFERENCE`, `INVALID_PROJECT_ID`, `INVALID_ENVIRONMENT_ID`, `INVALID_MODEL`, `INVALID_POLL_INTERVAL`.
+A task request may set `"runtime":"remote_t3"` and `"remoteT3":{"projectId"|"environmentId"|"model"}` only. Remote tasks show the
+same island progress card; `needs_user` means the remote host rejected or lacks the token (no Sign in action). See
+`system/assistant/ACP_RUNTIME.md` for the wire contract and outcomes.
+
 ## Screen suggestions
 
 ```sh

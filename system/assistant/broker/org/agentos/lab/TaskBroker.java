@@ -56,7 +56,24 @@ public final class TaskBroker {
         return AcpRuntimeSettings.control(RUNTIME_CONFIG, input, ACP_AUTH);
     }
 
-    /** Codex unless runtime.json (or the request/env) positively selects a configured ACP agent. */
+    /**
+     * Keep native UI RPC and the shared Codex chat server serviced while an ACP or remote T3 turn
+     * owns this loop, as CodexAppServer.run does in its turn.
+     */
+    static void serviceWhileTurnRuns(String lane) {
+        try {
+            CodexAppServer.tick();
+            controls();
+        } catch (Exception failure) {
+            System.err.println(lane + " idle: " + failure);
+        }
+    }
+
+    /**
+     * Codex unless runtime.json (or the request/env) positively selects a configured ACP agent or
+     * remote T3 host. The remote token is resolved per task from the broker environment or a
+     * root-owned file named in runtime.json; it is never stored there.
+     */
     static RuntimeRouter router() {
         return new RuntimeRouter(
                 CodexTaskRuntime.INSTANCE,
@@ -64,16 +81,17 @@ public final class TaskBroker {
                         AcpRuntime.Options.fromJson(acpConfig),
                         AcpProcessTransport.process(),
                         TaskBroker::notifyUser,
-                        () -> {
-                            // Keep native UI RPC and the shared Codex chat server serviced while
-                            // the ACP turn owns this loop, as CodexAppServer.run does in its turn.
-                            try {
-                                CodexAppServer.tick();
-                                controls();
-                            } catch (Exception failure) {
-                                System.err.println("acp idle: " + failure);
-                            }
-                        }),
+                        () -> serviceWhileTurnRuns("acp")),
+                remoteConfig -> {
+                    RemoteT3Runtime.Options options = RemoteT3Runtime.Options.fromJson(remoteConfig);
+                    return new RemoteT3Runtime(
+                            options,
+                            RemoteT3Transport.http(),
+                            RemoteT3Runtime.tokenSource(options, System.getenv()),
+                            TaskBroker::notifyUser,
+                            () -> serviceWhileTurnRuns("remote_t3"),
+                            RemoteT3Runtime.Clock.SYSTEM);
+                },
                 // Same loader and bounds as the acpRuntime settings interface.
                 () -> AcpRuntimeSettings.load(RUNTIME_CONFIG),
                 System.getenv());

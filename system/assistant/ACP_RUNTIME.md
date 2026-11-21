@@ -17,6 +17,13 @@ Precedence: `request.json "runtime"` > env `TAKU_TASK_RUNTIME` > `runtime.json "
 | `acp` for a chat turn, panel update or agent control | codex | `acp-ineligible:*` |
 | `acp` without `acp.binary` | codex | `acp-unconfigured` |
 | `acp` for a background task, binary configured | acp | `selected-by-{request,env,config}` |
+| `remote_t3` for a chat turn, panel update or agent control | codex | `remote-t3-ineligible:*` |
+| `remote_t3` without `remoteT3` endpoint + token reference | codex | `remote-t3-unconfigured` |
+| `remote_t3` with an invalid `remoteT3` (e.g. plain-text token, insecure endpoint) | codex | `remote-t3-invalid` |
+| `request.remoteT3` naming anything but `projectId`/`environmentId`/`model` | codex | `remote-t3-request-invalid` |
+| `remote_t3` for a background task, configured | remote_t3 | `selected-by-{request,env,config}` |
+
+The remote T3 lane is described in [Remote T3 runtime](#remote-t3-runtime-second-lane).
 
 ## `runtime.json`
 
@@ -145,9 +152,80 @@ child (`app_process … PhoneMcpHost relay`) to the broker socket `taku-phone-mc
 That socket serves root and system peers only, and the thread identity is
 `acp-<taskId>`.
 
+## Remote T3 runtime (second lane)
+
+`RemoteT3Runtime` hands a background task to a T3 Code host on a VPS or Mac and reconciles the
+remote run into the same task records. The phone only dispatches and watches; the heavy work
+runs remotely.
+
+```json
+{
+  "default": "remote_t3",
+  "remoteT3": {
+    "endpoint": "https://t3.example.ts.net",
+    "tokenEnv": "TAKU_REMOTE_T3_TOKEN",
+    "projectId": "taku",
+    "environmentId": "vps-1",
+    "model": "claude-opus-5-5",
+    "pollIntervalMs": 2000
+  }
+}
+```
+
+- `endpoint`: `https://…`, or plain `http` only to `127.0.0.1` or a Tailscale address
+  (`100.64.0.0/10`, the tunnel encrypts). No credentials, query or fragment; redirects are never followed.
+- Token: a **reference** only. Use `tokenEnv` (a variable in the broker's environment) or `tokenFile`
+  (a single-token file under `/data/local/agentos/` or `/data/misc/agentos/`, ≤4 KiB), not both.
+  `token`, `apiKey`, `secret`, `password`, `authorization`, `bearer`, `accessToken` keys are refused
+  (`PLAINTEXT_TOKEN_NOT_ALLOWED`), both on write and in a hand-edited file (the router then falls back to Codex).
+  The token is resolved per task, kept in memory, sent only as `Authorization: Bearer` to the endpoint,
+  and scrubbed verbatim and by pattern from `diagnostic.json`, `progress.json`, `state.json` and `result.txt`.
+- Optional, not writable through settings: `requestTimeoutMs` (15 s), `turnLimitMs` (60 min),
+  `unreachableLimitMs` (3 min), `cancelGraceMs` (30 s), `progressIntervalMs` (1 s), `maxSubmitAttempts` (5).
+- A task may set `request.runtime: "remote_t3"` and override `request.remoteT3.projectId|environmentId|model`.
+  It can never override the endpoint or the token reference.
+
+**Wire contract (v1, assumed; implement it as a thin bridge in front of T3 Code).** No public T3 Code
+HTTP API was available to verify against, so `RemoteT3Transport.Http` speaks this small versioned contract:
+
+| Call | Request | Response |
+| --- | --- | --- |
+| submit | `POST {endpoint}/api/taku/v1/runs`, header `Idempotency-Key: taku-task-<id>`, body `{clientTaskId,prompt,source,projectId?,environmentId?,model?,permissionMode?}` | `{runId,threadId?,status}` |
+| status | `GET {endpoint}/api/taku/v1/runs/{runId}` | `{runId,status,phase?,summary?,tool?,progress?{done,total},result?{message},error?{code,message}}` |
+| interrupt | `POST {endpoint}/api/taku/v1/runs/{runId}/interrupt` | `{status}` |
+
+`status` is `queued|running|completed|failed|cancelled`; `phase` (`thinking|tool|replying`) and
+`progress` drive the island. The screenshot and other local paths never leave the phone.
+
+**Lifecycle and outcomes.**
+
+| Situation | Task state | `diagnostic.json` type |
+| --- | --- | --- |
+| remote `completed` | `completed`, reply in `result.txt` | – |
+| `cancel` marker → interrupt → remote `cancelled` | `cancelled` | – |
+| interrupt not confirmed within `cancelGraceMs` | `failed` | `stop-unconfirmed` |
+| `turnLimitMs` reached → interrupt (confirmed or not) | `failed` | – / `timeout` |
+| transient submit failures (timeouts, 408/425/429/5xx) | retried with backoff 0.5→8 s, same idempotency key | `unreachable` after `maxSubmitAttempts` |
+| transient status failures | keep polling | `unreachable` after `unreachableLimitMs` without contact |
+| 401/403 (submit or poll), token missing/unreadable | `needs_user` (no retry; fix the token reference) | `auth-failed` / `token-missing` |
+| other 4xx on submit / status, 404 on status | `failed` | `submit-rejected` / `status-rejected` / `run-lost` |
+| remote `failed` | `failed`, message carries the redacted reason | `remote-failed` |
+
+`runtime-info.json` records `runId`, `threadId`, `endpointHost`, `projectId`, `environmentId`, `model`.
+`progress.json` has the same shape as ACP's (`runtime: "remote_t3"`, plus `remoteStatus`), throttled by
+`progressIntervalMs` and refreshed at least every 60 s so a quiet but healthy run never looks stale.
+`AcpIslandProjection` projects `remote_t3` tasks too (titles such as "Sending to remote T3" and
+"Waiting for remote T3"); remote `needs_user` never offers the on-device **Sign in** action.
+
+**Known limitation.** `TaskBroker` runs tasks one at a time, so a remote run occupies the broker
+queue until it ends (the idle callback keeps native RPC and Codex chat serviced, as with ACP).
+`TaskBroker.run` also still prepares the virtual display and context screenshot before routing; the
+remote lane does not use them.
+
 ## Tests
 
 `bash system/assistant/test-acp-runtime-host.sh` runs against an in-process fake ACP agent:
-router, ACP lifecycle, MCP bridge, settings read/write and validation, sign-in URL capture
+router, ACP lifecycle, the remote T3 lifecycle (`RemoteT3RuntimeTest`: in-memory remote host in
+virtual time, plus the `HttpURLConnection` binding against a loopback server), MCP bridge, settings read/write and validation, sign-in URL capture
 and browser hand-off (mock `IntentLauncher`), and island projections checked against
 SystemUI's own `IslandPayload` parser (host stand-ins for `android.util.JsonReader`).

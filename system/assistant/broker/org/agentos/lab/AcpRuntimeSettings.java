@@ -15,6 +15,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -22,19 +23,29 @@ import java.util.Set;
  * provider and the GUI all read and validate through this class, so an Agent and the GUI can never
  * disagree about what is stored or what is accepted.
  *
- * <p>Writable through {@link #update}: {@code default} ({@code codex} | {@code acp} | null to
- * clear) and {@code acp.binary}, {@code acp.httpsProxy}, {@code acp.extraArgs}. Every other key in
- * the file is preserved untouched. Writes are atomic (temp file + fsync + atomic rename), owner-only,
- * size-bounded, and guarded by an optional optimistic {@code expectedRevision}.
+ * <p>Writable through {@link #update}: {@code default} ({@code codex} | {@code acp} |
+ * {@code remote_t3} | null to clear), {@code acp.binary}, {@code acp.httpsProxy},
+ * {@code acp.extraArgs}, and the {@code remoteT3} fields in {@link #REMOTE_PATCH_KEYS}. Every other key
+ * in the file is preserved untouched. Writes are atomic (temp file + fsync + atomic rename),
+ * owner-only, size-bounded, and guarded by an optional optimistic {@code expectedRevision}.
  *
  * <p>Reads never expose {@code acp.env} values (they may hold provider keys): only their names.
+ * {@code remoteT3} stores only a token <em>reference</em> ({@code tokenEnv} or a root-owned
+ * {@code tokenFile}); a plain-text token is refused on write and never read back.
  */
 final class AcpRuntimeSettings {
     static final int MAX_BYTES = 65536;
     static final int MAX_EXTRA_ARGS = 16, MAX_ARG_CHARS = 256, MAX_PATH_CHARS = 512, MAX_PROXY_CHARS = 512;
     /** Flags the runtime manages itself; letting extraArgs repeat them would split the agent's state. */
     static final Set<String> MANAGED_FLAGS = Set.of("--app-data-dir");
-    static final Set<String> PATCH_KEYS = Set.of("default", "acp");
+    static final Set<String> PATCH_KEYS = Set.of("default", "acp", RuntimeRouter.REMOTE_T3_KEY);
+    static final Set<String> RUNTIMES = Set.of(RuntimeRouter.CODEX, RuntimeRouter.ACP, RuntimeRouter.REMOTE_T3);
+    static final Set<String> REMOTE_PATCH_KEYS = Set.of("endpoint", "tokenEnv", "tokenFile", "projectId", "environmentId", "model", "pollIntervalMs");
+    /**
+     * Where the bearer token goes and where it comes from: only root/system may change these, or an
+     * ADB shell could point the root broker's token at a listener of its own.
+     */
+    static final Set<String> REMOTE_PRIVILEGED_KEYS = Set.of("endpoint", "tokenEnv", "tokenFile");
     static final Set<String> ACP_PATCH_KEYS = Set.of("binary", "httpsProxy", "extraArgs");
     /**
      * The broker runs as root and executes {@code acp.binary}: it must live where only root (or the
@@ -59,6 +70,11 @@ final class AcpRuntimeSettings {
 
     /** Agent-facing view: stored values plus the effective defaults, without secret env values. */
     static JSONObject read(File file) throws Exception {
+        return read(file, System.getenv());
+    }
+
+    /** {@code env} is the broker environment {@code remoteT3.tokenEnv} resolves against (presence only). */
+    static JSONObject read(File file, Map<String, String> env) throws Exception {
         JSONObject out = new JSONObject().put("path", file.getPath());
         JSONObject stored;
         try {
@@ -84,9 +100,22 @@ final class AcpRuntimeSettings {
                 .put("envNames", new JSONArray(effective.extraEnv.keySet()))
                 .put("loginMethod", effective.loginMethod);
         out.put("acp", view);
+        boolean remoteReady = false;
+        JSONObject remoteStored = stored.optJSONObject(RuntimeRouter.REMOTE_T3_KEY);
+        try {
+            RemoteT3Runtime.Options remote = RemoteT3Runtime.Options.fromJson(remoteStored);
+            out.put(RuntimeRouter.REMOTE_T3_KEY, remote.view(env).put("valid", true));
+            remoteReady = remote.configured();
+        } catch (Exception invalidRemote) {
+            // Never echo the stored object: a hand-edited file may hold a plain-text token.
+            out.put(RuntimeRouter.REMOTE_T3_KEY, new JSONObject().put("valid", false).put("configured", false)
+                    .put("error", invalidRemote instanceof Invalid ? invalidRemote.getMessage() : "RUNTIME_CONFIG_INVALID"));
+        }
         // What a background task without request/env overrides would actually use (see RuntimeRouter).
         boolean acpReady = RuntimeRouter.ACP.equals(def) && !effective.binary.isEmpty();
-        out.put("effectiveDefault", acpReady ? RuntimeRouter.ACP : RuntimeRouter.CODEX);
+        String effectiveDefault = acpReady ? RuntimeRouter.ACP
+                : RuntimeRouter.REMOTE_T3.equals(def) && remoteReady ? RuntimeRouter.REMOTE_T3 : RuntimeRouter.CODEX;
+        out.put("effectiveDefault", effectiveDefault);
         return out;
     }
 
@@ -106,6 +135,10 @@ final class AcpRuntimeSettings {
         if (patch == null || patch.length() == 0) throw new Invalid("EMPTY_PATCH");
         JSONObject acpPatchProbe = patch.optJSONObject(RuntimeRouter.ACP);
         if (!privileged && acpPatchProbe != null && acpPatchProbe.has("extraArgs")) throw new Invalid("PRIVILEGED_FIELD:acp.extraArgs");
+        JSONObject remotePatchProbe = patch.optJSONObject(RuntimeRouter.REMOTE_T3_KEY);
+        if (!privileged && remotePatchProbe != null)
+            for (String key : REMOTE_PRIVILEGED_KEYS)
+                if (remotePatchProbe.has(key)) throw new Invalid("PRIVILEGED_FIELD:remoteT3." + key);
         String current = revision(file);
         if (expectedRevision != null && !expectedRevision.isEmpty() && !expectedRevision.equals(current))
             throw new Invalid("REVISION_CONFLICT");
@@ -129,8 +162,7 @@ final class AcpRuntimeSettings {
                 Object value = patch.get("default");
                 if (!(value instanceof String)) throw new Invalid("INVALID_DEFAULT");
                 String runtime = ((String) value).trim();
-                if (!RuntimeRouter.CODEX.equals(runtime) && !RuntimeRouter.ACP.equals(runtime))
-                    throw new Invalid("INVALID_DEFAULT");
+                if (!RUNTIMES.contains(runtime)) throw new Invalid("INVALID_DEFAULT");
                 stored.put("default", runtime);
             }
         }
@@ -158,6 +190,41 @@ final class AcpRuntimeSettings {
                 }
             }
             stored.put(RuntimeRouter.ACP, acp);
+        }
+        if (patch.has(RuntimeRouter.REMOTE_T3_KEY)) {
+            Object raw = patch.get(RuntimeRouter.REMOTE_T3_KEY);
+            if (!(raw instanceof JSONObject)) throw new Invalid("INVALID_REMOTE_T3");
+            JSONObject remotePatch = (JSONObject) raw;
+            JSONObject remote = stored.optJSONObject(RuntimeRouter.REMOTE_T3_KEY);
+            if (remote == null) {
+                if (stored.has(RuntimeRouter.REMOTE_T3_KEY)) throw new Invalid("RUNTIME_CONFIG_INVALID");
+                remote = new JSONObject();
+            }
+            for (Iterator<String> it = remotePatch.keys(); it.hasNext(); ) {
+                String key = it.next();
+                if (RemoteT3Runtime.SECRET_KEYS.contains(key.toLowerCase(Locale.ROOT))) throw new Invalid("PLAINTEXT_TOKEN_NOT_ALLOWED");
+                if (!REMOTE_PATCH_KEYS.contains(key)) throw new Invalid("UNKNOWN_FIELD:remoteT3." + key);
+                if (remotePatch.isNull(key)) {
+                    remote.remove(key);
+                    continue;
+                }
+                Object value = remotePatch.get(key);
+                switch (key) {
+                    case "endpoint": remote.put(key, RemoteT3Runtime.endpoint(value)); break;
+                    case "tokenEnv": remote.put(key, RemoteT3Runtime.tokenEnv(value)); break;
+                    case "tokenFile": remote.put(key, RemoteT3Runtime.tokenFile(value)); break;
+                    case "projectId": remote.put(key, RemoteT3Runtime.identifier(value, "INVALID_PROJECT_ID")); break;
+                    case "environmentId": remote.put(key, RemoteT3Runtime.identifier(value, "INVALID_ENVIRONMENT_ID")); break;
+                    case "model": remote.put(key, RemoteT3Runtime.model(value)); break;
+                    default: remote.put(key, RemoteT3Runtime.bounded(value, 250, 60_000, "INVALID_POLL_INTERVAL")); break;
+                }
+            }
+            // Switching references: setting one clears the other so exactly one source stays.
+            if (!remote.optString("tokenEnv", "").isEmpty() && remotePatch.has("tokenEnv") && !remotePatch.has("tokenFile")) remote.remove("tokenFile");
+            if (!remote.optString("tokenFile", "").isEmpty() && remotePatch.has("tokenFile") && !remotePatch.has("tokenEnv")) remote.remove("tokenEnv");
+            // The router must accept what we store (also refuses a hand-edited plain-text token).
+            RemoteT3Runtime.Options.fromJson(remote);
+            stored.put(RuntimeRouter.REMOTE_T3_KEY, remote);
         }
         // The router must accept what we store: parse it exactly as a task start would.
         AcpRuntime.Options.fromJson(stored.optJSONObject(RuntimeRouter.ACP));

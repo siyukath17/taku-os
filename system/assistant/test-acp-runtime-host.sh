@@ -1,6 +1,7 @@
 #!/bin/bash
-# ACP runtime, runtime router, phone MCP bridge, runtime.json settings, the oauth-personal sign-in
-# trigger and the progress.json -> taku.island.v1 projection: host tests with an in-process fake ACP agent.
+# ACP runtime, remote T3 runtime, runtime router, phone MCP bridge, runtime.json settings, the
+# oauth-personal sign-in trigger and the progress.json -> taku.island.v1 projection: host tests with an
+# in-process fake ACP agent, an in-memory remote T3 host and a loopback HTTP server.
 # Production sources compile first against android.jar ALONE (Android's org.json: checked
 # JSONException, no keySet), then against the host json jar ALONE (no Android dependency).
 set -euo pipefail
@@ -19,6 +20,8 @@ task_sources=(
  system/assistant/broker/org/agentos/lab/PhoneMcpBridge.java
  system/assistant/broker/org/agentos/lab/AcpRuntimeSettings.java
  system/assistant/broker/org/agentos/lab/AcpAuthHelper.java
+ system/assistant/broker/org/agentos/lab/RemoteT3Transport.java
+ system/assistant/broker/org/agentos/lab/RemoteT3Runtime.java
  system/assistant/src/org/agentos/assistant/AcpIslandProjection.java
 )
 "$JDK/bin/javac" --release 17 -cp "$ANDROID_JAR" -d "$task_out/android-check" "${task_sources[@]}"
@@ -31,9 +34,10 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpRuntimeSettingsTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpAuthHelperTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpIslandProjectionTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/RemoteT3RuntimeTest.java \
  system/assistant/tests/acp-runtime/android/util/JsonReader.java \
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
-for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest; do
+for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest RemoteT3RuntimeTest; do
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" "org.agentos.lab.$test"
 done | tee "$task_out/result.txt"

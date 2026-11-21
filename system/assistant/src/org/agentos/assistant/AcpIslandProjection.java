@@ -9,15 +9,17 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Projects an ACP task's records (runtime-route.json, state.json, the throttled progress.json and
- * acp-auth.json) into a {@code taku.island.v1} payload for the background-task notification.
+ * Projects an ACP or remote T3 task's records (runtime-route.json, state.json, the throttled
+ * progress.json and, for ACP, acp-auth.json) into a {@code taku.island.v1} payload for the
+ * background-task notification. Both runtimes write the same progress.json shape.
  *
- * <p>Returns null for every task the ACP runtime did not run, and for unreadable records, so the
+ * <p>Returns null for every task neither runtime ran (Codex), and for unreadable records, so the
  * Codex path and the existing notification stay exactly as before. Pure Java + org.json: no
  * Android types, so host tests check the output against SystemUI's own parser.
  */
 public final class AcpIslandProjection {
     public static final String PIC = "taku", OPEN = "open", SIGN_IN = "sign_in";
+    public static final String ACP = "acp", REMOTE_T3 = "remote_t3";
     static final int MAX_RECORD_BYTES = 256 * 1024;
 
     /** The island payload plus which actions the caller must attach (keys of taku.island.actions). */
@@ -35,24 +37,32 @@ public final class AcpIslandProjection {
 
     private AcpIslandProjection() {}
 
-    /** Reads the task directory; null unless runtime-route.json says this task ran on ACP. */
+    /** Reads the task directory; null unless runtime-route.json says this task ran on ACP or remote T3. */
     public static Projection fromTaskDirectory(File directory, String taskId) {
         try {
             JSONObject route = record(new File(directory, "runtime-route.json"));
-            if (route == null || !"acp".equals(route.optString("runtime"))) return null;
+            String runtime = route == null ? "" : route.optString("runtime");
+            if (!ACP.equals(runtime) && !REMOTE_T3.equals(runtime)) return null;
             JSONObject state = record(new File(directory, "state.json"));
             if (state == null || !taskId.equals(state.optString("id"))) return null;
             JSONObject progress = record(new File(directory, "progress.json"));
             if (progress != null && !taskId.equals(progress.optString("taskId"))) progress = null;
-            JSONObject auth = record(new File(directory, "acp-auth.json"));
-            return project(state, progress, auth);
+            // The on-device sign-in belongs to ACP only; remote T3 credentials are fixed in settings.
+            JSONObject auth = ACP.equals(runtime) ? record(new File(directory, "acp-auth.json")) : null;
+            return project(runtime, state, progress, auth);
         } catch (Exception unreadable) {
             return null; // A torn or damaged record falls back to the plain notification.
         }
     }
 
-    /** The mapping itself. {@code progress} and {@code auth} may be null. */
+    /** The ACP mapping. {@code progress} and {@code auth} may be null. */
     public static Projection project(JSONObject state, JSONObject progress, JSONObject auth) throws Exception {
+        return project(ACP, state, progress, auth);
+    }
+
+    /** The mapping itself for {@code runtime} ({@code acp} or {@code remote_t3}). */
+    public static Projection project(String runtime, JSONObject state, JSONObject progress, JSONObject auth) throws Exception {
+        boolean remote = REMOTE_T3.equals(runtime);
         String status = state.optString("state");
         String phase = progress == null ? "starting" : progress.optString("phase", "starting");
         String summary = progress != null && !progress.optString("summary").isEmpty()
@@ -75,8 +85,18 @@ public final class AcpIslandProjection {
                     }
                     case "replying": title = "Taku is writing the result"; trailing = "Writing"; break;
                     case "stopping": title = "Taku is stopping"; trailing = "Stopping"; emphasis = "muted"; break;
-                    case "starting": title = "Starting the on-device agent"; trailing = "Starting"; break;
-                    default: title = "Taku is working"; trailing = "Working"; break;
+                    case "starting":
+                        title = remote ? "Sending to remote T3" : "Starting the on-device agent";
+                        trailing = "Starting";
+                        break;
+                    case "queued":
+                        if (remote) {
+                            title = "Waiting for remote T3";
+                            trailing = "Queued";
+                            break;
+                        }
+                        title = "Taku is working"; trailing = "Working"; break;
+                    default: title = remote ? "Remote T3 is working" : "Taku is working"; trailing = "Working"; break;
                 }
                 break;
             case "needs_user":

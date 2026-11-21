@@ -12,7 +12,7 @@ import java.io.File;
  * {@code done} marker. Throwing leaves terminal bookkeeping to {@link TaskBroker}'s failure path.
  */
 interface TaskRuntime {
-    /** Stable identifier recorded in diagnostics: {@code codex} or {@code acp}. */
+    /** Stable identifier recorded in diagnostics: {@code codex}, {@code acp} or {@code remote_t3}. */
     String name();
 
     void run(File directory, JSONObject request) throws Exception;
