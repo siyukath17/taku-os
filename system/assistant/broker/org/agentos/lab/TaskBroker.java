@@ -73,7 +73,8 @@ public final class TaskBroker {
                             } catch (Exception failure) {
                                 System.err.println("acp idle: " + failure);
                             }
-                        }),
+                        },
+                        AcpConversations.HOST),
                 // Same loader and bounds as the acpRuntime settings interface.
                 () -> AcpRuntimeSettings.load(RUNTIME_CONFIG),
                 System.getenv());
@@ -166,6 +167,8 @@ public final class TaskBroker {
         write(new File(ROOT, "broker.pid"), Integer.toString(Process.myPid()));
         recoverInterrupted();
         retirePanelCapabilities();
+        // ACP chat turns are part of their conversation's projection (thread/read, chat page).
+        AgentViews.overlay = AcpConversations::overlay;
         AccountBridge.start();
         NativeBridge.start();
         try { PhoneMcpHost.start(); }

@@ -70,8 +70,15 @@ public final class RuntimeRouterTest {
         route = router(codexDefault, Map.of("TAKU_TASK_RUNTIME", "acp")).route(task().put("runtime", "codex"));
         check("codex".equals(route.runtime), "request beats env");
 
-        route = router(acpConfig(), noEnv).route(task().put("conversationId", "thread-1"));
-        check("codex".equals(route.runtime) && "acp-ineligible:conversation".equals(route.reason), "chat conversations stay on Codex");
+        route = router(acpConfig(), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("acp".equals(route.runtime) && "selected-by-config".equals(route.reason) && route.acpConfig != null,
+                "chat conversations run on ACP when runtime.json selects it");
+        route = new RuntimeRouter(CODEX, ACP, () -> null, noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime) && "default".equals(route.reason), "chat without runtime.json stays on Codex");
+        route = router(acpConfig().put("default", "codex"), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime), "chat with default codex stays on Codex");
+        route = router(new JSONObject().put("default", "acp"), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime) && "acp-unconfigured".equals(route.reason), "chat on unconfigured ACP falls back to Codex");
         route = router(acpConfig(), noEnv).route(task().put("panelUpdate", new JSONObject().put("originThreadId", "t")));
         check("codex".equals(route.runtime) && "acp-ineligible:panel-update".equals(route.reason), "panel updates stay on Codex");
         route = router(acpConfig(), noEnv).route(task().put("kind", "agent_control"));

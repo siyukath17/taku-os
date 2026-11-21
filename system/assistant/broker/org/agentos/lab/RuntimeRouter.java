@@ -7,8 +7,8 @@ import java.util.Map;
 /**
  * Chooses the {@link TaskRuntime} for one task. Codex is the default and the fallback for every
  * doubt: no config, unreadable config, unknown runtime name, an ACP request for a task shape ACP
- * cannot serve yet, or ACP without a configured binary. Only a positively valid ACP selection for a
- * background task leaves the Codex path.
+ * cannot serve yet (agent control, panel updates), or ACP without a configured binary. Only a
+ * positively valid ACP selection for a background or chat task leaves the Codex path.
  *
  * <p>Precedence: {@code request.runtime} &gt; environment {@code TAKU_TASK_RUNTIME} &gt;
  * {@code runtime.json "default"} &gt; {@code codex}. Device wiring lives in {@link TaskBroker#router()}.
@@ -75,11 +75,11 @@ final class RuntimeRouter {
         if (requested.isEmpty()) return new Route(CODEX, CODEX, "default", null);
         if (CODEX.equals(requested)) return new Route(CODEX, requested, "selected-by-" + source, null);
         if (!ACP.equals(requested)) return new Route(CODEX, requested, "unknown-runtime", null);
-        // ACP sessions cannot resume Codex threads or produce panel card replies yet.
+        // Conversation reads and panel card replies stay on Codex. Chat turns (conversationId) run
+        // on ACP: AcpConversationStore keeps their session and turns, and the conversation's display
+        // projection merges them, so thread/read and the chat page see them like native turns.
         if ("agent_control".equals(request.optString("kind")))
             return new Route(CODEX, requested, "acp-ineligible:control", null);
-        if (request.has("conversationId"))
-            return new Route(CODEX, requested, "acp-ineligible:conversation", null);
         if (request.optJSONObject("panelUpdate") != null)
             return new Route(CODEX, requested, "acp-ineligible:panel-update", null);
         JSONObject acpConfig = loaded.optJSONObject(ACP);

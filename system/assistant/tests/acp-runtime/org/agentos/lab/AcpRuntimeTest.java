@@ -110,6 +110,16 @@ public final class AcpRuntimeTest {
             permissionEnv |= "TAKU_MCP_PERMISSION".equals(e.getString("name")) && "full".equals(e.getString("value"));
         }
         check(taskEnv && permissionEnv, "session/new: the relay is bound to this task and permission mode");
+        String thread = "", turn = "";
+        for (int i = 0; i < phone.getJSONArray("env").length(); i++) {
+            JSONObject e = phone.getJSONArray("env").getJSONObject(i);
+            if ("TAKU_MCP_THREAD".equals(e.getString("name"))) thread = e.getString("value");
+            if ("TAKU_MCP_TURN".equals(e.getString("name"))) turn = e.getString("value");
+        }
+        // The screen registries reject non-UUID sessions with INVALID_SCREEN_THREAD (Pixel 9, 2026-11-22).
+        check(thread.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
+                && thread.equals(AcpRuntime.phoneThread("", "101")) && !thread.equals(AcpRuntime.phoneThread("", "102"))
+                && "acp-task-101".equals(turn), "session/new: the relay names a stable UUID phone thread and the turn: " + thread + " " + turn);
         JSONArray prompt = agent.methods("session/prompt").get(0).getJSONObject("params").getJSONArray("prompt");
         check("s-1".equals(agent.methods("session/prompt").get(0).getJSONObject("params").getString("sessionId"))
                 && "Turn on Wi-Fi".equals(prompt.getJSONObject(0).getString("text"))

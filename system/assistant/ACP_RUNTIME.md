@@ -1,9 +1,10 @@
-# ACP task runtime (phase 1)
+# ACP task runtime
 
 `TaskBroker` runs each background task through a `TaskRuntime`. `RuntimeRouter`
 selects it; **Codex (`CodexAppServer`) is the default and the fallback for every
 doubtful case**. The ACP runtime is used only when a background task positively
-selects it and an agent binary is configured.
+selects it and an agent binary is configured. Background tasks and chat turns (requests with
+`conversationId`) can run on ACP; agent controls and panel updates stay on Codex.
 
 ## Selection
 
@@ -14,9 +15,9 @@ Precedence: `request.json "runtime"` > env `TAKU_TASK_RUNTIME` > `runtime.json "
 | no `runtime.json` | codex | `default` |
 | unreadable / invalid `runtime.json` | codex | `config-invalid` |
 | unknown name | codex | `unknown-runtime` |
-| `acp` for a chat turn, panel update or agent control | codex | `acp-ineligible:*` |
+| `acp` for a panel update or agent control | codex | `acp-ineligible:*` |
 | `acp` without `acp.binary` | codex | `acp-unconfigured` |
-| `acp` for a background task, binary configured | acp | `selected-by-{request,env,config}` |
+| `acp` for a background task or chat turn, binary configured | acp | `selected-by-{request,env,config}` |
 
 ## `runtime.json`
 
@@ -134,6 +135,32 @@ If the agent answers `auth_required` (-32000), the task ends `needs_user` and
 credentials, and never starts a login itself. The user signs in through the
 agent's own flow in the phone's browser.
 
+## Chat turns (`conversationId`)
+
+The conversation's identity and metadata stay with the chat page's thread (created by
+`agent_control thread/start`). The ACP agent's part lives in `AcpConversationStore`:
+`files/runtime/acp-conversations/<conversationId>.json` (root-only, atomic replace) holds the
+`conversationId ↔ ACP sessionId` binding and every ACP turn, stored directly in the native
+thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall` with `tool`,
+`status`, `arguments`, `result`; turn `status` `inProgress|completed|failed|interrupted`).
+
+- The user's message is recorded and published before the agent starts; agent text and tool calls
+  stream into the turn (throttled to `min(250 ms, progressIntervalMillis)`).
+- A later turn calls `session/load` with the bound session when the agent advertises
+  `loadSession` (agy 1.5.14 does); history replayed by `session/load` is ignored. If loading fails
+  or is unsupported, `session/new` is used and the earlier conversation (native and ACP turns, last
+  12 000 chars) is prepended to the prompt as a transcript; `runtime-info.json` records
+  `sessionResumed` and `sessionLoadFailure`.
+- `AgentViews.overlay` (installed by `TaskBroker`) merges ACP turns into every save of the
+  conversation's projection `agent-view/<id>.json`, by turn id, so native refreshes never drop them.
+  The chat page and the session stream read that projection unchanged.
+- `agent_control thread/read` for an ACP-owned conversation is answered from the store
+  (`{threadId, loaded, freshEmpty, runtime:"acp", thread}`) without asking the app server; a
+  conversation created by `thread/start` that never ran a Codex turn does not survive an app-server
+  restart. `thread/list` adds ACP conversations and still lists them if the app server cannot start.
+- Chat records follow the Codex chat contract: `result.txt` is the plain reply (completed turns
+  only), `runtime-info.json` carries `threadId`, `conversationId`, `turnId`.
+
 ## Phone tools over MCP
 
 `PhoneMcpBridge` is the MCP core: `initialize`, `tools/list`, `tools/call`, JSON
@@ -142,12 +169,17 @@ deny non-observation tools as `PERMISSION_DENIED` tool errors). Execution goes t
 `PhoneNativeTools.execute`, the dispatcher Codex uses. `ask_user` and
 `confirm_action` are not exposed yet. `PhoneMcpHost` relays the agent's stdio
 child (`app_process … PhoneMcpHost relay`) to the broker socket `taku-phone-mcp`.
-That socket serves root and system peers only, and the thread identity is
-`acp-<taskId>`.
+That socket serves root and system peers only. The phone session is the conversation id for a chat
+turn and a name-based UUID of the task id for a background task (`TAKU_MCP_THREAD`; the screen
+registries reject non-UUID sessions with `INVALID_SCREEN_THREAD`), and the MCP connection is the turn
+(`TAKU_MCP_TURN`): gestures start/end with it and its background screen is released when it closes.
+The screen registry answers `thread/read` for ACP phone sessions as root threads instead of asking
+Codex (which answered `thread not loaded`).
 
 ## Tests
 
 `bash system/assistant/test-acp-runtime-host.sh` runs against an in-process fake ACP agent:
-router, ACP lifecycle, MCP bridge, settings read/write and validation, sign-in URL capture
+router, ACP lifecycle, chat turns (store, streaming, `session/load` and transcript fallback, the
+chat page's own `AgentConversation` parser), MCP bridge, settings read/write and validation, sign-in URL capture
 and browser hand-off (mock `IntentLauncher`), and island projections checked against
 SystemUI's own `IslandPayload` parser (host stand-ins for `android.util.JsonReader`).

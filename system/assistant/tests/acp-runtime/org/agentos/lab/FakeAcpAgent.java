@@ -55,6 +55,12 @@ final class FakeAcpAgent implements AcpProcessTransport {
     final List<Process> processes = new CopyOnWriteArrayList<>();
     volatile CountDownLatch promptStarted = new CountDownLatch(1);
     IOException startFailure;
+    /** initialize advertises loadSession; session/load replays history then succeeds unless loadFails. */
+    volatile boolean loadSession;
+    volatile boolean loadFails;
+    /** Session ids handed out by session/new, in order (default always "s-1"). */
+    final Deque<String> newSessionIds = new ArrayDeque<>();
+    volatile String currentSession = "s-1";
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
@@ -116,7 +122,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
         void update(JSONObject update) throws IOException {
             send(new JSONObject().put("method", "session/update")
-                    .put("params", new JSONObject().put("sessionId", "s-1").put("update", update)));
+                    .put("params", new JSONObject().put("sessionId", currentSession).put("update", update)));
         }
 
         void chunk(String text) throws IOException {
@@ -210,7 +216,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 case "initialize":
                     send(new JSONObject().put("id", id).put("result", new JSONObject()
                             .put("protocolVersion", 1)
-                            .put("agentCapabilities", new JSONObject().put("loadSession", false)
+                            .put("agentCapabilities", new JSONObject().put("loadSession", loadSession)
                                     .put("promptCapabilities", new JSONObject().put("image", true)))
                             .put("authMethods", scenario == Scenario.AUTH_NO_METHOD
                                     ? new JSONArray().put(new JSONObject().put("id", "gemini-api-key").put("name", "Use API key"))
@@ -222,8 +228,25 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 case "session/new":
                     if (scenario == Scenario.NEEDS_AUTH)
                         send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32000).put("message", "Authentication required")));
-                    else send(new JSONObject().put("id", id).put("result", new JSONObject().put("sessionId", "s-1")));
+                    else {
+                        currentSession = newSessionIds.isEmpty() ? "s-1" : newSessionIds.poll();
+                        send(new JSONObject().put("id", id).put("result", new JSONObject().put("sessionId", currentSession)));
+                    }
                     return false;
+                case "session/load": {
+                    String loaded = message.getJSONObject("params").getString("sessionId");
+                    if (loadFails) {
+                        send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32002).put("message", "Session not found")));
+                        return false;
+                    }
+                    currentSession = loaded;
+                    // ACP replays the loaded conversation before answering; the client must not treat it as new output.
+                    update(new JSONObject().put("sessionUpdate", "user_message_chunk")
+                            .put("content", new JSONObject().put("type", "text").put("text", "REPLAYED USER")));
+                    chunk("REPLAYED ANSWER");
+                    send(new JSONObject().put("id", id).put("result", JSONObject.NULL));
+                    return false;
+                }
                 case "authenticate": {
                     Thread t = new Thread(() -> {
                         try { authenticate(id); } catch (Exception ignored) {}
