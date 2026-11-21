@@ -9,11 +9,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -29,6 +32,13 @@ import java.util.regex.Pattern;
  * scanned in memory only for an authorization URL on an allowed host; the URL itself is passed to
  * the browser and never written anywhere (the status file records only its host). No agent
  * stdout/stderr text reaches disk or logs.
+ *
+ * <p>How the URL arrives (verified on the Pixel, android_arm64 agy 1.5.14): agy does not print it;
+ * it runs {@code xdg-open <url>} from {@code PATH} and discards that child's output. Android has no
+ * {@code xdg-open}, so the sign-in fails with "couldn't open a web browser". {@link BrowserBridge}
+ * puts a private {@code xdg-open} first on the agent's {@code PATH}; it writes its argument to a FIFO
+ * that only this process reads, so the URL passes through memory and the same host allow-list as any
+ * printed URL. Output scanning stays as a fallback for agents that print the URL.
  */
 final class AcpAuthHelper {
     /** Opens a URL in the system browser. Device: {@code am start -a VIEW -d <url>}. */
@@ -60,6 +70,8 @@ final class AcpAuthHelper {
     }
 
     static final List<String> DEFAULT_URL_HOSTS = List.of("accounts.google.com");
+    /** ACP "request cancelled": agy's authenticate answer when its stdin closes mid sign-in. */
+    static final int SIGN_IN_CANCELLED = -32800;
     private static final Pattern URL = Pattern.compile("https://[^\\s\"'<>`\\\\]+");
     private static final int MAX_URL_CHARS = 8192;
 
@@ -122,22 +134,41 @@ final class AcpAuthHelper {
 
     private static final Object EOF = new Object();
 
+    /** A URL handed over by the agent's browser opener (the xdg-open bridge), not agent output. */
+    private static final class OpenUrl {
+        final String url;
+
+        OpenUrl(String url) {
+            this.url = url;
+        }
+    }
+
     /** Synchronous sign-in: initialize → authenticate, opening the browser for the captured URL. */
     void run(AcpRuntime.Options options, List<String> hosts) throws Exception {
         String method = options.loginMethod;
         // Same command line and environment as task turns: same private HOME and app-data dir.
         AcpProcessTransport.Launch launch = new AcpRuntime(options, transport, null, null).launch();
-        for (String path : new String[]{options.home, options.appDataDir})
-            if (!path.isEmpty()) new File(path).mkdirs();
+        // appDataDir is a name under $HOME/.gemini that the agent creates itself.
+        if (!options.home.isEmpty()) new File(options.home).mkdirs();
+        BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
+        BrowserBridge bridge = null;
+        if (!options.home.isEmpty()) {
+            try {
+                bridge = BrowserBridge.open(new File(options.home), inbox);
+                launch = bridge.wrap(launch);
+            } catch (IOException noBridge) {
+                bridge = null; // Fall back to scanning agent output.
+            }
+        }
         AcpProcessTransport.Connection connection;
         try {
             connection = transport.start(launch);
         } catch (IOException startFailed) {
+            if (bridge != null) bridge.close();
             writeStatus("failed", method, null, "start-failed");
             return;
         }
         active = connection;
-        BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
         reader(connection.stdout(), inbox, "acp-auth-stdout");
         reader(connection.stderr(), inbox, "acp-auth-stderr");
         OutputStream out = connection.stdin();
@@ -166,10 +197,13 @@ final class AcpAuthHelper {
                 if (next == EOF) {
                     // stdout and stderr both closed: the agent is gone. stderr alone may close early.
                     if (++closedStreams < 2) continue;
-                    writeStatus("failed", method, host(opened), "agent-exited");
+                    // cancel() closes stdin, so a cancelled agent exits too: report the cancel.
+                    if (cancelled) writeStatus("cancelled", method, host(opened), null);
+                    else writeStatus("failed", method, host(opened), "agent-exited");
                     return;
                 }
-                String line = (String) next;
+                boolean handedOver = next instanceof OpenUrl;
+                String line = handedOver ? ((OpenUrl) next).url : (String) next;
                 if (opened == null) {
                     String url = authorizationUrl(line, hosts);
                     if (url != null) {
@@ -183,6 +217,7 @@ final class AcpAuthHelper {
                         writeStatus("browser_opened", method, host(url), null);
                     }
                 }
+                if (handedOver) continue;
                 JSONObject message;
                 try {
                     message = new JSONObject(line);
@@ -213,7 +248,15 @@ final class AcpAuthHelper {
                             .put("params", new JSONObject().put("methodId", method)));
                 } else if (id == 2) {
                     if (message.has("error")) {
-                        writeStatus("failed", method, host(opened), "authenticate-error");
+                        // cancel() closes the agent's stdin and agy answers -32800 "Sign-in was cancelled."
+                        // (seen on the Pixel); that reply can arrive before the loop sees the flag.
+                        if (cancelled) {
+                            writeStatus("cancelled", method, host(opened), null);
+                            return;
+                        }
+                        JSONObject error = message.optJSONObject("error");
+                        boolean agentCancelled = error != null && error.optInt("code") == SIGN_IN_CANCELLED;
+                        writeStatus("failed", method, host(opened), agentCancelled ? "agent-cancelled" : "authenticate-error");
                     } else {
                         writeStatus("signed_in", method, host(opened), null);
                     }
@@ -221,10 +264,129 @@ final class AcpAuthHelper {
                 }
             }
         } catch (IOException broken) {
-            writeStatus("failed", method, host(opened), "agent-exited");
+            if (cancelled) writeStatus("cancelled", method, host(opened), null);
+            else writeStatus("failed", method, host(opened), "agent-exited");
         } finally {
             active = null;
             connection.destroy(1000);
+            if (bridge != null) bridge.close();
+        }
+    }
+
+    // ---- browser bridge -------------------------------------------------------------------------
+
+    static final String OPEN_URL_FIFO_ENV = "TAKU_ACP_OPEN_URL_FIFO";
+    static final String BRIDGE_DIR = ".taku-sign-in";
+    private static final String STOP_LINE = "taku-bridge-stop";
+    private static final int MAX_BRIDGE_LINE = 16 * 1024;
+
+    /**
+     * A private {@code xdg-open} on the agent's {@code PATH} that forwards its argument to a FIFO this
+     * process reads. Lives in {@code <home>/.taku-sign-in} (owner-only; HOME is root-only on device)
+     * for one sign-in and is removed afterwards. A FIFO holds no data on disk.
+     */
+    static final class BrowserBridge implements AutoCloseable {
+        final File dir;
+        final File shim;
+        final File fifo;
+        private final RandomAccessFile reader;
+        private final Thread thread;
+
+        private BrowserBridge(File dir, File shim, File fifo, RandomAccessFile reader, BlockingQueue<Object> inbox) {
+            this.dir = dir;
+            this.shim = shim;
+            this.fifo = fifo;
+            this.reader = reader;
+            this.thread = new Thread(() -> {
+                try {
+                    String line;
+                    while ((line = readLine(reader)) != null) {
+                        if (STOP_LINE.equals(line)) return;
+                        if (!line.isEmpty()) inbox.put(new OpenUrl(line));
+                    }
+                } catch (Exception ignored) {
+                    // Closed: the sign-in is over.
+                }
+            }, "acp-auth-browser-bridge");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        static BrowserBridge open(File home, BlockingQueue<Object> inbox) throws IOException {
+            File dir = new File(home, BRIDGE_DIR);
+            deleteTree(dir);
+            if (!dir.mkdirs()) throw new IOException("bridge directory");
+            ownerOnly(dir, true);
+            File fifo = new File(dir, "open-url");
+            Process mkfifo = new ProcessBuilder("mkfifo", "-m", "600", fifo.getPath()).redirectErrorStream(true).start();
+            try {
+                try (InputStream in = mkfifo.getInputStream()) { while (in.read() != -1) { /* drain */ } }
+                if (!mkfifo.waitFor(5, TimeUnit.SECONDS) || mkfifo.exitValue() != 0) throw new IOException("mkfifo failed");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("mkfifo interrupted");
+            }
+            File shim = new File(dir, "xdg-open");
+            String sh = new File("/system/bin/sh").canExecute() ? "/system/bin/sh" : "/bin/sh";
+            // The URL is only ever an argument (never evaluated) and goes only to the FIFO.
+            java.nio.file.Files.write(shim.toPath(), ("#!" + sh + "\n"
+                    + "# Taku: hands the agent's sign-in URL to the broker through a FIFO; never stores it.\n"
+                    + "f=\"$" + OPEN_URL_FIFO_ENV + "\"\n"
+                    + "[ -p \"$f\" ] || exit 1\n"
+                    + "[ $# -ge 1 ] || exit 2\n"
+                    + "printf '%s\\n' \"$1\" > \"$f\"\n").getBytes(StandardCharsets.UTF_8));
+            ownerOnly(shim, true);
+            // O_RDWR: opening never blocks and the read side never sees EOF between writers.
+            RandomAccessFile reader = new RandomAccessFile(fifo, "rw");
+            return new BrowserBridge(dir, shim, fifo, reader, inbox);
+        }
+
+        /** The same launch with the bridge first on {@code PATH}. */
+        AcpProcessTransport.Launch wrap(AcpProcessTransport.Launch launch) {
+            Map<String, String> env = new LinkedHashMap<>(launch.env);
+            String path = env.get("PATH");
+            if (path == null || path.isEmpty()) path = System.getenv("PATH");
+            if (path == null || path.isEmpty()) path = "/system/bin";
+            env.put("PATH", dir.getPath() + ":" + path);
+            env.put(OPEN_URL_FIFO_ENV, fifo.getPath());
+            return new AcpProcessTransport.Launch(launch.command, env, launch.cwd);
+        }
+
+        @Override
+        public void close() {
+            try (RandomAccessFile stopper = new RandomAccessFile(fifo, "rw")) {
+                stopper.write((STOP_LINE + "\n").getBytes(StandardCharsets.UTF_8));
+            } catch (IOException ignored) {
+                // Reader already gone.
+            }
+            try { thread.join(1000); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            try { reader.close(); } catch (IOException ignored) {}
+            deleteTree(dir);
+        }
+
+        private static String readLine(RandomAccessFile in) throws IOException {
+            StringBuilder line = new StringBuilder();
+            for (; ; ) {
+                int b = in.read();
+                if (b < 0) return line.length() == 0 ? null : line.toString();
+                if (b == '\n') return line.toString();
+                if (line.length() < MAX_BRIDGE_LINE) line.append((char) b);
+            }
+        }
+
+        private static void ownerOnly(File file, boolean executable) {
+            file.setReadable(false, false);
+            file.setWritable(false, false);
+            file.setExecutable(false, false);
+            file.setReadable(true, true);
+            file.setWritable(true, true);
+            if (executable) file.setExecutable(true, true);
+        }
+
+        private static void deleteTree(File file) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteTree(child);
+            file.delete();
         }
     }
 

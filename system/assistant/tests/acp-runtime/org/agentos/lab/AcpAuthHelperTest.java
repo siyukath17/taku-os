@@ -22,7 +22,7 @@ public final class AcpAuthHelperTest {
         return AcpRuntime.Options.fromJson(new JSONObject()
                 .put("binary", "/data/local/agentos/acp/bin/agy")
                 .put("home", new File(dir, "home").getPath())
-                .put("appDataDir", new File(dir, "app-data").getPath())
+                .put("appDataDir", "app-data")
                 .put("cwd", "")
                 .put("httpsProxy", "http://127.0.0.1:7890"));
     }
@@ -73,11 +73,32 @@ public final class AcpAuthHelperTest {
         JSONObject auth = agent.methods("authenticate").get(0);
         check("oauth-personal".equals(auth.getJSONObject("params").getString("methodId")), "authenticate uses oauth-personal");
         AcpProcessTransport.Launch launch = agent.launches.get(0);
-        check(launch.command.contains("--app-data-dir") && launch.command.contains(new File(dir, "app-data").getPath())
+        check(launch.command.contains("--app-data-dir") && launch.command.contains("app-data")
                 && new File(dir, "home").getPath().equals(launch.env.get("HOME")) && "1".equals(launch.env.get("AGY_CLI_DISABLE_AUTO_UPDATE"))
                 && "http://127.0.0.1:7890".equals(launch.env.get("HTTPS_PROXY")),
                 "sign-in uses the task runtime's private HOME/app-data dir, proxy and auto-update switch");
         check(agent.processes.get(0).destroyed, "the sign-in agent process is reclaimed");
+
+        check(launch.env.get("PATH").startsWith(new File(dir, "home/" + AcpAuthHelper.BRIDGE_DIR).getPath() + ":")
+                && launch.env.containsKey(AcpAuthHelper.OPEN_URL_FIFO_ENV), "sign-in puts the private xdg-open bridge first on PATH");
+        check(!new File(dir, "home/" + AcpAuthHelper.BRIDGE_DIR).exists(), "bridge directory (shim + FIFO) removed after sign-in");
+
+        // Real agy behaviour: the URL only reaches xdg-open (argv), never any output stream.
+        agent = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_XDG_OPEN);
+        opened.clear();
+        status = signIn(dir, agent, opened, false, 5000);
+        check("signed_in".equals(status.getString("state")) && opened.equals(List.of(FakeAcpAgent.AUTH_URL))
+                && "accounts.google.com".equals(status.getString("urlHost")),
+                "xdg-open bridge: URL handed over through the FIFO and opened once (" + status + ")");
+        check(!new File(dir, "home/" + AcpAuthHelper.BRIDGE_DIR).exists(), "bridge removed after the xdg-open sign-in");
+
+        // App-data dir: agy resolves it under $HOME/.gemini and rejects absolute paths.
+        check("taku-acp".equals(AcpRuntime.Options.fromJson(new JSONObject().put("appDataDir", "/data/local/agentos/acp/app-data")).appDataDir)
+                && "taku-acp".equals(AcpRuntime.Options.fromJson(new JSONObject().put("appDataDir", "..")).appDataDir)
+                && "taku-acp".equals(AcpRuntime.Options.fromJson(new JSONObject().put("appDataDir", "a/b")).appDataDir)
+                && "taku-acp".equals(AcpRuntime.Options.fromJson(new JSONObject()).appDataDir)
+                && "my-agy".equals(AcpRuntime.Options.fromJson(new JSONObject().put("appDataDir", "my-agy")).appDataDir),
+                "appDataDir: plain names kept, absolute/traversal values fall back to taku-acp");
 
         // URL inside a JSON-RPC notification.
         agent = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_URL_JSON);
@@ -138,7 +159,18 @@ public final class AcpAuthHelperTest {
         cancellable.cancel();
         cancellable.join(5000);
         String finalState = cancellable.status().getString("state");
-        check("cancelled".equals(finalState) || "failed".equals(finalState), "cancel ends the sign-in (" + finalState + ")");
+        check("cancelled".equals(finalState), "cancel ends the sign-in as cancelled (" + finalState + ")");
+        // Cancel after the browser opened: agy answers the closed stdin with -32800 before the loop
+        // notices the flag (seen on the Pixel). The status must still say cancelled.
+        FakeAcpAgent eof = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_CANCEL_ON_EOF);
+        AcpAuthHelper eofHelper = new AcpAuthHelper(new File(dir, "acp-login-eof.json"), eof, url -> {}, 10000);
+        eofHelper.start(options(dir), null);
+        for (int i = 0; i < 200 && !"browser_opened".equals(eofHelper.status().getString("state")); i++) Thread.sleep(20);
+        check("browser_opened".equals(eofHelper.status().getString("state")), "browser opened before cancel");
+        eofHelper.cancel();
+        eofHelper.join(5000);
+        check("cancelled".equals(eofHelper.status().getString("state")) && eofHelper.status().isNull("error"),
+                "cancel answered by -32800 is reported as cancelled (" + eofHelper.status() + ")");
         System.out.println("AcpAuthHelperTest passed " + checks + " checks");
     }
 }

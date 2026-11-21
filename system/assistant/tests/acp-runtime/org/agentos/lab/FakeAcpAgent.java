@@ -29,8 +29,15 @@ final class FakeAcpAgent implements AcpProcessTransport {
         AUTH_URL_STDERR,
         /** authenticate: URL JSON-escaped inside a protocol notification. */
         AUTH_URL_JSON,
+        /**
+         * authenticate like the real android_arm64 agy: no URL in any output; runs {@code xdg-open <url>}
+         * from the launch PATH (discarding its output) and fails if there is none.
+         */
+        AUTH_XDG_OPEN,
         /** authenticate: URL, then an error. */
         AUTH_ERROR,
+        /** authenticate: URL, then waits; like agy, answers -32800 "Sign-in was cancelled." when stdin closes. */
+        AUTH_CANCEL_ON_EOF,
         /** authenticate: never answers. */
         AUTH_SILENT,
         /** initialize offers no oauth-personal. */
@@ -69,7 +76,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
     public Connection start(Launch launch) throws IOException {
         if (startFailure != null) throw startFailure;
         launches.add(launch);
-        Process process = new Process(scenarios.isEmpty() ? Scenario.NORMAL : scenarios.poll());
+        Process process = new Process(scenarios.isEmpty() ? Scenario.NORMAL : scenarios.poll(), launch);
         processes.add(process);
         process.thread.start();
         return process;
@@ -77,6 +84,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
     final class Process implements Connection {
         final Scenario scenario;
+        final Launch launch;
         final PipedInputStream clientReads = new PipedInputStream(1 << 20);
         final PipedOutputStream agentWrites = new PipedOutputStream();
         final PipedInputStream agentReads = new PipedInputStream(1 << 20);
@@ -85,11 +93,13 @@ final class FakeAcpAgent implements AcpProcessTransport {
         volatile boolean destroyed;
         volatile Integer exit;
         Object promptId;
+        volatile Object authId;
         final PipedInputStream errReads = new PipedInputStream(1 << 16);
         final PipedOutputStream errWrites = new PipedOutputStream();
 
-        Process(Scenario scenario) throws IOException {
+        Process(Scenario scenario, Launch launch) throws IOException {
             this.scenario = scenario;
+            this.launch = launch;
             agentWrites.connect(clientReads);
             clientWrites.connect(agentReads);
             errWrites.connect(errReads);
@@ -122,6 +132,8 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     received.add(message);
                     if (handle(message)) return;
                 }
+                if (scenario == Scenario.AUTH_CANCEL_ON_EOF && authId != null)
+                    send(new JSONObject().put("id", authId).put("error", new JSONObject().put("code", -32800).put("message", "Sign-in was cancelled.")));
                 exit = 0;
             } catch (Exception closed) {
                 if (exit == null) exit = destroyed ? 143 : 1;
@@ -151,6 +163,32 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     send(new JSONObject().put("method", "auth/progress").put("params",
                             new JSONObject().put("message", "Open " + AUTH_URL + " to continue")));
                     break;
+                case AUTH_XDG_OPEN: {
+                    java.io.File opener = null;
+                    String path = launch.env.get("PATH");
+                    if (path != null) for (String dir : path.split(":")) {
+                        java.io.File candidate = new java.io.File(dir, "xdg-open");
+                        if (candidate.canExecute()) { opener = candidate; break; }
+                    }
+                    if (opener == null) {
+                        send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32603)
+                                .put("message", "Couldn't sign in: couldn't open a web browser: exec: \"xdg-open\": executable file not found in $PATH")));
+                        return;
+                    }
+                    ProcessBuilder builder = new ProcessBuilder(opener.getPath(), AUTH_URL)
+                            .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD);
+                    builder.environment().clear();
+                    builder.environment().putAll(launch.env);
+                    if (builder.start().waitFor() != 0) {
+                        send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32603).put("message", "browser failed")));
+                        return;
+                    }
+                    break;
+                }
+                case AUTH_CANCEL_ON_EOF:
+                    authId = id;
+                    err("Please visit the following URL to sign in: " + AUTH_URL);
+                    return; // serve() answers when stdin closes.
                 case AUTH_SILENT:
                     // Stay alive (a dead writer thread reads as a closed pipe) and never answer.
                     while (!destroyed) Thread.sleep(20);
@@ -270,6 +308,11 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
         @Override
         public void destroy(long graceMillis) {
+            if (scenario == Scenario.AUTH_CANCEL_ON_EOF) {
+                // Like the process transport: close stdin, give the agent its grace period to answer.
+                try { clientWrites.close(); } catch (IOException ignored) {}
+                try { thread.join(graceMillis); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            }
             destroyed = true;
             try { clientWrites.close(); } catch (IOException ignored) {}
             thread.interrupt();

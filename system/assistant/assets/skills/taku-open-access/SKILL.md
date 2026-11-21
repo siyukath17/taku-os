@@ -207,12 +207,14 @@ that does not parse is never overwritten), `RUNTIME_CONFIG_TOO_LARGE`, `UNKNOWN_
 
 A task that ends `needs_user` with `acp-auth.json` naming `oauth-personal` needs the agent's own Google
 sign-in. `signIn` (or the island's **Sign in** action) starts `agy authenticate oauth-personal` with the
-task runtime's private `HOME`/`--app-data-dir`, captures the official `https://accounts.google.com/…` URL
-from the agent's output and opens it with `am start -a android.intent.action.VIEW`. Finish sign-in in the
-browser, then poll `signInStatus`: `{state,method,urlHost,error,updatedAt}`, state `idle`, `starting`,
+task runtime's private `HOME`/`--app-data-dir`. agy hands the official `https://accounts.google.com/…` URL
+to `xdg-open`; Taku puts a private `xdg-open` first on the agent's `PATH` that passes it to the broker through
+a FIFO, checks the host and opens it with `am start -a android.intent.action.VIEW`. The browser must reach
+Google (the phone's own VPN/proxy); the redirect goes to the agent on `http://localhost:<port>/auth/callback`,
+so finish sign-in while `signInStatus` is `browser_opened`: `{state,method,urlHost,error,updatedAt}`, state `idle`, `starting`,
 `authenticating`, `browser_opened`, `signed_in`, `failed`, `timed_out` (10 min) or `cancelled`; errors
 `ACP_UNCONFIGURED`, `start-failed`, `initialize-error`, `method-unavailable`, `browser-launch-failed`,
-`authenticate-error`, `agent-exited`. Only one sign-in runs at a time (`alreadyRunning`). The login is
+`authenticate-error`, `agent-cancelled`, `agent-exited`. Only one sign-in runs at a time (`alreadyRunning`). The login is
 stored by the agent in its own directory; Taku never reads, returns or logs the URL or any token.
 Resubmit the kept request afterwards.
 

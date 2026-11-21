@@ -39,6 +39,7 @@ final class AcpRuntime implements TaskRuntime {
     /** ACP's {@code auth_required} error code. */
     static final int AUTH_REQUIRED = -32000;
     static final String DEFAULT_LOGIN_METHOD = "oauth-personal";
+    static final String DEFAULT_APP_DATA_DIR = "taku-acp";
     private static final int MAX_LINE_CHARS = 8 * 1024 * 1024;
     private static final int MAX_TEXT_CHARS = 1024 * 1024;
     private static final int MAX_SCREENSHOT_BYTES = 3_000_000;
@@ -51,7 +52,12 @@ final class AcpRuntime implements TaskRuntime {
     static final class Options {
         String binary = "";
         String home = "/data/local/agentos/acp/home";
-        String appDataDir = "/data/local/agentos/acp/app-data";
+        /**
+         * {@code agy --app-data-dir}: a plain name that agy resolves under {@code $HOME/.gemini/}.
+         * agy rejects absolute paths ("language server failed to start: must not be absolute"),
+         * verified on the Pixel with android_arm64 1.5.14. Invalid values fall back to the default.
+         */
+        String appDataDir = DEFAULT_APP_DATA_DIR;
         String cwd = "/data/local/agentos/work";
         String httpsProxy = "";
         String loginMethod = DEFAULT_LOGIN_METHOD;
@@ -82,7 +88,7 @@ final class AcpRuntime implements TaskRuntime {
             if (c == null) return o;
             o.binary = c.optString("binary", o.binary).trim();
             o.home = c.optString("home", o.home);
-            o.appDataDir = c.optString("appDataDir", o.appDataDir);
+            o.appDataDir = appDataName(c.optString("appDataDir", o.appDataDir));
             o.cwd = c.optString("cwd", o.cwd);
             o.httpsProxy = c.optString("httpsProxy", o.httpsProxy);
             o.loginMethod = c.optString("loginMethod", o.loginMethod);
@@ -97,6 +103,13 @@ final class AcpRuntime implements TaskRuntime {
             o.requestTimeoutMillis = c.optLong("requestTimeoutMillis", o.requestTimeoutMillis);
             o.progressIntervalMillis = c.optLong("progressIntervalMillis", o.progressIntervalMillis);
             return o;
+        }
+
+        /** A safe single path segment for {@code --app-data-dir}, else the default. */
+        static String appDataName(String value) {
+            String v = value == null ? "" : value.trim();
+            if (v.matches("[A-Za-z0-9._-]{1,64}") && !v.equals(".") && !v.equals("..")) return v;
+            return DEFAULT_APP_DATA_DIR;
         }
 
         private static List<String> strings(JSONArray array) throws Exception {
@@ -161,7 +174,8 @@ final class AcpRuntime implements TaskRuntime {
         AcpProcessTransport.Connection connection;
         try {
             // Best effort: a missing working directory would otherwise fail the start opaquely.
-            for (String path : new String[]{options.home, options.appDataDir, options.cwd})
+            // appDataDir is relative to $HOME/.gemini and created by the agent itself.
+            for (String path : new String[]{options.home, options.cwd})
                 if (!path.isEmpty()) new File(path).mkdirs();
             connection = transport.start(launch());
         } catch (IOException startFailed) {

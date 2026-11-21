@@ -28,7 +28,7 @@ Precedence: `request.json "runtime"` > env `TAKU_TASK_RUNTIME` > `runtime.json "
   "acp": {
     "binary": "/data/local/agentos/acp/bin/agy",
     "home": "/data/local/agentos/acp/home",
-    "appDataDir": "/data/local/agentos/acp/app-data",
+    "appDataDir": "taku-acp",
     "httpsProxy": "http://127.0.0.1:7890",
     "cwd": "/data/local/agentos/work",
     "args": ["acp"],
@@ -44,6 +44,9 @@ Precedence: `request.json "runtime"` > env `TAKU_TASK_RUNTIME` > `runtime.json "
 The agent is started as `<binary> acp --app-data-dir <appDataDir>` with `HOME`,
 `HTTPS_PROXY`, and auto-update disabled through `AGY_CLI_DISABLE_AUTO_UPDATE=1` (plus the
 generic `AGY_DISABLE_AUTO_UPDATE`, `DISABLE_AUTO_UPDATE`, `NO_UPDATE_NOTIFIER`).
+`appDataDir` is a plain name that agy resolves under `$HOME/.gemini/` (default `taku-acp`, i.e.
+`/data/local/agentos/acp/home/.gemini/taku-acp`); agy refuses absolute paths ("language server failed to
+start: must not be absolute", Pixel, 1.5.14), so absolute or `..`/`/` values fall back to the default.
 `"phoneMcp": null` turns off the built-in phone tool server. Optional
 `"authUrlHosts"` overrides the sign-in URL host allow-list (default `accounts.google.com`).
 
@@ -52,8 +55,8 @@ generic `AGY_DISABLE_AUTO_UPDATE`, `DISABLE_AUTO_UPDATE`, `NO_UPDATE_NOTIFIER`).
 `AGY_CLI_DISABLE_AUTO_UPDATE` next to the log line `Auto-update disabled via environment
 variable %s`, and the updater endpoint `antigravity-cli-auto-updater-…run.app`. No CLI flag
 that disables updates was found in its strings, so the environment variable is the switch;
-`extraArgs` stays empty. This was a `strings` check on macOS: confirm on the Pixel that no
-update check runs (no request to the updater host) during the first device session.
+`extraArgs` stays empty. Pixel 9 (2026-11-22): the agent process carries the variable, its ACP log
+shows no updater activity, and the binary hash was unchanged after several sessions.
 
 ## Reading and writing settings
 
@@ -89,9 +92,18 @@ an allowed host. That URL goes to `IntentLauncher` (`am start -a android.intent.
 to `files/runtime/acp-login.json` (`state`, `method`, `urlHost`, `error`): never the URL,
 agent output or tokens. Single flight, 10-minute budget, `signInCancel` ends it.
 
-Still to confirm on device: whether `agy` prints the URL (stdout, stderr, or a protocol
-message) or only calls its local `http://127.0.0.1:<port>/open-url` helper. Loopback URLs are
-deliberately not opened.
+**How agy delivers the URL (Pixel 9, android_arm64 1.5.14).** agy prints nothing: it runs
+`xdg-open <url>` from `PATH`, discards that child's output, and without one fails with
+`couldn't open a web browser: exec: "xdg-open": executable file not found in $PATH`. For each
+sign-in `AcpAuthHelper.BrowserBridge` creates `<home>/.taku-sign-in/` (owner-only) with a FIFO and an
+`xdg-open` script that writes its first argument to the FIFO, prepends that directory to the agent's
+`PATH` and sets `TAKU_ACP_OPEN_URL_FIFO`. The broker reads the FIFO in memory, applies the same host
+allow-list and opens the URL; the directory is removed when the sign-in ends. Output scanning remains a
+fallback. The URL is `accounts.google.com/o/oauth2/auth?…&redirect_uri=http://localhost:<port>/auth/callback`
+(PKCE); agy listens on that port until the redirect arrives (no short timeout was seen; the helper's
+10-minute budget applies). `signInCancel` closes the agent's stdin; agy answers `-32800 "Sign-in was
+cancelled."`, which is recorded as `cancelled`. The phone browser must reach Google through the phone's own
+network; the agent's own requests use `httpsProxy`. Loopback URLs are never opened by the broker.
 
 ## Dynamic Island
 

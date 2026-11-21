@@ -46,7 +46,7 @@ public final class AcpRuntimeTest {
         AcpRuntime.Options o = AcpRuntime.Options.fromJson(new JSONObject()
                 .put("binary", "/data/local/agentos/acp/bin/agy")
                 .put("home", "/data/local/agentos/acp/home")
-                .put("appDataDir", "/data/local/agentos/acp/app-data")
+                .put("appDataDir", "taku-acp")
                 .put("httpsProxy", "http://127.0.0.1:7890")
                 .put("cwd", "")
                 .put("progressIntervalMillis", 0)
@@ -88,7 +88,7 @@ public final class AcpRuntimeTest {
         check(!result.getString("message").contains("LEAK"), "normal: other sessions' updates are ignored");
 
         AcpProcessTransport.Launch launch = agent.launches.get(0);
-        check(launch.command.equals(List.of("/data/local/agentos/acp/bin/agy", "acp", "--app-data-dir", "/data/local/agentos/acp/app-data")),
+        check(launch.command.equals(List.of("/data/local/agentos/acp/bin/agy", "acp", "--app-data-dir", "taku-acp")),
                 "launch: binary, acp subcommand and --app-data-dir, got " + launch.command);
         check("/data/local/agentos/acp/home".equals(launch.env.get("HOME")), "launch: HOME is the agent's own home");
         check("http://127.0.0.1:7890".equals(launch.env.get("HTTPS_PROXY")), "launch: HTTPS_PROXY is forwarded");
