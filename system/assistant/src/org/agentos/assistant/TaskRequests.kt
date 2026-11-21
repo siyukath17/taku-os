@@ -45,6 +45,11 @@ internal object TaskRequests {
     @JvmStatic
     @Throws(Exception::class)
     fun interrupt(thread: String, turnId: String): JSONObject {
+        // An ACP chat turn (AcpConversationStore id "acp-…") is not a Codex turn: Codex has no active
+        // turn for it, so the broker stops it through the task's cancel marker instead.
+        if (turnId.startsWith("acp-")) {
+            return NativeClient.exchange(JSONObject().put("op", "acpInterrupt").put("threadId", thread).put("turnId", turnId))
+        }
         val state = NativeClient.state(thread)
         if (turnId != state.optString("activeTurnId")) throw IOException("TURN_CHANGED")
         if (state.optJSONObject("goal")?.optString("status") == "active") {

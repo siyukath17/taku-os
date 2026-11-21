@@ -23,8 +23,10 @@ import java.util.UUID;
  * <p>Turns are stored directly in the native (Codex app-server) thread/turn/item shape the chat UI
  * already renders ({@code userMessage}, {@code agentMessage}, {@code mcpToolCall}; turn status
  * {@code inProgress|completed|failed|interrupted}), so {@link #overlay} can merge them into the
- * conversation's display projection without a second presentation model. Codex stays the owner of
- * the conversation's identity and metadata; this store owns only what the ACP agent produced.
+ * conversation's display projection without a second presentation model. For a conversation born
+ * in Codex, Codex stays the owner of its identity and metadata and this store owns only what the ACP
+ * agent produced; a conversation started on ACP ({@link #startNew}, {@code origin:"acp"}) has no
+ * Codex thread at all and this store is its only record.
  *
  * <p>One file per conversation, {@code <dir>/<conversationId>.json}, replaced atomically. Only the
  * broker process writes it; reads are served from memory after the first load.
@@ -91,6 +93,47 @@ final class AcpConversationStore {
         }
         java.util.Collections.sort(out);
         return out;
+    }
+
+    /** {@code origin} of a conversation the broker started on ACP (no Codex app-server thread). */
+    static final String ORIGIN_ACP = "acp";
+
+    /**
+     * Records a new conversation that the broker starts on ACP ({@code agent_control thread/start}
+     * while chat turns route to ACP): a fresh UUID, no session yet, no turns. From here on
+     * {@link #owns} answers thread/read and thread/list from this store and {@link #standalone}
+     * tells the device wiring that no Codex thread exists behind it.
+     */
+    synchronized String startNew() throws Exception {
+        String id;
+        do id = UUID.randomUUID().toString(); while (record(id) != null || file(id).exists());
+        JSONObject record = mutable(id);
+        record.put("origin", ORIGIN_ACP);
+        save(id, record);
+        return id;
+    }
+
+    /** True for a conversation the broker started on ACP: there is no Codex thread behind it. */
+    synchronized boolean standalone(String id) {
+        JSONObject record = record(id);
+        return record != null && ORIGIN_ACP.equals(record.optString("origin"));
+    }
+
+    /**
+     * The task running ACP turn {@code turnId} of this conversation, or null when that turn is not
+     * (any longer) in progress here.
+     */
+    synchronized String activeTask(String id, String turnId) {
+        JSONObject record = record(id);
+        JSONArray turns = record == null ? null : record.optJSONArray("turns");
+        if (turns == null || turnId == null) return null;
+        for (int i = turns.length() - 1; i >= 0; i--) {
+            JSONObject turn = turns.optJSONObject(i);
+            if (turn == null || !turnId.equals(turn.optString("id"))) continue;
+            String task = turn.optString("taskId", "");
+            return "inProgress".equals(turn.optString("status")) && !task.isEmpty() ? task : null;
+        }
+        return null;
     }
 
     synchronized void bindSession(String id, String sessionId, JSONObject agentInfo) throws Exception {
@@ -204,6 +247,28 @@ final class AcpConversationStore {
         return new JSONObject().put("threadId", id).put("loaded", true)
                 .put("freshEmpty", turns == null || turns.length() == 0)
                 .put("runtime", "acp").put("thread", view);
+    }
+
+    /**
+     * The agent_control thread/start answer for a conversation started on ACP: the Codex path's
+     * shape (the chat page and gateway read {@code thread}, the projected conversation) plus
+     * {@code runtime}.
+     */
+    static JSONObject startAnswer(String id, JSONObject view) throws Exception {
+        if (view == null || !id.equals(view.optString("id"))) throw new IOException("THREAD_UNAVAILABLE");
+        return new JSONObject().put("thread", view).put("runtime", "acp");
+    }
+
+    /**
+     * A native-RPC {@code thread/read} answer ({@code {thread}}) for a standalone ACP conversation,
+     * which the Codex app server does not know. Without {@code includeTurns} the turns are empty, as
+     * in the app server's answer.
+     */
+    static JSONObject nativeReadAnswer(String id, JSONObject view, boolean includeTurns) throws Exception {
+        if (view == null || !id.equals(view.optString("id"))) throw new IOException("THREAD_UNAVAILABLE");
+        JSONObject thread = new JSONObject(view.toString());
+        if (!includeTurns) thread.put("turns", new JSONArray());
+        return new JSONObject().put("thread", thread);
     }
 
     /** Minimal native-shaped metadata for a conversation that has no native thread view yet. */

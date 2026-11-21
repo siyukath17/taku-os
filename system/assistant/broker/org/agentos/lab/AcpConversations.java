@@ -18,6 +18,12 @@ import java.io.File;
  *       projection.</li>
  *   <li>{@link #read} answers {@code agent_control thread/read} for ACP-owned conversations without
  *       asking the Codex app server.</li>
+ *   <li>{@link #startsOnAcp}/{@link #start}: while chat turns route to ACP, {@code agent_control
+ *       thread/start} creates the conversation here instead of in the Codex app server
+ *       (a <em>standalone</em> conversation); {@link #nativeRead} answers native-RPC thread/read for
+ *       it, since no Codex thread exists behind it.</li>
+ *   <li>{@link #interrupt} stops a running ACP chat turn (chat page stop button) through the
+ *       task's cancel marker ({@link AcpTurnControl}).</li>
  * </ul>
  */
 final class AcpConversations {
@@ -77,6 +83,38 @@ final class AcpConversations {
     static JSONObject read(String id) throws Exception {
         changed(id);
         return AcpConversationStore.readAnswer(id, AgentViews.snapshot(id));
+    }
+
+    /** True when a new conversation's chat turns route to ACP (same router and config as tasks). */
+    static boolean startsOnAcp() throws Exception {
+        return RuntimeRouter.ACP.equals(TaskBroker.router().newConversation().runtime);
+    }
+
+    /** agent_control thread/start on ACP: a standalone conversation, projected and listable at once. */
+    static JSONObject start() throws Exception {
+        String id = STORE.startNew();
+        changed(id);
+        JSONObject view = AgentViews.snapshot(id);
+        return AcpConversationStore.startAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)));
+    }
+
+    /** Native-RPC thread/read for a standalone ACP conversation (see {@link AcpConversationStore#nativeReadAnswer}). */
+    static JSONObject nativeRead(JSONObject params) throws Exception {
+        String id = params.getString("threadId");
+        changed(id);
+        JSONObject view = AgentViews.snapshot(id);
+        return AcpConversationStore.nativeReadAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)),
+                params.optBoolean("includeTurns", false));
+    }
+
+    /** True for a native-RPC thread/read that this store answers instead of the Codex app server. */
+    static boolean servesNativeRead(String method, JSONObject params) {
+        return "thread/read".equals(method) && params != null && STORE.standalone(params.optString("threadId"));
+    }
+
+    /** Chat page stop of a running ACP turn ({@code turnId} {@code acp-...}). */
+    static JSONObject interrupt(String threadId, String turnId) throws Exception {
+        return AcpTurnControl.interrupt(STORE, TaskBroker.TASKS, threadId, turnId);
     }
 
     /** Phone-tool sessions of ACP turns seen by this broker process (chat or background). */

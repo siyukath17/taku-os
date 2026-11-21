@@ -114,6 +114,16 @@ final class RuntimeRouter {
         return new Route(ACP, requested, "selected-by-" + source, acpConfig);
     }
 
+    /**
+     * The route a new conversation's chat turns will take (request, env and runtime.json as for
+     * {@link #route}, without a per-request override). {@code agent_control thread/start} asks this
+     * so a conversation the broker starts itself on ACP (no Codex thread) also gets its first and
+     * later turns on ACP, and a Codex selection keeps thread/start on the Codex app server.
+     */
+    Route newConversation() throws Exception {
+        return route(new JSONObject().put("conversationId", ""));
+    }
+
     /** Task shapes ACP cannot serve: agent controls and panel updates. Chat turns are served. */
     private static String acpIneligible(JSONObject request) {
         if ("agent_control".equals(request.optString("kind"))) return "control";

@@ -221,6 +221,12 @@ Resubmit the kept request afterwards.
 While an ACP task runs, its background-task notification also carries a `taku.island.v1` progress card
 (phase, current tool, plan progress; sign-in action on `needs_user`). Codex tasks are unchanged.
 
+With `effectiveDefault` `acp`, a new chat conversation is created by the broker itself (no Codex app
+server; `thread/start` answers `{thread, runtime:"acp"}`) and its turns run on ACP. Stopping a running
+ACP chat turn uses the same `interrupt` (turn id `acp-…`) or `liveTask` `cancel` calls as Codex; the
+broker writes the task's `cancel` marker and the agent is sent `session/cancel`. A turn that already
+ended answers `TURN_CHANGED`.
+
 ### Remote T3 lane (`remote_t3`)
 
 `runtime.json` can also send background tasks to a remote T3 Code host (VPS/Mac). Same provider:

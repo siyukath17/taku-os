@@ -156,6 +156,7 @@ public final class CodexAppServer implements AutoCloseable {
         boolean cancel = !input.getString("action").equals("read");
         LiveTask task = new LiveTask(input);
         if (replace && !task.request.optString("permissionMode").equals("readOnly")) throw new IOException("LIVE_TASK_NOT_READ_ONLY");
+        if (AcpTurnControl.acpTask(AcpConversations.STORE, task.directory, task.thread, task.turn)) return acpLiveTask(task, cancel);
         CodexAppServer server = shared;
         JSONObject goal = null;
         if (cancel && !task.terminal) {
@@ -194,6 +195,20 @@ public final class CodexAppServer implements AutoCloseable {
                 server.interrupt(task.thread, task.turn);
             }
             return result.put("cancellationRequested", true);
+        }
+    }
+
+    /**
+     * liveTask of a task on the ACP runtime: no Codex app server, goal or native turn is involved
+     * (ACP has no goals), so cancel/replace write the task's cancel marker and AcpRuntime stops the
+     * agent (session/cancel, then reclaim within the grace period). Same answer shape as Codex.
+     */
+    private static JSONObject acpLiveTask(LiveTask task, boolean cancel) throws Exception {
+        try (CleanupWork.Held held = NativeBridge.lock()) {
+            JSONObject result = task.snapshot(null);
+            if (!cancel || task.terminal || !task.state.equals("queued") && !task.state.equals("running")) return result;
+            AcpTurnControl.cancel(AcpConversations.STORE, new File(TaskBroker.ROOT, "tasks"), task.thread, task.id, task.turn);
+            return result.put("goalActive", false).put("cancellationRequested", true);
         }
     }
 
@@ -639,6 +654,14 @@ public final class CodexAppServer implements AutoCloseable {
             if (AcpConversations.servesRead(request)) {
                 // An ACP conversation's turns live in AcpConversationStore, not in the app server.
                 answer.put("ok", true).put("result", AcpConversations.read(request.getJSONObject("params").getString("threadId")));
+                TaskBroker.write(new File(directory, "response.json"), answer.toString());
+                TaskBroker.write(new File(directory, "done"), "control");
+                return;
+            }
+            if ("thread/start".equals(method) && AcpConversations.startsOnAcp()) {
+                // Chat turns run on ACP: the broker owns the new conversation; the Codex app server
+                // is neither started nor asked (runtime.json default "codex" never takes this path).
+                answer.put("ok", true).put("result", AcpConversations.start());
                 TaskBroker.write(new File(directory, "response.json"), answer.toString());
                 TaskBroker.write(new File(directory, "done"), "control");
                 return;

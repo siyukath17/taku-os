@@ -152,8 +152,8 @@ agent's own flow in the phone's browser.
 
 ## Chat turns (`conversationId`)
 
-The conversation's identity and metadata stay with the chat page's thread (created by
-`agent_control thread/start`). The ACP agent's part lives in `AcpConversationStore`:
+With Codex selected, the conversation's identity and metadata stay with the chat page's Codex
+thread (created by `agent_control thread/start`). The ACP agent's part lives in `AcpConversationStore`:
 `files/runtime/acp-conversations/<conversationId>.json` (root-only, atomic replace) holds the
 `conversationId ↔ ACP sessionId` binding and every ACP turn, stored directly in the native
 thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall` with `tool`,
@@ -175,6 +175,23 @@ thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall
   restart. `thread/list` adds ACP conversations and still lists them if the app server cannot start.
 - Chat records follow the Codex chat contract: `result.txt` is the plain reply (completed turns
   only), `runtime-info.json` carries `threadId`, `conversationId`, `turnId`.
+- **Standalone conversations.** When a new conversation's chat turns route to ACP
+  (`RuntimeRouter.newConversation()`: env/`runtime.json` select `acp` with a binary),
+  `agent_control thread/start` neither starts nor asks the Codex app server: the broker creates a
+  random UUID conversation in the store (`origin:"acp"`), publishes its projection and answers
+  `{thread, runtime:"acp"}`. `thread/read`/`thread/list` see it at once and its first turn runs on
+  ACP. Because no Codex thread exists behind it, native-RPC `thread/read` (submit precheck, history
+  refresh) is answered from the store and `state.ready` is true for it even without the app server.
+  With Codex selected (the default), thread/start is unchanged. Renaming a standalone conversation
+  (`thread/name/set`) still goes to the app server and fails.
+- **Stop.** The chat page derives the active turn from the streamed `inProgress` ACP turn
+  (`acp-<uuid>`) and sends `interrupt`; the gateway hands an `acp-` turn to the broker op
+  `acpInterrupt` instead of Codex `turn/interrupt` (which answered `TURN_CHANGED`). `liveTask`
+  `cancel`/`replace` of a task routed to ACP (`runtime-route.json`, or an unrouted task of a
+  standalone conversation) skips the Codex goal checks (`RUNTIME_UNAVAILABLE` before). Both validate
+  the turn is still the conversation's running turn (else `TURN_CHANGED`) and write the task's
+  `cancel` marker; `AcpRuntime` then sends `session/cancel`, reclaims the agent after
+  `cancelGraceMillis` and closes the turn `interrupted`, the task `cancelled`.
 
 ## Phone tools over MCP
 
@@ -272,7 +289,8 @@ remote lane does not use them.
 
 `bash system/assistant/test-acp-runtime-host.sh` runs against an in-process fake ACP agent:
 router, ACP lifecycle, chat turns (store, streaming, `session/load` and transcript fallback, the
-chat page's own `AgentConversation` parser), the remote T3 lifecycle (`RemoteT3RuntimeTest`: in-memory
+chat page's own `AgentConversation` parser), standalone conversations and mid-turn stop
+(`AcpStandaloneConversationTest`), the remote T3 lifecycle (`RemoteT3RuntimeTest`: in-memory
 remote host in virtual time, plus the `HttpURLConnection` binding against a loopback server), MCP
 bridge, settings read/write and validation, sign-in URL capture
 and browser hand-off (mock `IntentLauncher`), and island projections checked against
