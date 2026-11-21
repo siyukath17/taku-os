@@ -22,14 +22,23 @@ import java.nio.charset.StandardCharsets;
  */
 final class PhoneMcpHost {
     static final String SOCKET = "taku-phone-mcp";
-    static final String ENV_TASK = "TAKU_MCP_TASK", ENV_PERMISSION = "TAKU_MCP_PERMISSION";
+    static final String ENV_TASK = "TAKU_MCP_TASK", ENV_PERMISSION = "TAKU_MCP_PERMISSION",
+            ENV_THREAD = "TAKU_MCP_THREAD", ENV_TURN = "TAKU_MCP_TURN";
+    private static final String THREAD_ID = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
     private static boolean started;
 
     private PhoneMcpHost() {}
 
-    /** The thread identity an ACP task uses for its background screen and Apps. */
+    /**
+     * The thread identity an ACP task uses for its background screen and Apps when the relay names
+     * none: the screen registries accept only native thread UUIDs (INVALID_SCREEN_THREAD otherwise).
+     */
     static String threadFor(String taskId) {
-        return "acp-" + taskId;
+        return AcpRuntime.phoneThread("", taskId);
+    }
+
+    static String threadFor(String taskId, String requested) {
+        return requested != null && requested.matches(THREAD_ID) ? requested : threadFor(taskId);
     }
 
     static synchronized void start() throws Exception {
@@ -58,9 +67,23 @@ final class PhoneMcpHost {
             JSONObject hello = new JSONObject(readLine(in, 4096));
             String task = hello.getString("task");
             if (!task.matches("[A-Za-z0-9._-]{1,128}")) return;
-            PhoneMcpBridge.Session session = new PhoneMcpBridge.Session(threadFor(task), hello.optString("permissionMode", "full"));
-            new PhoneMcpBridge(PhoneNativeTools::definitions, PhoneMcpHost::execute, PhoneMcpBridge.modePolicy(), session)
-                    .serve(in, s.getOutputStream());
+            String turn = hello.optString("turn", "");
+            if (!turn.matches("[A-Za-z0-9._-]{1,160}")) turn = "acp-task-" + task;
+            PhoneMcpBridge.Session session = new PhoneMcpBridge.Session(threadFor(task, hello.optString("thread", "")),
+                    hello.optString("permissionMode", "full"), turn);
+            // The agent's MCP connection lives exactly as long as its ACP turn (one agent process per
+            // task): it is the turn, as turn/started..turn/completed is for a Codex turn.
+            AcpConversations.phoneSessionStarted(session.threadId);
+            PhoneGestures.startTurn(session.threadId, session.turnId);
+            try {
+                new PhoneMcpBridge(PhoneNativeTools::definitions, PhoneMcpHost::execute, PhoneMcpBridge.modePolicy(), session)
+                        .serve(in, s.getOutputStream());
+            } finally {
+                PhoneGestures.endTurn(session.threadId, session.turnId);
+                // Release the turn's background screen as NativeBridge does on turn/completed.
+                try { DedicatedScreensOnDevice.shared().turnEnded(session.threadId); }
+                catch (Exception releaseFailed) { System.err.println("phone mcp screen release: " + releaseFailed.getMessage()); }
+            }
         } catch (Exception closed) {
             System.err.println("phone mcp: " + closed.getClass().getSimpleName());
         }
@@ -70,7 +93,8 @@ final class PhoneMcpHost {
         return PhoneNativeTools.execute(new JSONObject()
                 .put("tool", tool)
                 .put("arguments", arguments)
-                .put("threadId", session.threadId));
+                .put("threadId", session.threadId)
+                .put("turnId", session.turnId));
     }
 
     private static String readLine(InputStream in, int limit) throws Exception {
@@ -91,6 +115,7 @@ final class PhoneMcpHost {
         }
         String task = System.getenv(ENV_TASK);
         String permission = System.getenv(ENV_PERMISSION);
+        String thread = System.getenv(ENV_THREAD), turn = System.getenv(ENV_TURN);
         if (task == null || task.isEmpty()) {
             System.err.println(ENV_TASK + " is required");
             System.exit(2);
@@ -98,7 +123,8 @@ final class PhoneMcpHost {
         LocalSocket socket = new LocalSocket();
         socket.connect(new LocalSocketAddress(SOCKET));
         OutputStream toBroker = socket.getOutputStream();
-        toBroker.write((new JSONObject().put("task", task).put("permissionMode", permission == null ? "full" : permission) + "\n")
+        toBroker.write((new JSONObject().put("task", task).put("permissionMode", permission == null ? "full" : permission)
+                .put("thread", thread == null ? "" : thread).put("turn", turn == null ? "" : turn) + "\n")
                 .getBytes(StandardCharsets.UTF_8));
         toBroker.flush();
         Thread upstream = new Thread(() -> {

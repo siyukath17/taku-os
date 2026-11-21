@@ -8,8 +8,12 @@ import java.util.Map;
  * Chooses the {@link TaskRuntime} for one task. Codex is the default and the fallback for every
  * doubt: no config, unreadable config, unknown runtime name, an ACP or remote T3 request for a task
  * shape those lanes cannot serve yet, ACP without a configured binary, or remote T3 without a valid
- * endpoint and token reference. Only a positively valid ACP or remote T3 selection for a background
- * task leaves the Codex path.
+ * endpoint and token reference. Only a positively valid ACP selection for a background or chat task,
+ * or a positively valid remote T3 selection for a background task, leaves the Codex path.
+ *
+ * <p>Lane split: ACP serves background tasks and chat turns ({@code conversationId}); remote T3 serves
+ * only background heavy work, so a chat turn that resolves to {@code remote_t3} stays on Codex
+ * ({@code remote-t3-ineligible:conversation}).
  *
  * <p>Remote T3 reads {@code runtime.json "remoteT3"}; a request may override only
  * {@code remoteT3.projectId|environmentId|model} (never the endpoint or the token reference).
@@ -99,8 +103,10 @@ final class RuntimeRouter {
         if (CODEX.equals(requested)) return new Route(CODEX, requested, "selected-by-" + source, null);
         if (REMOTE_T3.equals(requested)) return remoteRoute(request, loaded, requested, source);
         if (!ACP.equals(requested)) return new Route(CODEX, requested, "unknown-runtime", null);
-        // ACP sessions cannot resume Codex threads or produce panel card replies yet.
-        String ineligible = ineligible(request);
+        // Conversation reads and panel card replies stay on Codex. Chat turns (conversationId) run
+        // on ACP: AcpConversationStore keeps their session and turns, and the conversation's display
+        // projection merges them, so thread/read and the chat page see them like native turns.
+        String ineligible = acpIneligible(request);
         if (ineligible != null) return new Route(CODEX, requested, "acp-ineligible:" + ineligible, null);
         JSONObject acpConfig = loaded.optJSONObject(ACP);
         if (acpConfig == null || acpConfig.optString("binary", "").trim().isEmpty())
@@ -108,16 +114,23 @@ final class RuntimeRouter {
         return new Route(ACP, requested, "selected-by-" + source, acpConfig);
     }
 
-    /** Task shapes only Codex serves: agent controls, chat conversations, panel updates. */
-    private static String ineligible(JSONObject request) {
+    /** Task shapes ACP cannot serve: agent controls and panel updates. Chat turns are served. */
+    private static String acpIneligible(JSONObject request) {
         if ("agent_control".equals(request.optString("kind"))) return "control";
-        if (request.has("conversationId")) return "conversation";
         if (request.optJSONObject("panelUpdate") != null) return "panel-update";
         return null;
     }
 
+    /** Task shapes remote T3 cannot serve: everything ACP cannot, plus chat conversations. */
+    private static String remoteIneligible(JSONObject request) {
+        String acp = acpIneligible(request);
+        if (acp != null) return acp;
+        if (request.has("conversationId")) return "conversation";
+        return null;
+    }
+
     private Route remoteRoute(JSONObject request, JSONObject loaded, String requested, String source) {
-        String ineligible = ineligible(request);
+        String ineligible = remoteIneligible(request);
         if (ineligible != null) return new Route(CODEX, requested, "remote-t3-ineligible:" + ineligible, null);
         if (remote == null) return new Route(CODEX, requested, "remote-t3-unavailable", null);
         JSONObject stored = loaded.optJSONObject(REMOTE_T3_KEY);

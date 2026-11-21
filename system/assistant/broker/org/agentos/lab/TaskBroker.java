@@ -81,7 +81,8 @@ public final class TaskBroker {
                         AcpRuntime.Options.fromJson(acpConfig),
                         AcpProcessTransport.process(),
                         TaskBroker::notifyUser,
-                        () -> serviceWhileTurnRuns("acp")),
+                        () -> serviceWhileTurnRuns("acp"),
+                        AcpConversations.HOST),
                 remoteConfig -> {
                     RemoteT3Runtime.Options options = RemoteT3Runtime.Options.fromJson(remoteConfig);
                     return new RemoteT3Runtime(
@@ -184,6 +185,8 @@ public final class TaskBroker {
         write(new File(ROOT, "broker.pid"), Integer.toString(Process.myPid()));
         recoverInterrupted();
         retirePanelCapabilities();
+        // ACP chat turns are part of their conversation's projection (thread/read, chat page).
+        AgentViews.overlay = AcpConversations::overlay;
         AccountBridge.start();
         NativeBridge.start();
         try { PhoneMcpHost.start(); }

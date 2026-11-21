@@ -48,6 +48,23 @@ final class AcpRuntime implements TaskRuntime {
         void taskUpdated(String taskId);
     }
 
+    /**
+     * Chat turns (requests with {@code conversationId}). The store keeps the conversation's ACP
+     * session and turns; {@link #changed} republishes the conversation's display projection so the
+     * chat page streams the turn; {@link #history} supplies earlier display turns (any runtime) for a
+     * fresh session that could not resume the previous one.
+     */
+    interface ChatHost {
+        AcpConversationStore store();
+
+        void changed(String conversationId);
+
+        JSONArray history(String conversationId) throws Exception;
+    }
+
+    /** Earlier turns carried into a fresh session, bounded so the prompt stays small. */
+    static final int TRANSCRIPT_CHARS = 12_000;
+
     /** Parsed {@code runtime.json "acp"} object. Paths are on-device paths. */
     static final class Options {
         String binary = "";
@@ -123,12 +140,18 @@ final class AcpRuntime implements TaskRuntime {
     private final AcpProcessTransport transport;
     private final Notifier notifier;
     private final Runnable idle;
+    private final ChatHost chatHost;
 
     AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle) {
+        this(options, transport, notifier, idle, null);
+    }
+
+    AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle, ChatHost chatHost) {
         this.options = options;
         this.transport = transport;
         this.notifier = notifier == null ? id -> {} : notifier;
         this.idle = idle == null ? () -> {} : idle;
+        this.chatHost = chatHost;
     }
 
     @Override
@@ -169,6 +192,7 @@ final class AcpRuntime implements TaskRuntime {
             finish(directory, request, "cancelled", "Cancelled before execution.", null);
             return;
         }
+        Chat chat = Chat.begin(chatHost, request, Math.min(250, options.progressIntervalMillis));
         TaskRecords.state(directory, request, "running", "Starting the on-device agent…");
         notifier.taskUpdated(request.getString("id"));
         AcpProcessTransport.Connection connection;
@@ -180,21 +204,35 @@ final class AcpRuntime implements TaskRuntime {
             connection = transport.start(launch());
         } catch (IOException startFailed) {
             diagnostic(directory, "start-failed", startFailed.getMessage(), "");
+            if (chat != null) chat.end("failed", null);
             finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);
             return;
         }
-        Turn turn = new Turn(directory, request, connection);
+        Turn turn = new Turn(directory, request, connection, chat);
+        activeChat = chat;
         try {
             turn.execute();
         } finally {
+            activeChat = null;
             connection.destroy(Math.min(2000, options.cancelGraceMillis));
+            // A path that ended without finish() (an unexpected exception) still closes the turn.
+            if (chat != null && !chat.ended) chat.end("failed", null);
         }
     }
 
     // ---- terminal records -------------------------------------------------------------------
 
+    /** The chat turn of the task currently running on this runtime instance, if any. */
+    private Chat activeChat;
+
     private void finish(File directory, JSONObject request, String status, String message, String reply) throws Exception {
-        if (reply != null || !"cancelled".equals(status))
+        // The conversation shows the turn's end before the task record does.
+        if (activeChat != null && !activeChat.ended) activeChat.end(status, reply);
+        if (request.has("conversationId") && chatHost != null) {
+            // Chat turns use the chat result contract (as CodexAppServer does): the readable reply as
+            // plain text, written only for a completed turn; the state message carries everything else.
+            if ("completed".equals(status)) TaskRecords.write(new File(directory, "result.txt"), reply == null ? "" : reply);
+        } else if (reply != null || !"cancelled".equals(status))
             TaskRecords.write(new File(directory, "result.txt"), new JSONObject()
                     .put("status", "cancelled".equals(status) ? "failed" : status)
                     .put("message", reply == null || reply.isEmpty() ? message : reply)
@@ -269,8 +307,10 @@ final class AcpRuntime implements TaskRuntime {
         String summary = "", phase = "starting", plan = "", currentTool = "";
         long lastProgressWrite, lastIdle;
         int permissionsAllowed, permissionsRejected, ignoredLines;
+        final Chat chat;
 
-        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection) {
+        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat) {
+            this.chat = chat;
             this.directory = directory;
             this.request = request;
             this.connection = connection;
@@ -343,28 +383,65 @@ final class AcpRuntime implements TaskRuntime {
                     return;
                 }
                 JSONArray authMethods = init.optJSONArray("authMethods");
-                JSONObject session;
-                try {
-                    session = call("session/new", new JSONObject()
-                            .put("cwd", options.cwd)
-                            .put("mcpServers", mcpServers()));
-                } catch (AcpError error) {
-                    if (error.code == AUTH_REQUIRED) {
-                        needsUser(authMethods);
-                        return;
-                    }
-                    throw error;
+                JSONObject capabilities = init.optJSONObject("agentCapabilities");
+                boolean resumed = false;
+                String loadFailure = "";
+                // A chat continues its previous agent session when the agent can load it.
+                if (chat != null && !chat.priorSession.isEmpty()) {
+                    if (capabilities != null && capabilities.optBoolean("loadSession")) {
+                        try {
+                            // History replayed by session/load arrives while sessionId is still empty,
+                            // so notification() ignores it: the store already holds those turns.
+                            call("session/load", new JSONObject()
+                                    .put("sessionId", chat.priorSession)
+                                    .put("cwd", options.cwd)
+                                    .put("mcpServers", mcpServers()));
+                            sessionId = chat.priorSession;
+                            resumed = true;
+                        } catch (AcpError error) {
+                            if (error.code == AUTH_REQUIRED) {
+                                needsUser(authMethods);
+                                return;
+                            }
+                            loadFailure = error.code + " " + clip(redact(error.getMessage() == null ? "" : error.getMessage()), 200);
+                        }
+                    } else loadFailure = "loadSession unsupported";
                 }
-                sessionId = session.getString("sessionId");
-                TaskRecords.write(new File(directory, "runtime-info.json"), new JSONObject()
+                if (!resumed) {
+                    JSONObject session;
+                    try {
+                        session = call("session/new", new JSONObject()
+                                .put("cwd", options.cwd)
+                                .put("mcpServers", mcpServers()));
+                    } catch (AcpError error) {
+                        if (error.code == AUTH_REQUIRED) {
+                            needsUser(authMethods);
+                            return;
+                        }
+                        throw error;
+                    }
+                    sessionId = session.getString("sessionId");
+                }
+                JSONObject info = new JSONObject()
                         .put("taskId", id)
                         .put("runtime", "acp")
                         .put("protocolVersion", PROTOCOL_VERSION)
                         .put("agentInfo", init.optJSONObject("agentInfo") == null ? JSONObject.NULL : init.getJSONObject("agentInfo"))
                         .put("sessionId", sessionId)
-                        .put("turnStarted", true)
-                        .toString());
-                JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", request.getString("prompt")));
+                        .put("turnStarted", true);
+                String text = request.getString("prompt");
+                if (chat != null) {
+                    chat.bind(sessionId, init.optJSONObject("agentInfo"));
+                    // The chat page reads threadId/turnId like a Codex chat turn's runtime-info.
+                    info.put("threadId", chat.conversationId).put("conversationId", chat.conversationId)
+                            .put("turnId", chat.turnId).put("sessionResumed", resumed);
+                    if (!loadFailure.isEmpty()) info.put("sessionLoadFailure", loadFailure);
+                    if (!resumed && !chat.transcript.isEmpty())
+                        text = "Earlier messages in this conversation, for context (the previous agent session could not be resumed):\n"
+                                + chat.transcript + "\n\nCurrent message:\n" + text;
+                }
+                TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+                JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", text));
                 JSONObject image = screenshot(init);
                 if (image != null) prompt.put(image);
                 phase = "working";
@@ -412,6 +489,10 @@ final class AcpRuntime implements TaskRuntime {
                 env.put(new JSONObject().put("name", key).put("value", configured.getString(key)));
             }
             env.put(new JSONObject().put("name", "TAKU_MCP_TASK").put("value", request.getString("id")));
+            // The phone tools' session identity (screens, Apps, gestures): the conversation for a chat
+            // turn, as for a Codex chat turn; a stable UUID per background task otherwise.
+            env.put(new JSONObject().put("name", "TAKU_MCP_THREAD").put("value", phoneThread(request)));
+            env.put(new JSONObject().put("name", "TAKU_MCP_TURN").put("value", chat != null ? chat.turnId : "acp-task-" + request.getString("id")));
             env.put(new JSONObject().put("name", "TAKU_MCP_PERMISSION").put("value", permissionMode));
             JSONArray args = phone.optJSONArray("args");
             return servers.put(new JSONObject()
@@ -605,8 +686,10 @@ final class AcpRuntime implements TaskRuntime {
             switch (update.optString("sessionUpdate")) {
                 case "agent_message_chunk": {
                     JSONObject content = update.optJSONObject("content");
-                    if (content != null && "text".equals(content.optString("type")) && reply.length() < MAX_TEXT_CHARS)
+                    if (content != null && "text".equals(content.optString("type")) && reply.length() < MAX_TEXT_CHARS) {
                         reply.append(content.optString("text"));
+                        if (chat != null) chat.message(content.optString("text"));
+                    }
                     if (!"stopping".equals(phase)) phase = "replying";
                     progress("Writing the result…", false);
                     break;
@@ -620,6 +703,7 @@ final class AcpRuntime implements TaskRuntime {
                     JSONObject call = new JSONObject().put("title", update.optString("title", "tool"))
                             .put("kind", update.optString("kind", "other")).put("status", update.optString("status", "pending"));
                     toolCalls.put(toolId, call);
+                    if (chat != null) chat.tool(toolId, update);
                     currentTool = call.getString("title");
                     if (!"stopping".equals(phase)) phase = "tool";
                     progress("Working: " + clip(call.getString("title"), 80), true);
@@ -634,6 +718,7 @@ final class AcpRuntime implements TaskRuntime {
                     if (update.has("title") && !update.isNull("title")) call.put("title", update.optString("title"));
                     currentTool = call.getString("title");
                     if (update.has("status") && !update.isNull("status")) call.put("status", update.optString("status"));
+                    if (chat != null) chat.tool(update.optString("toolCallId"), update);
                     progress("Working: " + clip(call.getString("title"), 80), false);
                     break;
                 }
@@ -681,6 +766,158 @@ final class AcpRuntime implements TaskRuntime {
 
     static String clip(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max - 1) + "…";
+    }
+
+    /**
+     * The phone-tool thread identity for a task. The dedicated-screen, App and gesture registries key
+     * sessions by native thread UUID ({@code [a-f0-9-]{36}}), so a chat turn uses its conversation and a
+     * background task a name-based UUID of its task id.
+     */
+    static String phoneThread(JSONObject request) {
+        return phoneThread(request.optString("conversationId", ""), request.optString("id"));
+    }
+
+    static String phoneThread(String conversationId, String taskId) {
+        if (AcpConversationStore.validId(conversationId)) return conversationId;
+        return java.util.UUID.nameUUIDFromBytes(("taku-acp-task:" + taskId).getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    // ---- chat turns ---------------------------------------------------------------------------
+
+    /**
+     * One chat turn's projection into {@link AcpConversationStore}: the user's message is recorded
+     * before the agent starts, then agent messages and tool calls stream into native-shaped items
+     * (throttled), and {@link #end} records the terminal turn status.
+     */
+    static final class Chat {
+        final ChatHost host;
+        final AcpConversationStore store;
+        final String conversationId, turnId, priorSession, transcript;
+        final long intervalMillis;
+        /** Items after the user's message, in arrival order. */
+        final Map<String, JSONObject> items = new LinkedHashMap<>();
+        JSONObject message;
+        int messages;
+        long lastFlush;
+        boolean ended;
+
+        private Chat(ChatHost host, String conversationId, String turnId, String priorSession, String transcript, long intervalMillis) {
+            this.host = host;
+            this.store = host.store();
+            this.conversationId = conversationId;
+            this.turnId = turnId;
+            this.priorSession = priorSession;
+            this.transcript = transcript;
+            this.intervalMillis = intervalMillis;
+        }
+
+        static Chat begin(ChatHost host, JSONObject request, long intervalMillis) throws Exception {
+            String conversation = request.optString("conversationId", "");
+            if (host == null || conversation.isEmpty()) return null;
+            if (!AcpConversationStore.validId(conversation)) throw new IOException("Invalid conversation identifier");
+            AcpConversationStore store = host.store();
+            String prior = store.sessionId(conversation);
+            String transcript = "";
+            try {
+                transcript = AcpConversationStore.transcript(host.history(conversation), TRANSCRIPT_CHARS);
+            } catch (Exception unavailable) {
+                // No carried-over context is better than no turn.
+            }
+            String turn = store.beginTurn(conversation, request.getString("id"), request.getString("prompt"));
+            Chat chat = new Chat(host, conversation, turn, prior, transcript, intervalMillis);
+            host.changed(conversation);
+            return chat;
+        }
+
+        void bind(String sessionId, JSONObject agentInfo) throws Exception {
+            store.bindSession(conversationId, sessionId, agentInfo);
+        }
+
+        void message(String chunk) throws Exception {
+            if (message == null) {
+                message = new JSONObject().put("type", "agentMessage").put("id", turnId + "-msg-" + (++messages)).put("text", "");
+                items.put(message.getString("id"), message);
+            }
+            if (message.optString("text").length() < MAX_TEXT_CHARS) message.put("text", message.optString("text") + chunk);
+            flush(false);
+        }
+
+        void tool(String toolCallId, JSONObject update) throws Exception {
+            String id = turnId + "-tool-" + (toolCallId == null || toolCallId.isEmpty() ? "unknown" : toolCallId);
+            JSONObject item = items.get(id);
+            if (item == null) {
+                item = new JSONObject().put("type", "mcpToolCall").put("id", id).put("server", "agy")
+                        .put("tool", "tool").put("status", "inProgress");
+                items.put(id, item);
+                // Text after a tool call is a new message, so the order of events is kept.
+                message = null;
+            }
+            if (update.has("title") && !update.isNull("title")) item.put("tool", clip(redact(update.optString("title")), 200));
+            if (update.has("kind") && !update.isNull("kind")) item.put("kind", update.optString("kind"));
+            if (update.has("status") && !update.isNull("status")) item.put("status", toolStatus(update.optString("status")));
+            Object input = update.opt("rawInput");
+            if (input instanceof JSONObject) {
+                String raw = redact(input.toString());
+                item.put("arguments", raw.length() <= 4000 ? new JSONObject(raw) : new JSONObject().put("summary", clip(raw, 4000)));
+            }
+            JSONArray content = update.optJSONArray("content");
+            if (content != null) {
+                StringBuilder out = new StringBuilder();
+                for (int i = 0; i < content.length(); i++) {
+                    JSONObject part = content.optJSONObject(i);
+                    JSONObject inner = part == null ? null : part.optJSONObject("content");
+                    if (inner != null && "text".equals(inner.optString("type"))) {
+                        if (out.length() > 0) out.append('\n');
+                        out.append(inner.optString("text"));
+                    }
+                }
+                if (out.length() > 0) item.put("result", new JSONObject().put("content",
+                        new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(redact(out.toString()), 4000)))));
+            }
+            flush(true);
+        }
+
+        static String toolStatus(String acp) {
+            switch (acp) {
+                case "completed": return "completed";
+                case "failed": return "failed";
+                default: return "inProgress";
+            }
+        }
+
+        void flush(boolean force) throws Exception {
+            long now = System.currentTimeMillis();
+            if (!force && now - lastFlush < intervalMillis) return;
+            lastFlush = now;
+            store.updateTurn(conversationId, turnId, snapshot(false), "inProgress");
+            host.changed(conversationId);
+        }
+
+        JSONArray snapshot(boolean terminal) throws Exception {
+            JSONArray out = new JSONArray();
+            String last = "";
+            if (terminal) for (JSONObject item : items.values())
+                if ("agentMessage".equals(item.optString("type")) && !item.optString("text").isBlank()) last = item.getString("id");
+            for (JSONObject item : items.values()) {
+                JSONObject copy = new JSONObject(item.toString());
+                if (terminal && "agentMessage".equals(copy.optString("type")))
+                    copy.put("phase", copy.getString("id").equals(last) ? "final_answer" : "commentary");
+                if (terminal && "mcpToolCall".equals(copy.optString("type")) && "inProgress".equals(copy.optString("status")))
+                    copy.put("status", "interrupted");
+                out.put(copy);
+            }
+            return out;
+        }
+
+        /** Task status → native turn status; the reply text, if the agent sent none as chunks. */
+        void end(String taskStatus, String reply) throws Exception {
+            if (ended) return;
+            ended = true;
+            if (messages == 0 && reply != null && !reply.isBlank() && "completed".equals(taskStatus)) message(reply);
+            String status = "completed".equals(taskStatus) ? "completed" : "cancelled".equals(taskStatus) ? "interrupted" : "failed";
+            store.updateTurn(conversationId, turnId, snapshot(true), status);
+            host.changed(conversationId);
+        }
     }
 
     static String headline(String text) {

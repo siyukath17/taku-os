@@ -70,8 +70,15 @@ public final class RuntimeRouterTest {
         route = router(codexDefault, Map.of("TAKU_TASK_RUNTIME", "acp")).route(task().put("runtime", "codex"));
         check("codex".equals(route.runtime), "request beats env");
 
-        route = router(acpConfig(), noEnv).route(task().put("conversationId", "thread-1"));
-        check("codex".equals(route.runtime) && "acp-ineligible:conversation".equals(route.reason), "chat conversations stay on Codex");
+        route = router(acpConfig(), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("acp".equals(route.runtime) && "selected-by-config".equals(route.reason) && route.acpConfig != null,
+                "chat conversations run on ACP when runtime.json selects it");
+        route = new RuntimeRouter(CODEX, ACP, () -> null, noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime) && "default".equals(route.reason), "chat without runtime.json stays on Codex");
+        route = router(acpConfig().put("default", "codex"), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime), "chat with default codex stays on Codex");
+        route = router(new JSONObject().put("default", "acp"), noEnv).route(task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57"));
+        check("codex".equals(route.runtime) && "acp-unconfigured".equals(route.reason), "chat on unconfigured ACP falls back to Codex");
         route = router(acpConfig(), noEnv).route(task().put("panelUpdate", new JSONObject().put("originThreadId", "t")));
         check("codex".equals(route.runtime) && "acp-ineligible:panel-update".equals(route.reason), "panel updates stay on Codex");
         route = router(acpConfig(), noEnv).route(task().put("kind", "agent_control"));
@@ -146,6 +153,23 @@ public final class RuntimeRouterTest {
         // The ACP lane is untouched by the remote block.
         route = remoteRouter.apply(acpConfig(), noEnv).route(task());
         check("acp".equals(route.runtime) && route.remoteConfig == null, "acp default unaffected by the remote lane");
+
+        // Lane split with both lanes configured: default acp takes chat and background work; remote_t3
+        // (explicit or default) takes only background work and leaves chat turns on Codex.
+        JSONObject both = new JSONObject(remoteConfig.toString()).put("acp", acpConfig().getJSONObject("acp")).put("default", "acp");
+        JSONObject chat = task().put("conversationId", "01a1fe6b-eaee-7821-b2b6-8302e8130e57");
+        check("acp".equals(remoteRouter.apply(both, noEnv).route(chat).runtime), "both lanes, default acp: chat on acp");
+        check("acp".equals(remoteRouter.apply(both, noEnv).route(task()).runtime), "both lanes, default acp: background on acp");
+        check("remote_t3".equals(remoteRouter.apply(both, noEnv).route(task().put("runtime", "remote_t3")).runtime),
+                "both lanes, explicit remote_t3: background on remote_t3");
+        route = remoteRouter.apply(both, noEnv).route(new JSONObject(chat.toString()).put("runtime", "remote_t3"));
+        check("codex".equals(route.runtime) && "remote-t3-ineligible:conversation".equals(route.reason),
+                "both lanes, explicit remote_t3 chat: stays on codex");
+        JSONObject remoteDefault = new JSONObject(both.toString()).put("default", "remote_t3");
+        check("remote_t3".equals(remoteRouter.apply(remoteDefault, noEnv).route(task()).runtime), "default remote_t3: background on remote_t3");
+        check("codex".equals(remoteRouter.apply(remoteDefault, noEnv).route(chat).runtime), "default remote_t3: chat on codex");
+        check("codex".equals(remoteRouter.apply(new JSONObject(), noEnv).route(chat).runtime)
+                && "codex".equals(remoteRouter.apply(new JSONObject(), noEnv).route(task()).runtime), "no config: all codex");
 
         JSONObject json = router(acpConfig(), noEnv).route(task()).json();
         check(json.getString("runtime").equals("acp") && json.getString("requested").equals("acp") && json.has("reason"),

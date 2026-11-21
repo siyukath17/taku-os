@@ -2,6 +2,8 @@ package org.agentos.lab;
 
 import android.util.Log;
 
+import org.json.JSONObject;
+
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -24,10 +26,23 @@ final class DedicatedScreensOnDevice {
                             PhoneExecutionScreens.DEVICE_HOST,
                             PhoneTasks.DEVICE,
                             new DeviceClock(),
-                            NativeBridge::askCodex,
+                            DedicatedScreensOnDevice::askCodex,
                             DedicatedScreensOnDevice::systemLanguage,
                             message -> Log.w(LOG_TAG, message));
         return shared;
+    }
+
+    /**
+     * Codex as the screen registry sees it. ACP phone sessions (an ACP conversation, or an ACP
+     * background task's thread) are not app-server threads: a conversation created by thread/start
+     * that never ran a Codex turn is not even persisted, so thread/read answers "thread not loaded"
+     * and request_apps failed on the device. They never spawn sub-agents, so they answer as root
+     * threads here; every other call goes to Codex unchanged.
+     */
+    static JSONObject askCodex(String method, JSONObject params) throws Exception {
+        if ("thread/read".equals(method) && params != null && AcpConversations.phoneSession(params.optString("threadId")))
+            return new JSONObject().put("thread", new JSONObject().put("id", params.getString("threadId")).put("source", "acp"));
+        return NativeBridge.askCodex(method, params);
     }
 
     /** Monotonic time; callbacks run one at a time on a daemon thread. */

@@ -10,7 +10,24 @@ import java.util.LinkedHashMap
 
 /** A disposable projection of native thread/turn/item objects, never a conversation database. */
 internal class AgentViews {
+    /** Rewrites a native thread before projection (ACP chat turns are merged here). */
+    fun interface Overlay {
+        @Throws(Exception::class)
+        fun apply(thread: JSONObject): JSONObject
+    }
+
     companion object {
+        @JvmField @Volatile var overlay: Overlay? = null
+
+        private fun overlaid(thread: JSONObject): JSONObject {
+            val hook = overlay ?: return thread
+            return try { hook.apply(thread) } catch (failure: Exception) {
+                // A broken overlay must never fail a native projection save.
+                System.err.println("agent view overlay: $failure")
+                thread
+            }
+        }
+
         private var directoryReady = false
         @JvmField val ROOT = File(TaskBroker.ROOT, "agent-view")
         @JvmField val threads: MutableMap<String, JSONObject> = Collections.synchronizedMap(LinkedHashMap())
@@ -25,7 +42,7 @@ internal class AgentViews {
         fun save(thread: JSONObject) {
             synchronized(AgentViews::class.java) {
                 val id = thread.getString("id")
-                val raw = project(JSONObject(thread.toString()))
+                val raw = project(overlaid(JSONObject(thread.toString())))
                 if (id in liveThreads) AgentSessionReducer.retainActiveTurns(raw, rawThreads[id])
                 var previous = threads[id]
                 if (previous == null) {
@@ -49,6 +66,15 @@ internal class AgentViews {
                 val id = metadata.getString("id")
                 val previous = existing(id)
                 save(AgentViewProjection.mergeMetadata(previous, metadata))
+            }
+        }
+
+        /** Re-save the conversation (native view, else [seed]) so [overlay] merges its current turns. */
+        @JvmStatic
+        @Throws(Exception::class)
+        fun refresh(id: String, seed: JSONObject) {
+            synchronized(AgentViews::class.java) {
+                save(existing(id) ?: seed)
             }
         }
 

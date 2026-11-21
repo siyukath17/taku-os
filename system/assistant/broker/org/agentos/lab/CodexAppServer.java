@@ -635,8 +635,22 @@ public final class CodexAppServer implements AutoCloseable {
     static void control(File directory, JSONObject request) throws Exception {
         JSONObject answer = new JSONObject();
         try {
-            CodexAppServer server = shared();
             String method = request.getString("method");
+            if (AcpConversations.servesRead(request)) {
+                // An ACP conversation's turns live in AcpConversationStore, not in the app server.
+                answer.put("ok", true).put("result", AcpConversations.read(request.getJSONObject("params").getString("threadId")));
+                TaskBroker.write(new File(directory, "response.json"), answer.toString());
+                TaskBroker.write(new File(directory, "done"), "control");
+                return;
+            }
+            CodexAppServer server;
+            try {
+                server = shared();
+            } catch (Exception unavailable) {
+                // ACP conversations stay listable while the Codex app server cannot start.
+                if (!"thread/list".equals(method) || AcpConversations.STORE.ids().isEmpty()) throw unavailable;
+                server = null;
+            }
             JSONObject params = request.optJSONObject("params");
             if (params == null) params = new JSONObject();
             JSONObject result;
@@ -677,18 +691,21 @@ public final class CodexAppServer implements AutoCloseable {
                 AgentViews.save(result.getJSONObject("thread"));
                 server.freshThreads.put(result.getJSONObject("thread").getString("id"), result);
             } else if ("thread/list".equals(method)) {
-                result =
-                        server.call(
-                                method,
-                                new JSONObject()
-                                        .put("cwd", "/data/local/agentos/work")
-                                        .put("limit", 100)
-                                        .put("sourceKinds", new JSONArray()));
-                JSONArray data = result.getJSONArray("data");
-                for (int i = 0; i < data.length(); i++) {
-                    JSONObject row = data.getJSONObject(i);
-                    if (!AgentViews.threads.containsKey(row.getString("id"))) AgentViews.saveMetadata(row);
+                if (server != null) {
+                    result =
+                            server.call(
+                                    method,
+                                    new JSONObject()
+                                            .put("cwd", "/data/local/agentos/work")
+                                            .put("limit", 100)
+                                            .put("sourceKinds", new JSONArray()));
+                    JSONArray data = result.getJSONArray("data");
+                    for (int i = 0; i < data.length(); i++) {
+                        JSONObject row = data.getJSONObject(i);
+                        if (!AgentViews.threads.containsKey(row.getString("id"))) AgentViews.saveMetadata(row);
+                    }
                 }
+                AcpConversations.publishAll();
                 AgentViews.index();
                 result = new JSONObject(TaskBroker.read(new File(AgentViews.ROOT, "threads.json")));
                 SessionRemovalRuntime.filter(result);

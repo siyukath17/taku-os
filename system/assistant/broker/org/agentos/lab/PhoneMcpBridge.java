@@ -37,11 +37,16 @@ final class PhoneMcpBridge {
 
     /** Who is calling: the per-task thread identity that owns a background screen. */
     static final class Session {
-        final String threadId, permissionMode;
+        final String threadId, permissionMode, turnId;
 
         Session(String threadId, String permissionMode) {
+            this(threadId, permissionMode, "");
+        }
+
+        Session(String threadId, String permissionMode, String turnId) {
             this.threadId = threadId;
             this.permissionMode = permissionMode == null || permissionMode.isEmpty() ? "full" : permissionMode;
+            this.turnId = turnId == null ? "" : turnId;
         }
     }
 
