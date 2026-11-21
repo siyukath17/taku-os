@@ -128,6 +128,11 @@ the existing background-task notification (the assistant APK now requests
 project to null, so the Codex notification is unchanged. Tasks owned by
 `BackgroundScreenTasks` keep their bottom surface and get no island card.
 
+Each ACP/remote T3 task posts its notification under its own tag (`acp-task-<id>`, id 42) and
+replaces the previous task's: SystemUI keeps an island's first-seen time, lifetime and dismissal
+per notification key and an update never extends the lifetime, so a shared untagged key expired the
+island for every task after the first hour (`cmd statusbar island list` → `activities:[]`).
+
 ## Protocol and records
 
 ACP v1, newline-delimited JSON-RPC 2.0 on stdio, with one agent process per task:
@@ -185,6 +190,13 @@ registries reject non-UUID sessions with `INVALID_SCREEN_THREAD`), and the MCP c
 (`TAKU_MCP_TURN`): gestures start/end with it and its background screen is released when it closes.
 The screen registry answers `thread/read` for ACP phone sessions as root threads instead of asking
 Codex (which answered `thread not loaded`).
+
+`device_info` needs no held screen: it always returns `android` and `model`, plus the held
+execution screen's fields (`screen:true`, `displayId`, …) or `screen:false` with `screenNote`.
+A failed tool call in a chat turn is stored with `error: {code, message, source}` (message redacted,
+≤300 chars). For `taku_phone` tools the code comes from the broker's own bridge when the agent does
+not forward the MCP error text (agy reports only `failed`); e.g. `APPS_NOT_REQUESTED`,
+`PERMISSION_DENIED`, `TOOL_FAILED`.
 
 ## Remote T3 runtime (second lane)
 

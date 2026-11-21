@@ -227,7 +227,44 @@ public final class PhoneMcpBridgeTest {
         check("c-3".equals(new JSONObject(lines[2]).getString("id")) && executor.calls.size() == 1, "serve: string ids round-trip and the tool ran");
     }
 
+    /** Failures are recorded per turn with their leading code, for the ACP chat projection. */
+    static void failuresRecordedPerTurn() throws Exception {
+        Executor executor = new Executor();
+        PhoneMcpBridge bridge = new PhoneMcpBridge(PhoneMcpBridgeTest::definitions, executor, null,
+                new PhoneMcpBridge.Session("acp-42", "full", "turn-fail-1"));
+        bridge.handle(rpc(0, "initialize", new JSONObject().put("protocolVersion", "2025-06-18")));
+        bridge.handle(rpc(null, "notifications/initialized", null));
+        executor.failure = new IOException("APPS_NOT_REQUESTED: call request_apps first");
+        JSONObject result = call(bridge, 1, "tap", new JSONObject().put("x", 1).put("y", 1)).getJSONObject("result");
+        check("APPS_NOT_REQUESTED".equals(result.getJSONObject("structuredContent").getString("code")),
+                "a leading CODE: in free text becomes the error code");
+        executor.failure = null;
+        JSONObject recorded = PhoneMcpBridge.Failures.take("turn-fail-1", "tap");
+        check(recorded != null && "APPS_NOT_REQUESTED".equals(recorded.getString("code"))
+                && recorded.getString("message").contains("request_apps"), "failure recorded for the turn " + recorded);
+        check(PhoneMcpBridge.Failures.take("turn-fail-1", "tap") == null, "take consumes");
+        check(PhoneMcpBridge.Failures.code("Phone tool failed") == null && "X_Y".equals(PhoneMcpBridge.Failures.code("X_Y")), "code parsing");
+        for (int i = 0; i < PhoneMcpBridge.Failures.MAX_TURNS + 5; i++) PhoneMcpBridge.Failures.record("t" + i, "tap", "A_B", "m");
+        check(PhoneMcpBridge.Failures.take("t0", "tap") == null && PhoneMcpBridge.Failures.take("t" + (PhoneMcpBridge.Failures.MAX_TURNS + 4), "tap") != null,
+                "registry is bounded to the newest turns");
+    }
+
+    /** device_info answers without a held execution screen (chat turns before request_apps). */
+    static void deviceInfoWithoutScreen() throws Exception {
+        java.util.Map<String, String> props = java.util.Map.of("ro.build.version.release", "17\n", "ro.product.model", "Pixel 9\n");
+        JSONObject bare = PhoneDeviceInfo.read(props::get, () -> { throw new IOException("APPS_NOT_REQUESTED: call request_apps first"); });
+        check("17".equals(bare.getString("android")) && "Pixel 9".equals(bare.getString("model")) && !bare.getBoolean("screen")
+                && bare.getString("screenNote").startsWith("APPS_NOT_REQUESTED") && !bare.has("displayId"), "no screen: still answers " + bare);
+        JSONObject held = PhoneDeviceInfo.read(props::get, () -> new JSONObject().put("displayId", 3).put("userId", 0));
+        check(held.getBoolean("screen") && held.getInt("displayId") == 3 && "Pixel 9".equals(held.getString("model")), "held screen: merged");
+        boolean interrupted = false;
+        try { PhoneDeviceInfo.read(props::get, () -> { throw new InterruptedException(); }); } catch (InterruptedException expected) { interrupted = true; }
+        check(interrupted, "interruption is not swallowed");
+    }
+
     public static void main(String[] args) throws Exception {
+        failuresRecordedPerTurn();
+        deviceInfoWithoutScreen();
         initialize();
         listTools();
         callTools();

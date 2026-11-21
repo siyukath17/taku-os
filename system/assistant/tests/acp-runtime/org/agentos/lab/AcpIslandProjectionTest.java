@@ -120,6 +120,11 @@ public final class AcpIslandProjectionTest {
         AcpIslandProjection.Projection needsLogin = AcpIslandProjection.fromTaskDirectory(authDir, "302");
         valid(needsLogin, "needs_user from a real run");
         check(needsLogin.signIn, "a real auth_required run offers the sign-in action");
+
+        // Each task gets its own notification key, so SystemUI's per-key island lifetime starts fresh.
+        check(!AcpIslandProjection.notificationTag("301").equals(AcpIslandProjection.notificationTag("302")), "per-task notification tag");
+        check(AcpIslandProjection.staleTag(null, "acp-task-2") == null && AcpIslandProjection.staleTag("acp-task-2", "acp-task-2") == null
+                && "acp-task-1".equals(AcpIslandProjection.staleTag("acp-task-1", "acp-task-2")), "previous task slot replaced, current kept");
         System.out.println("AcpIslandProjectionTest passed " + checks + " checks");
     }
 }

@@ -66,9 +66,24 @@ class TaskNotificationReceiver : BroadcastReceiver() {
                 .setAutoCancel(!running)
             // ACP tasks also drive the Dynamic Island from progress.json; every other task keeps
             // exactly the plain notification above (the projection returns null for them).
-            AcpIslandProjection.fromTaskDirectory(java.io.File(context.filesDir, "runtime/tasks/$id"), id)
-                ?.let { attachAcpIsland(context, notice, it, link) }
-            manager.notify(42, notice.build())
+            val island = AcpIslandProjection.fromTaskDirectory(java.io.File(context.filesDir, "runtime/tasks/$id"), id)
+            if (island == null) {
+                manager.notify(AcpIslandProjection.NOTIFICATION_ID, notice.build())
+                return
+            }
+            attachAcpIsland(context, notice, island, link)
+            // One notification key per ACP task (see AcpIslandProjection.notificationTag): a reused
+            // key inherits the previous task's expired island lifetime. The previous task's slot is
+            // replaced, as the single untagged id did before.
+            val tag = AcpIslandProjection.notificationTag(id)
+            val slots = context.getSharedPreferences(ISLAND_SLOTS, Context.MODE_PRIVATE)
+            val previous = slots.getString("tag", null)
+            if (previous != tag) {
+                AcpIslandProjection.staleTag(previous, tag)?.let { manager.cancel(it, AcpIslandProjection.NOTIFICATION_ID) }
+                manager.cancel(AcpIslandProjection.NOTIFICATION_ID)
+                slots.edit().putString("tag", tag).apply()
+            }
+            manager.notify(tag, AcpIslandProjection.NOTIFICATION_ID, notice.build())
         } catch (failure: Exception) {
             Log.e("AgentOSNotify", "Cannot update task notification", failure)
         }
@@ -76,6 +91,7 @@ class TaskNotificationReceiver : BroadcastReceiver() {
 
     companion object {
         const val EXTRA_TASK_ID = "task_id"
+        private const val ISLAND_SLOTS = "acp_island_slots"
         private val PANEL_COMPLETIONS = Executors.newSingleThreadExecutor()
 
         /** taku.island.v1 extras for an ACP task: payload, the "taku" glyph and its actions. */

@@ -23,7 +23,7 @@ final class PhoneNativeTools {
     .put("returnTo",new JSONObject().put("type","string").put("maxLength",300))));
   tools.put(tool("prepare_foreground_draft","Only when the user explicitly requested an unsent reply draft: set text in the already open original conversation on display 0. Exact foreground package and visible conversation title must match; an existing different draft is preserved. This does not navigate, click Send, press Enter, invoke an IME action, or send a message. Report success only when draftPrepared is true and sent is false. If the conversation cannot be verified, ask the user to open it; do not work around the check.",new JSONObject()
     .put("packageName",string(200)).put("conversationTitle",string(160)).put("text",string(4000))));
-  tools.put(tool("device_info","Read actual Android version, model and independent display id.",new JSONObject()));
+  tools.put(tool("device_info","Read actual Android version and model. Works without request_apps; when this thread holds an execution screen the result also carries its display id.",new JSONObject()));
   tools.put(tool("apps","Discover actual apps on this Android device and its current user before choosing apps for a task. Query a visible name (including Chinese) or package name; an empty query lists launcher apps. Results are paginated and refreshed from PackageManager. Installed/launchable/allowed do not prove login, background compatibility or business capabilities. This read-only discovery needs no execution screen.",new JSONObject()
     .put("query",new JSONObject().put("type","string").put("maxLength",200))
     .put("offset",new JSONObject().put("type","integer").put("minimum",0).put("maximum",4096))
@@ -91,10 +91,13 @@ final class PhoneNativeTools {
    return text(DedicatedScreensOnDevice.shared().status(thread).toString());
   if (name.equals("release_apps"))
    return text(DedicatedScreensOnDevice.shared().release(thread, packages(args)).toString());
+  if (name.equals("device_info"))
+   return text(PhoneDeviceInfo.read(key -> TaskBroker.command("/system/bin/getprop", key),
+     () -> DedicatedScreensOnDevice.shared().withScreen(thread, DedicatedScreens.Use.LOOK, "", PhoneExecutionScreens.Screen::json)).toString());
   final JSONObject arguments=args;final String toolName=name;
   DedicatedScreens.Use use =
     name.equals("open_app") ? DedicatedScreens.Use.OPEN
-    : name.equals("observe_background") || name.equals("device_info") ? DedicatedScreens.Use.LOOK
+    : name.equals("observe_background") ? DedicatedScreens.Use.LOOK
     : DedicatedScreens.Use.ACT;
   return DedicatedScreensOnDevice.shared().withScreen(thread, use, args.optString("packageName"),
     screen -> executeScreen(p, arguments, toolName, screen));
@@ -113,7 +116,6 @@ final class PhoneNativeTools {
   switch(name){
    case "swipe":return text(PhoneGestures.swipe(call,screen.displayId,args).toString());
    case "touch":return text(PhoneGestures.touch(call,screen.displayId,args).toString());
-   case "device_info":return text(screen.json().put("android",TaskBroker.command("/system/bin/getprop","ro.build.version.release").trim()).put("model",TaskBroker.command("/system/bin/getprop","ro.product.model").trim()).toString());
    case "observe_background":
     screen.command("capture");JSONObject frame=new JSONObject(TaskBroker.read(new File(screen.directory(),"capture.json")));screen.validateCapture(frame);
     File file=new File(screen.directory(),"screen.png");try(InputStream in=new FileInputStream(file)){ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] bytes=new byte[4096];int n;while((n=in.read(bytes))!=-1){out.write(bytes,0,n);if(out.size()>3000000)throw new IOException("Screen image is too large");}

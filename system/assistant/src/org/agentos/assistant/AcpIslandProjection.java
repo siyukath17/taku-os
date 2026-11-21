@@ -37,6 +37,28 @@ public final class AcpIslandProjection {
 
     private AcpIslandProjection() {}
 
+    /** Android notification id shared with the plain (Codex) background-task notification. */
+    public static final int NOTIFICATION_ID = 42;
+
+    /**
+     * The notification tag of one ACP/remote T3 task. Each task needs its own notification key:
+     * SystemUI's island keeps first-seen time, lifetime and dismissal per notification key and an
+     * update can never extend the lifetime, so reusing the single untagged id-42 slot let the first
+     * task's 3600 s lifetime expire the island for every later task ({@code active:false},
+     * {@code activities:[]}) while the notification itself kept updating.
+     */
+    public static String notificationTag(String taskId) {
+        return "acp-task-" + taskId;
+    }
+
+    /**
+     * Before posting {@code tag}: the tagged notification of the previous ACP task to cancel (null when
+     * none or the same task), so one task slot is kept as with the untagged id before.
+     */
+    public static String staleTag(String previousTag, String tag) {
+        return previousTag == null || previousTag.isEmpty() || previousTag.equals(tag) ? null : previousTag;
+    }
+
     /** Reads the task directory; null unless runtime-route.json says this task ran on ACP or remote T3. */
     public static Projection fromTaskDirectory(File directory, String taskId) {
         try {

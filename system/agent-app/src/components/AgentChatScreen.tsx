@@ -171,7 +171,7 @@ function MessageBody({block, language, renderMarkdown, renderCard, demand}: {blo
   if (!renderMarkdown) return <AssistantBubble><Label style={styles.replyText}>{block.text}</Label></AssistantBubble>;
   return <View style={styles.messageParts}>{block.parts.map(part =>
     <React.Fragment key={part.id}>{part.card && renderCard ? renderCard(part, language, demand) : <>
-      {!!part.text && <AssistantBubble>{renderMarkdown(part.text, part.active, part.id)}</AssistantBubble>}
+      {!!part.text && <AssistantBubble fill>{renderMarkdown(part.text, part.active, part.id)}</AssistantBubble>}
       {part.replyState && <Label role="meta" style={styles.secondary}>{textFor(language)(part.replyState.phase === 'interrupted' ? 'cardReplyInterrupted'
         : part.replyState.phase === 'failed' ? 'cardPresentationFailed' : 'cardUpdating')}</Label>}
     </>}</React.Fragment>)}</View>;

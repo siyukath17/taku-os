@@ -229,19 +229,85 @@ final class PhoneMcpBridge {
         if (!problems.isEmpty())
             return error(id, INVALID_PARAMS, "Invalid arguments for " + name, new JSONObject().put("errors", new JSONArray(problems)));
         String denied = permissions.deny(name, arguments, observation(name, arguments), session);
-        if (denied != null) return ok(id, toolError("PERMISSION_DENIED", denied));
+        if (denied != null) return ok(id, failed(name, "PERMISSION_DENIED", denied));
         JSONObject executed;
         try {
             executed = executor.execute(name, new JSONObject(arguments.toString()), session);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            return ok(id, toolError("INTERRUPTED", "The phone operation was interrupted"));
+            return ok(id, failed(name, "INTERRUPTED", "The phone operation was interrupted"));
         } catch (Exception failure) {
             String detail = failure.getMessage() == null ? "" : failure.getMessage();
-            if (detail.matches("[A-Z][A-Z0-9_]{2,63}")) return ok(id, toolError(detail, "Phone tool failed: " + detail));
-            return ok(id, toolError("TOOL_FAILED", AcpRuntime.clip(AcpRuntime.redact(detail.isEmpty() ? "The phone operation failed" : detail), 500)));
+            if (detail.matches("[A-Z][A-Z0-9_]{2,63}")) return ok(id, failed(name, detail, "Phone tool failed: " + detail));
+            String code = Failures.code(detail);
+            return ok(id, failed(name, code == null ? "TOOL_FAILED" : code,
+                    AcpRuntime.clip(AcpRuntime.redact(detail.isEmpty() ? "The phone operation failed" : detail), 500)));
         }
-        return ok(id, content(executed));
+        JSONObject result = content(executed);
+        if (result.optBoolean("isError")) {
+            String text = firstText(result);
+            String code = Failures.code(text);
+            Failures.record(session.turnId, name, code == null ? "TOOL_FAILED" : code, text);
+        }
+        return ok(id, result);
+    }
+
+    private JSONObject failed(String tool, String code, String message) throws Exception {
+        Failures.record(session.turnId, tool, code, message);
+        return toolError(code, message);
+    }
+
+    private static String firstText(JSONObject result) {
+        JSONArray blocks = result.optJSONArray("content");
+        if (blocks != null) for (int i = 0; i < blocks.length(); i++) {
+            JSONObject block = blocks.optJSONObject(i);
+            if (block != null && "text".equals(block.optString("type"))) return block.optString("text");
+        }
+        return "";
+    }
+
+    /**
+     * Phone tool failures by turn, as this bridge returned them to the agent. The ACP chat projection
+     * reads them when the agent reports a tool call {@code failed} without passing the MCP error text
+     * through (agy does this), so the stored turn keeps the real code instead of a bare "failed".
+     * Bounded: the newest {@value #MAX_TURNS} turns, the newest {@value #MAX_PER_TURN} failures each.
+     */
+    static final class Failures {
+        static final int MAX_TURNS = 32, MAX_PER_TURN = 16;
+        private static final java.util.LinkedHashMap<String, List<JSONObject>> BY_TURN = new java.util.LinkedHashMap<>();
+        private static final java.util.regex.Pattern CODE = java.util.regex.Pattern.compile("^([A-Z][A-Z0-9_]{2,63})(?::|$)");
+
+        private Failures() {}
+
+        /** The leading {@code CODE:} of a tool error message, or null. */
+        static String code(String message) {
+            java.util.regex.Matcher m = CODE.matcher(message == null ? "" : message.trim());
+            return m.find() ? m.group(1) : null;
+        }
+
+        static synchronized void record(String turnId, String tool, String code, String message) {
+            if (turnId == null || turnId.isEmpty()) return;
+            try {
+                List<JSONObject> list = BY_TURN.remove(turnId);
+                if (list == null) list = new ArrayList<>();
+                list.add(new JSONObject().put("tool", tool).put("code", code)
+                        .put("message", AcpRuntime.clip(AcpRuntime.redact(message == null ? "" : message), 300)));
+                while (list.size() > MAX_PER_TURN) list.remove(0);
+                BY_TURN.put(turnId, list);
+                while (BY_TURN.size() > MAX_TURNS) BY_TURN.remove(BY_TURN.keySet().iterator().next());
+            } catch (Exception impossible) {
+                // org.json put of strings cannot fail.
+            }
+        }
+
+        /** Takes (consumes) the oldest unclaimed failure of {@code tool} in {@code turnId}, or null. */
+        static synchronized JSONObject take(String turnId, String tool) {
+            List<JSONObject> list = BY_TURN.get(turnId);
+            if (list == null) return null;
+            for (int i = 0; i < list.size(); i++)
+                if (list.get(i).optString("tool").equals(tool)) return list.remove(i);
+            return null;
+        }
     }
 
     /** Codex-style {@code contentItems} → MCP content blocks. */

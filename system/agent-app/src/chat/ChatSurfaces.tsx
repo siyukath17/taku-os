@@ -3,10 +3,18 @@ import {StyleSheet, View, useWindowDimensions} from 'react-native';
 import Svg, {Defs, LinearGradient, Rect, Stop} from 'react-native-svg';
 import {chatColors, chatMetrics, themedStyles} from './chatTheme';
 
-/** Figma 300:677 / 300:686: hug the reply, leaving 48dp at the opposite edge. */
-export function AssistantBubble({children}: {children: ReactNode}) {
+/**
+ * Figma 300:677 / 300:686: hug the reply, leaving 48dp at the opposite edge.
+ *
+ * `fill` is for native Markdown replies: they must get a definite width. A hugging (fit-content)
+ * bubble leaves the Markdown view's `width: '100%'` unresolvable, so react-native-enriched-markdown
+ * lays the reply out at its unwrapped max-content width: long lines ran past the bubble and were
+ * clipped at the screen edge, while the bubble kept the wrapped (taller) height as blank space.
+ * Stretching to the same max width gives one definite width for measure and display.
+ */
+export function AssistantBubble({children, fill = false}: {children: ReactNode; fill?: boolean}) {
   const {width} = useWindowDimensions();
-  return <View style={[styles.bubble, {maxWidth: Math.max(0, width - chatMetrics.side * 2 - chatMetrics.bubbleMinInset)}]}>{children}</View>;
+  return <View style={[styles.bubble, fill && styles.fill, {maxWidth: Math.max(0, width - chatMetrics.side * 2 - chatMetrics.bubbleMinInset)}]}>{children}</View>;
 }
 
 /** The composer's glass rim, lit from the upper left (Figma 300:666 GLASS effect). */
@@ -29,4 +37,5 @@ export function ComposerGlassRim({multiline}: {multiline: boolean}) {
 const styles = themedStyles(() => StyleSheet.create({
   bubble: {alignSelf: 'flex-start', backgroundColor: chatColors.assistantBubble, borderRadius: 16,
     borderBottomLeftRadius: 4, padding: 8, gap: 8},
+  fill: {alignSelf: 'stretch'},
 }));

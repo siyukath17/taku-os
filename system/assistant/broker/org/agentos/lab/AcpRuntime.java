@@ -874,7 +874,60 @@ final class AcpRuntime implements TaskRuntime {
                 if (out.length() > 0) item.put("result", new JSONObject().put("content",
                         new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(redact(out.toString()), 4000)))));
             }
+            if ("failed".equals(item.optString("status")) && !item.has("error")) item.put("error", toolError(item, update));
             flush(true);
+        }
+
+        /**
+         * A failed tool call's {@code error} ({@code {code, message}}, the message redacted and clipped),
+         * so the stored turn says why instead of a bare "failed". Sources, best first: the agent's own
+         * error text ({@code rawOutput}, then the item's result text); for taku_phone tools the failure
+         * this broker's {@link PhoneMcpBridge} returned in this turn (agy drops the MCP error text from
+         * {@code tool_call_update}); otherwise {@code TOOL_FAILED} with a generic message.
+         */
+        JSONObject toolError(JSONObject item, JSONObject update) throws Exception {
+            String text = outputText(update.opt("rawOutput"));
+            if (text.isEmpty()) {
+                JSONObject result = item.optJSONObject("result");
+                JSONArray content = result == null ? null : result.optJSONArray("content");
+                JSONObject first = content == null ? null : content.optJSONObject(0);
+                if (first != null) text = first.optString("text");
+            }
+            String phoneTool = phoneToolName(item.optString("tool"));
+            if (text.isBlank() && phoneTool != null) {
+                JSONObject recorded = PhoneMcpBridge.Failures.take(turnId, phoneTool);
+                if (recorded != null) return new JSONObject().put("code", recorded.optString("code", "TOOL_FAILED"))
+                        .put("message", recorded.optString("message")).put("source", "phone-mcp");
+            }
+            if (text.isBlank())
+                return new JSONObject().put("code", "TOOL_FAILED").put("message", "The agent reported this tool failed without details.")
+                        .put("source", "agent");
+            String code = PhoneMcpBridge.Failures.code(text);
+            if (phoneTool != null) PhoneMcpBridge.Failures.take(turnId, phoneTool);
+            return new JSONObject().put("code", code == null ? "TOOL_FAILED" : code)
+                    .put("message", clip(redact(text.trim()), 300)).put("source", "agent");
+        }
+
+        /** {@code taku_phone} tool name in an agent tool title such as "Run mcp_taku_phone_device_info". */
+        static String phoneToolName(String title) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:mcp_)?taku_phone(?:__|_|\\.|/)([a-z_]+)").matcher(title == null ? "" : title);
+            return m.find() ? m.group(1) : null;
+        }
+
+        /** Text of an ACP {@code rawOutput}: a string, {@code {error|message}}, or MCP {@code {content:[{text}]}}. */
+        static String outputText(Object raw) {
+            if (raw instanceof String) return (String) raw;
+            if (!(raw instanceof JSONObject)) return "";
+            JSONObject o = (JSONObject) raw;
+            Object error = o.opt("error");
+            if (error instanceof String) return (String) error;
+            if (error instanceof JSONObject) return ((JSONObject) error).optString("message", error.toString());
+            JSONArray content = o.optJSONArray("content");
+            if (content != null) for (int i = 0; i < content.length(); i++) {
+                JSONObject part = content.optJSONObject(i);
+                if (part != null && !part.optString("text").isEmpty()) return part.optString("text");
+            }
+            return o.optString("message", "");
         }
 
         static String toolStatus(String acp) {

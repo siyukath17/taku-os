@@ -247,7 +247,55 @@ public final class AcpChatRuntimeTest {
         check(host.view().getJSONArray("turns").length() == 3, "background task adds no conversation turn");
     }
 
+    /** A failed tool call keeps its error code and a redacted summary, not a bare "failed". */
+    static void failedToolKeepsItsError() throws Exception {
+        Host host = new Host(new File(taskDir("toolerr"), "acp-conversations"));
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL);
+        agent.beforeFinish = turn -> {
+            // The phone bridge served the call in this turn and returned the error to agy ...
+            PhoneMcpBridge.Failures.record(turn, "device_info", "APPS_NOT_REQUESTED", "APPS_NOT_REQUESTED: call request_apps first");
+            // ... but agy reports only status failed, without the MCP error text (seen on device).
+            return List.of(
+                    new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", "tc-phone")
+                            .put("title", "Run mcp_taku_phone_device_info").put("kind", "other").put("status", "in_progress"),
+                    new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-phone").put("status", "failed"),
+                    new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", "tc-shell")
+                            .put("title", "ls /secret").put("kind", "execute").put("status", "in_progress"),
+                    new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-shell").put("status", "failed")
+                            .put("rawOutput", new JSONObject().put("error", "EACCES: denied, token=abc123")),
+                    new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", "tc-bare")
+                            .put("title", "Something").put("kind", "other").put("status", "in_progress"),
+                    new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-bare").put("status", "failed"));
+        };
+        File dir = taskDir("toolerr-t1");
+        new AcpRuntime(options(), agent, null, null, host).run(dir, chat("501", "which phone?"));
+        JSONObject turn = lastTurn(host.view());
+        JSONObject phone = null, shell = null, bare = null;
+        JSONArray items = turn.getJSONArray("items");
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject it = items.getJSONObject(i);
+            if (it.getString("id").endsWith("tc-phone")) phone = it;
+            if (it.getString("id").endsWith("tc-shell")) shell = it;
+            if (it.getString("id").endsWith("tc-bare")) bare = it;
+        }
+        check(phone != null && "failed".equals(phone.getString("status"))
+                && "APPS_NOT_REQUESTED".equals(phone.getJSONObject("error").getString("code"))
+                && phone.getJSONObject("error").getString("message").contains("request_apps")
+                && "phone-mcp".equals(phone.getJSONObject("error").getString("source")),
+                "phone tool failure: code and message from the phone bridge " + phone);
+        check(shell != null && "EACCES".equals(shell.getJSONObject("error").getString("code"))
+                && !shell.getJSONObject("error").getString("message").contains("abc123"), "agent error text: coded and redacted " + shell);
+        check(bare != null && "TOOL_FAILED".equals(bare.getJSONObject("error").getString("code")), "no detail anywhere: TOOL_FAILED");
+        // Persisted, not just in memory.
+        check(new AcpConversationStore(host.store.file(CONV).getParentFile()).turns(CONV).toString().contains("APPS_NOT_REQUESTED"), "error persisted in the store");
+        check(PhoneMcpBridge.Failures.take(json(dir, "runtime-info.json").getString("turnId"), "device_info") == null, "recorded failure consumed once");
+        check(AcpRuntime.Chat.phoneToolName("Run mcp_taku_phone_device_info").equals("device_info")
+                && AcpRuntime.Chat.phoneToolName("taku_phone__request_apps").equals("request_apps")
+                && AcpRuntime.Chat.phoneToolName("ls -la") == null, "phone tool names from agent titles");
+    }
+
     public static void main(String[] args) throws Exception {
+        failedToolKeepsItsError();
         multiTurnConversation();
         nativeHistoryCarriedIntoFirstAcpTurn();
         failuresCloseTheTurn();

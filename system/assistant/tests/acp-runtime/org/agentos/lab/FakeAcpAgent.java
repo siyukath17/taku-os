@@ -61,9 +61,25 @@ final class FakeAcpAgent implements AcpProcessTransport {
     /** Session ids handed out by session/new, in order (default always "s-1"). */
     final Deque<String> newSessionIds = new ArrayDeque<>();
     volatile String currentSession = "s-1";
+    /**
+     * Runs before the normal turn finishes, with the phone relay's TAKU_MCP_TURN from the session's
+     * mcpServers (as the relay would see it); returns extra session updates to send.
+     */
+    volatile java.util.function.Function<String, List<JSONObject>> beforeFinish;
+    volatile String phoneTurn = "";
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
+    }
+
+    static String phoneTurnOf(JSONObject message) {
+        JSONArray servers = message.getJSONObject("params").optJSONArray("mcpServers");
+        if (servers != null) for (int i = 0; i < servers.length(); i++) {
+            JSONArray env = servers.getJSONObject(i).optJSONArray("env");
+            if (env != null) for (int j = 0; j < env.length(); j++)
+                if ("TAKU_MCP_TURN".equals(env.getJSONObject(j).optString("name"))) return env.getJSONObject(j).getString("value");
+        }
+        return "";
     }
 
     List<JSONObject> methods(String method) {
@@ -226,6 +242,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
                             .put("agentInfo", new JSONObject().put("name", "fake-agy").put("version", "0"))));
                     return false;
                 case "session/new":
+                    phoneTurn = phoneTurnOf(message);
                     if (scenario == Scenario.NEEDS_AUTH)
                         send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32000).put("message", "Authentication required")));
                     else {
@@ -234,6 +251,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     }
                     return false;
                 case "session/load": {
+                    phoneTurn = phoneTurnOf(message);
                     String loaded = message.getJSONObject("params").getString("sessionId");
                     if (loadFails) {
                         send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32002).put("message", "Session not found")));
@@ -317,6 +335,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
         }
 
         void finishNormal() throws Exception {
+        if (beforeFinish != null) for (JSONObject extra : beforeFinish.apply(phoneTurn)) update(extra);
             update(new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-1").put("status", "completed"));
             chunk("Done: ");
             chunk("Wi-Fi is on.\nDetails follow.");
