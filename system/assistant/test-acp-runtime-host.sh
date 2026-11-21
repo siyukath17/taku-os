@@ -26,6 +26,8 @@ task_sources=(
  system/assistant/broker/org/agentos/lab/RemoteT3Runtime.java
  system/assistant/broker/org/agentos/lab/AcpConversationStore.java
  system/assistant/broker/org/agentos/lab/AcpTurnControl.java
+ system/assistant/broker/org/agentos/lab/AcpModelCatalog.java
+ system/assistant/broker/org/agentos/lab/AcpCodexGate.java
  system/assistant/src/org/agentos/assistant/AcpIslandProjection.java
 )
 "$JDK/bin/javac" --release 17 -cp "$ANDROID_JAR" -d "$task_out/android-check" "${task_sources[@]}"
@@ -43,6 +45,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpChatRuntimeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpChatFixtures.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpStandaloneConversationTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpModelCatalogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/assistant/AcpChatProjectionTest.java \
  system/assistant/src/org/agentos/assistant/AgentConversation.java \
  system/assistant/src/org/agentos/assistant/NativeToolPresentation.java \
@@ -50,7 +53,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" "$main"
 done | tee "$task_out/result.txt"

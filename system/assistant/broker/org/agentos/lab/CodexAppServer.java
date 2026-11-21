@@ -592,6 +592,26 @@ public final class CodexAppServer implements AutoCloseable {
     static JSONObject currentRequest;
     static String finalText = "", completion = "", activeThread = "", activeTurn = "";
 
+    /**
+     * {@link #shared()}, recording what cold-starts the app server in
+     * {@code agent-view/codex-starts.log} (time, cause; bounded), so a Codex start while chat runs
+     * on ACP is attributable to the exact caller. The broker's stderr is not kept.
+     */
+    static CodexAppServer shared(String cause) throws Exception {
+        if (shared == null) {
+            try {
+                File log = new File(new File(TaskBroker.ROOT, "agent-view"), "codex-starts.log");
+                log.getParentFile().mkdirs();
+                try (FileOutputStream out = new FileOutputStream(log, log.length() < 16384)) {
+                    out.write((System.currentTimeMillis() + " " + cause + "\n").getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception diagnosticsOnly) {
+                // Never let the record stop the start.
+            }
+        }
+        return shared();
+    }
+
     static CodexAppServer shared() throws Exception {
         if (shared == null) {
             AgentViews.runtimeClosed();
@@ -668,7 +688,8 @@ public final class CodexAppServer implements AutoCloseable {
             }
             CodexAppServer server;
             try {
-                server = shared();
+                server = AcpCodexGate.listsWithoutCodex(method, shared != null ? null : TaskBroker.router().newConversation(), shared != null)
+                        ? null : shared("control:" + method);
             } catch (Exception unavailable) {
                 // ACP conversations stay listable while the Codex app server cannot start.
                 if (!"thread/list".equals(method) || AcpConversations.STORE.ids().isEmpty()) throw unavailable;
@@ -831,7 +852,7 @@ public final class CodexAppServer implements AutoCloseable {
     }
 
     static void run(File directory, JSONObject request) throws Exception {
-        CodexAppServer server = shared();
+        CodexAppServer server = shared("task:" + request.optString("kind", "chat"));
         currentRequest = request;
         finalText = "";
         completion = "";

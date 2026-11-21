@@ -45,6 +45,14 @@ public final class TaskBroker {
     }
 
     static final File RUNTIME_CONFIG = new File(ROOT, "runtime.json");
+    /** The ACP agent's model list as last reported (see AcpModelCatalog): the picker's source while on ACP. */
+    static final File ACP_MODELS = new File(ROOT, "acp-models.json");
+
+    static AcpRuntime.Options acpOptions(JSONObject acpConfig) throws Exception {
+        AcpRuntime.Options options = AcpRuntime.Options.fromJson(acpConfig);
+        options.modelCatalog = ACP_MODELS;
+        return options;
+    }
 
     /** The agent's own oauth-personal sign-in, opened in the phone's browser. Status only, never credentials. */
     static final AcpAuthHelper ACP_AUTH = new AcpAuthHelper(
@@ -78,7 +86,7 @@ public final class TaskBroker {
         return new RuntimeRouter(
                 CodexTaskRuntime.INSTANCE,
                 acpConfig -> new AcpRuntime(
-                        AcpRuntime.Options.fromJson(acpConfig),
+                        acpOptions(acpConfig),
                         AcpProcessTransport.process(),
                         TaskBroker::notifyUser,
                         () -> serviceWhileTurnRuns("acp"),

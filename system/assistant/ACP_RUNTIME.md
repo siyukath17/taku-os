@@ -193,6 +193,35 @@ thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall
   `cancel` marker; `AcpRuntime` then sends `session/cancel`, reclaims the agent after
   `cancelGraceMillis` and closes the turn `interrupted`, the task `cancelled`.
 
+## Model picker without Codex
+
+While new chat turns route to ACP (`RuntimeRouter.newConversation()`: env / `runtime.json`
+`default: "acp"` with a binary), the broker never starts the Codex app server just to show the
+picker, list conversations or send:
+
+- Native-RPC `model/list` (used by `ComposerOptions.loadCatalog()` on picker open and on every
+  send) is answered by `AcpModelCatalog` in Codex's shape (`model`, `displayName`, `isDefault`,
+  `supportedReasoningEfforts`, `defaultReasoningEffort`, every entry `runtime: "acp"`; result
+  `source: "agent" | "builtin"`).
+- Source: agy's `session/new` `configOptions` (select `model`, select `thought_level`), saved by
+  `AcpRuntime` after each session to `files/runtime/acp-models.json` (keyed by `acp.binary`). Until
+  the first ACP turn it answers the built-in `Gemini 4 Neon` with low/medium/high/xhigh. No extra
+  agent process is started to list models.
+- The composer's `model` / `effort` travel in the task request; `AcpRuntime` applies them with
+  `session/set_config_option` (`model`, `thought_level`) when the agent offers the value, records the
+  effective `model` / `effort` in `runtime-info.json`, and lists refusals in `configRefusals` (the
+  turn still runs on the agent's choice). A Codex model id saved earlier resolves to the ACP default.
+- `agent_control thread/list` is built from the broker's projection index without starting Codex
+  (`AcpCodexGate`); a Codex app server that is already running is still asked.
+- Every Codex app-server cold start is recorded with its cause in
+  `files/runtime/agent-view/codex-starts.log`.
+
+With Codex selected (the default) all of these keep the Codex path unchanged.
+
+Verified on the Pixel 9 (agy 1.5.14, 2026-11-22): open app → picker → new chat → Chinese send →
+full reply with `ps -A | grep -i codex` at 0 throughout; picking Gemini 3.8 Flash made the next
+turn run on it.
+
 ## Phone tools over MCP
 
 `PhoneMcpBridge` is the MCP core: `initialize`, `tools/list`, `tools/call`, JSON

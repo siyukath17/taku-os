@@ -88,6 +88,11 @@ final class AcpRuntime implements TaskRuntime {
         long cancelGraceMillis = TimeUnit.SECONDS.toMillis(10);
         long requestTimeoutMillis = TimeUnit.SECONDS.toMillis(60);
         long progressIntervalMillis = 500;
+        /**
+         * Where the agent's model list ({@code session/new} configOptions) is saved for the model
+         * picker ({@link AcpModelCatalog}); null keeps it unsaved. Set by the broker, not runtime.json.
+         */
+        File modelCatalog;
 
         static JSONObject defaultPhoneMcp() {
             try {
@@ -407,6 +412,8 @@ final class AcpRuntime implements TaskRuntime {
                         }
                     } else loadFailure = "loadSession unsupported";
                 }
+                JSONArray configOptions = null;
+                if (resumed) configOptions = AcpModelCatalog.stored(options.modelCatalog, options.binary);
                 if (!resumed) {
                     JSONObject session;
                     try {
@@ -421,7 +428,10 @@ final class AcpRuntime implements TaskRuntime {
                         throw error;
                     }
                     sessionId = session.getString("sessionId");
+                    configOptions = session.optJSONArray("configOptions");
+                    AcpModelCatalog.remember(options.modelCatalog, options.binary, configOptions);
                 }
+                configOptions = applyModelSelection(configOptions);
                 JSONObject info = new JSONObject()
                         .put("taskId", id)
                         .put("runtime", "acp")
@@ -429,6 +439,11 @@ final class AcpRuntime implements TaskRuntime {
                         .put("agentInfo", init.optJSONObject("agentInfo") == null ? JSONObject.NULL : init.getJSONObject("agentInfo"))
                         .put("sessionId", sessionId)
                         .put("turnStarted", true);
+                String model = AcpModelCatalog.current(configOptions, AcpModelCatalog.MODEL);
+                String effort = AcpModelCatalog.current(configOptions, AcpModelCatalog.EFFORT);
+                if (!model.isEmpty()) info.put("model", model);
+                if (!effort.isEmpty()) info.put("effort", effort);
+                if (configRefusals.length() > 0) info.put("configRefusals", configRefusals);
                 String text = request.getString("prompt");
                 if (chat != null) {
                     chat.bind(sessionId, init.optJSONObject("agentInfo"));
@@ -475,6 +490,40 @@ final class AcpRuntime implements TaskRuntime {
                 diagnostic(directory, "agent-error", error.code + " " + error.getMessage(), stderr());
                 finish(directory, request, "failed", "The on-device agent reported an error. Check the results before retrying.", null);
             }
+        }
+
+        /**
+         * The composer's model and reasoning effort ({@code request.model} / {@code request.effort},
+         * from the ACP catalog the picker showed) applied to the session with
+         * {@code session/set_config_option}, when the agent offers that value and it is not already
+         * current. A refusal leaves the agent's own choice in place: the turn still runs.
+         * Returns the session's configOptions after the changes (null when unknown).
+         */
+        final JSONArray configRefusals = new JSONArray();
+
+        JSONArray applyModelSelection(JSONArray configOptions) throws Exception {
+            if (configOptions == null) return null;
+            String[][] wanted = {{AcpModelCatalog.MODEL, request.optString("model", "")},
+                    {AcpModelCatalog.EFFORT, request.optString("effort", "")}};
+            for (String[] pair : wanted) {
+                String configId = pair[0], value = pair[1];
+                if (value.isEmpty() || value.equals(AcpModelCatalog.current(configOptions, configId))
+                        || !AcpModelCatalog.values(configOptions, configId).contains(value)) continue;
+                try {
+                    JSONObject changed = call("session/set_config_option", new JSONObject()
+                            .put("sessionId", sessionId).put("configId", configId).put("value", value));
+                    JSONArray next = changed.optJSONArray("configOptions");
+                    if (next != null) configOptions = next;
+                    else {
+                        JSONObject option = AcpModelCatalog.select(configOptions, configId);
+                        if (option != null) option.put("currentValue", value);
+                    }
+                } catch (AcpError refused) {
+                    configRefusals.put(new JSONObject().put("configId", configId).put("value", value)
+                            .put("code", refused.code).put("message", clip(redact(String.valueOf(refused.getMessage())), 200)));
+                }
+            }
+            return configOptions;
         }
 
         /** Configured servers plus the per-task phone tool relay, in ACP's stdio declaration shape. */

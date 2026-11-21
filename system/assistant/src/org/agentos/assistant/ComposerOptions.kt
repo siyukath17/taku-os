@@ -40,7 +40,14 @@ internal object ComposerOptions {
             model.id to model
         }
         val default = byId.values.firstOrNull { it.json.optBoolean("isDefault") } ?: byId.values.firstOrNull()
-        fun resolve(id: String?): Model? = if (id == null) default else byId[id]
+        /**
+         * The broker answers `model/list` from the ACP agent's catalog while chat turns run on ACP
+         * (entries carry `runtime: "acp"`). A model saved under Codex is not in it: such a send uses
+         * the ACP default instead of handing the agent a Codex model id. Codex catalogs are unchanged.
+         */
+        private val acp = byId.values.any { it.json.optString("runtime") == "acp" }
+        fun contains(id: String): Boolean = id in byId
+        fun resolve(id: String?): Model? = if (id == null) default else byId[id] ?: default.takeIf { acp }
     }
 
     class SubmissionOptions internal constructor(private val useCatalog: (JSONObject) -> Unit) {
@@ -234,7 +241,7 @@ internal object ComposerOptions {
         val modelId = next(prefs, thread, Field.MODEL, patch)
         val model = catalog.resolve(modelId)
         val selectsModel = Field.MODEL in patch && patch[Field.MODEL] != null
-        if (selectsModel && model == null) throw IOException("MODEL_UNAVAILABLE")
+        if (selectsModel && (model == null || !catalog.contains(modelId!!))) throw IOException("MODEL_UNAVAILABLE")
         val modelChanged = Field.MODEL in patch && modelId != resolved(prefs, thread, Field.MODEL)
         val requestedEffort = patch[Field.EFFORT]
         if (requestedEffort != null && model?.efforts?.contains(requestedEffort) != true) {

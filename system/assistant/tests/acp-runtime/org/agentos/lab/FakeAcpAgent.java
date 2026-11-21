@@ -67,6 +67,10 @@ final class FakeAcpAgent implements AcpProcessTransport {
      */
     volatile java.util.function.Function<String, List<JSONObject>> beforeFinish;
     volatile String phoneTurn = "";
+    /** When set, session/new answers with these configOptions (agy's shape) and set_config_option edits them. */
+    volatile JSONArray configOptions;
+    /** session/set_config_option values refused with -32602 (as agy does for unknown model ids). */
+    final java.util.Set<String> refusedConfigValues = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
@@ -247,7 +251,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
                         send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32000).put("message", "Authentication required")));
                     else {
                         currentSession = newSessionIds.isEmpty() ? "s-1" : newSessionIds.poll();
-                        send(new JSONObject().put("id", id).put("result", new JSONObject().put("sessionId", currentSession)));
+                        JSONObject result = new JSONObject().put("sessionId", currentSession);
+                        if (configOptions != null) result.put("configOptions", new JSONArray(configOptions.toString()));
+                        send(new JSONObject().put("id", id).put("result", result));
                     }
                     return false;
                 case "session/load": {
@@ -276,6 +282,19 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 case "session/prompt":
                     promptId = id;
                     return prompt();
+                case "session/set_config_option": {
+                    JSONObject params = message.getJSONObject("params");
+                    String value = params.getString("value");
+                    JSONObject option = AcpModelCatalog.select(configOptions, params.getString("configId"));
+                    if (option == null || refusedConfigValues.contains(value)
+                            || !AcpModelCatalog.values(configOptions, params.getString("configId")).contains(value)) {
+                        send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32602).put("message", "Unknown model ID: " + value)));
+                        return false;
+                    }
+                    option.put("currentValue", value);
+                    send(new JSONObject().put("id", id).put("result", new JSONObject().put("configOptions", new JSONArray(configOptions.toString()))));
+                    return false;
+                }
                 case "session/cancel":
                     if (scenario == Scenario.HANG_UNTIL_CANCEL)
                         send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "cancelled")));
