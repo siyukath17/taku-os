@@ -48,10 +48,12 @@ internal object ComposerDelivery {
             val existing = ComposerState.submission(prefs, id)
             val options = if (existing == null) ComposerOptions.prepareSubmission() else null
             val (request, created) = try {
-                ComposerState.reserveSubmission(prefs, input) { target, output ->
-                    checkNotNull(options).apply(prefs, target, output)
-                    AssistantInvocationCapture.reserve(context, id, output)
-                }
+                ComposerState.reserveSubmission(prefs, input,
+                    optionsFor = { target, output ->
+                        checkNotNull(options).apply(prefs, target, output)
+                        AssistantInvocationCapture.reserve(context, id, output)
+                    },
+                    autoScreenshot = { AssistantInvocationCapture.consumeAutoScreenshot(context) })
             } catch (failure: Exception) {
                 synchronized(ComposerPreferences::class.java) {
                     if (ComposerState.submission(prefs, id) == null) AssistantInvocationCapture.discard(context, id)

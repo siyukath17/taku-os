@@ -12,8 +12,7 @@ final class SessionRemovalRuntime {
     static synchronized void initialize() throws Exception {
         if (store != null) return;
         DedicatedScreens screens = DedicatedScreensOnDevice.shared();
-        SessionRemovals value = new SessionRemovals(new File("/data/local/agentos/session-removals"),
-                new SessionRemovals.Backend() {
+        SessionRemovals.Backend codex = new SessionRemovals.Backend() {
                     public Set<String> family(String root) throws Exception {
                         Set<String> result = screens.removalFamily(root);
                         result.addAll(PhoneSubAgents.gone(NativeBridge::askCleanupCodex, root));
@@ -35,7 +34,16 @@ final class SessionRemovalRuntime {
                     }
                     public void cleanup(JSONObject resource) throws Exception { screens.cleanupRemoval(resource); }
                     public void forget(Set<String> sessions) { screens.forgetRemoved(sessions); }
-                }, message -> android.util.Log.w("TakuSessionRemovals", message));
+                };
+        // Standalone ACP conversations have no Codex thread: their removal never starts Codex.
+        SessionRemovals.Backend backend = new AcpSessionRemovals(AcpConversations.STORE, codex, screens::removalFamily, id -> {
+            AgentViews.remove(id);
+            File projection = new File(AgentViews.ROOT, id + ".json");
+            if (projection.exists() && !projection.delete()) throw new IOException("ACP_PROJECTION_NOT_REMOVED");
+            NativeBridge.threadAvailability(id, "deleted");
+        });
+        SessionRemovals value = new SessionRemovals(new File("/data/local/agentos/session-removals"), backend,
+                message -> android.util.Log.w("TakuSessionRemovals", message));
         screens.removalFence(value::pending);
         store = value;
     }
@@ -45,7 +53,10 @@ final class SessionRemovalRuntime {
         return value;
     }
     static boolean pending(String session) { SessionRemovals value = store; return value != null && value.pending(session); }
-    static JSONObject submit(String root, String target) throws Exception { return shared().submit(root, target); }
+    static JSONObject submit(String root, String target) throws Exception {
+        AcpSessionRemovals.checkSubmit(AcpConversations.STORE, root, target);
+        return shared().submit(root, target);
+    }
     static JSONObject control(JSONObject input) throws Exception {
         String action = input.optString("action", "list");
         if (action.equals("list")) return shared().list();

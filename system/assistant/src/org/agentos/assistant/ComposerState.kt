@@ -152,7 +152,18 @@ internal object ComposerState {
         prefs.getString(requestKey(id), null)?.let(::JSONObject)
     }
 
-    fun reserveSubmission(prefs: SharedPreferences, input: JSONObject, optionsFor: (String, JSONObject) -> Unit): Pair<JSONObject, Boolean> = synchronized(monitor) {
+    /**
+     * [autoScreenshot] is a one-shot capture grant (a power-key invocation): it is consulted only
+     * for a new reservation, after the request is known to be sendable, and makes that one message
+     * carry the invocation screenshot without touching the global `includeScreenshot` preference.
+     */
+    @JvmOverloads
+    fun reserveSubmission(
+        prefs: SharedPreferences,
+        input: JSONObject,
+        optionsFor: (String, JSONObject) -> Unit,
+        autoScreenshot: () -> Boolean = { false },
+    ): Pair<JSONObject, Boolean> = synchronized(monitor) {
         val id = input.getString("requestId")
         val thread = input.getString("threadId")
         val key = requestKey(id)
@@ -168,7 +179,10 @@ internal object ComposerState {
         val attachments = selectedAttachments(prefs, thread, revision, input.getJSONArray("attachmentIds"))
         val text = ComposerPreferences.draftText(prefs, thread).trim()
         if (text.isEmpty() && attachments.length() == 0) throw IOException("INVALID_TEXT")
-        val options = JSONObject().put("includeScreenshot", prefs.getBoolean("includeScreenshot", false))
+        val global = prefs.getBoolean("includeScreenshot", false)
+        // Always consume the grant so it can never leak into a later message.
+        val oneShot = autoScreenshot()
+        val options = JSONObject().put("includeScreenshot", global || oneShot)
         optionsFor(thread, options)
         options.put("attachments", attachments)
         val request = JSONObject(input.toString()).put("hash", hash).put("text", text).put("options", options)

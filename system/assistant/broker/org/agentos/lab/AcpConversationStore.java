@@ -89,7 +89,8 @@ final class AcpConversationStore {
         File[] files = dir.listFiles();
         if (files != null) for (File f : files) {
             String name = f.getName();
-            if (name.endsWith(".json") && validId(name.substring(0, name.length() - 5))) out.add(name.substring(0, name.length() - 5));
+            String id = name.endsWith(".json") ? name.substring(0, name.length() - 5) : "";
+            if (validId(id) && !tombstone(id).exists()) out.add(id);
         }
         java.util.Collections.sort(out);
         return out;
@@ -117,6 +118,34 @@ final class AcpConversationStore {
     synchronized boolean standalone(String id) {
         JSONObject record = record(id);
         return record != null && ORIGIN_ACP.equals(record.optString("origin"));
+    }
+
+    File tombstone(String id) {
+        return new File(dir, id + ".removed");
+    }
+
+    /** True for a standalone conversation that {@link #remove} deleted; it never comes back. */
+    synchronized boolean removed(String id) {
+        return validId(id) && tombstone(id).isFile();
+    }
+
+    /**
+     * Permanently deletes a conversation (session removal of a standalone ACP conversation). A
+     * tombstone is written first, so a crash between the two steps still reads as removed, and a
+     * late turn of this conversation can never recreate the record ({@link #save} refuses).
+     * Returns whether a record existed.
+     */
+    synchronized boolean remove(String id) throws Exception {
+        if (!validId(id)) throw new IOException("Invalid conversation identifier");
+        boolean existed = file(id).isFile();
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create ACP conversation store");
+        if (!tombstone(id).isFile())
+            TaskRecords.write(tombstone(id), new JSONObject().put("schema", "taku.acp-conversation-removal/1")
+                    .put("conversationId", id).put("removedAt", System.currentTimeMillis()).toString());
+        if (file(id).exists() && !file(id).delete()) throw new IOException("cannot remove ACP conversation");
+        cache.remove(id);
+        absent.add(id);
+        return existed;
     }
 
     /** Longest conversation title, as on the Codex path ({@code agent_control thread/name/set}). */
@@ -412,7 +441,8 @@ final class AcpConversationStore {
     private JSONObject record(String id) {
         if (!validId(id)) return null;
         JSONObject cached = cache.get(id);
-        if (cached != null) return cached;
+        if (cached != null) return cached; // remove() evicts the cache before anything else reads
+        if (tombstone(id).exists()) return null;
         if (absent.contains(id) && !file(id).isFile()) return null;
         File f = file(id);
         if (!f.isFile()) {
@@ -447,6 +477,7 @@ final class AcpConversationStore {
     }
 
     private void save(String id, JSONObject record) throws Exception {
+        if (tombstone(id).exists()) throw new IOException("ACP conversation removed");
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create ACP conversation store");
         dir.setReadable(false, false);
         dir.setReadable(true, true);

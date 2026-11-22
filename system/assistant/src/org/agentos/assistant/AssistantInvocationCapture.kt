@@ -25,6 +25,8 @@ internal object AssistantInvocationCapture {
         val received: Boolean = false,
         val foreground: String = "Current app",
         val image: Bitmap? = null,
+        /** One-shot grant: the first message after a power-key invocation carries this capture. */
+        val autoScreenshot: Boolean = false,
     )
 
     private var invocation: Invocation? = null
@@ -51,7 +53,9 @@ internal object AssistantInvocationCapture {
             ComposerState.userError(context, android.os.Process.myUid())?.let { throw IOException(it) }
             when (input.optString("operation")) {
                 "begin" -> {
-                    if (input.length() != 2 || input.opt("capturedAt") !is Number || descriptor != null)
+                    val auto = input.opt("autoScreenshot")
+                    if (input.length() != (if (input.has("autoScreenshot")) 3 else 2) || input.opt("capturedAt") !is Number ||
+                        auto != null && auto !is Boolean || descriptor != null)
                         throw IOException("INVALID_ARGUMENT")
                     val at = input.getLong("capturedAt")
                     val age = SystemClock.elapsedRealtime() - at
@@ -65,7 +69,7 @@ internal object AssistantInvocationCapture {
                             })
                         observingPolicy = true
                     }
-                    val current = Invocation(UUID.randomUUID().toString(), at)
+                    val current = Invocation(UUID.randomUUID().toString(), at, autoScreenshot = auto == true)
                     invocation = current
                     main.postDelayed({
                         synchronized(this) {
@@ -88,6 +92,20 @@ internal object AssistantInvocationCapture {
                 else -> throw IOException("INVALID_ARGUMENT")
             }
         }
+    }
+
+    /**
+     * Consumes the one-shot auto-screenshot grant. True only when the grant is still set and the
+     * received capture is usable; either way the grant is cleared, so it never reaches a second
+     * message and never changes the global `includeScreenshot` preference.
+     */
+    @JvmStatic
+    @Synchronized
+    fun consumeAutoScreenshot(context: Context): Boolean {
+        val current = current(context) ?: return false
+        if (!current.autoScreenshot) return false
+        invocation = current.copy(autoScreenshot = false)
+        return current.received && current.image != null
     }
 
     fun suggest(context: Context): JSONObject {

@@ -11,6 +11,10 @@ mkdir -p "$task_out/classes"
  system/assistant/broker/org/agentos/lab/BoundedCommand.java \
  system/assistant/broker/org/agentos/lab/SessionRemovals.java \
  system/assistant/broker/org/agentos/lab/PhoneSubAgents.java \
+ system/assistant/broker/org/agentos/lab/TaskRecords.java \
+ system/assistant/broker/org/agentos/lab/AcpConversationStore.java \
+ system/assistant/broker/org/agentos/lab/AcpSessionRemovals.java \
+ system/assistant/tests/session-removals/org/agentos/lab/AcpSessionRemovalsTest.java \
  system/assistant/tests/session-removals/org/agentos/lab/SessionRemovalsTest.java \
  system/assistant/tests/session-removals/org/agentos/lab/SessionRemovalsRoundRobinTest.java
 if [ "${1:-}" = round-robin ]; then
@@ -19,5 +23,6 @@ if [ "${1:-}" = round-robin ]; then
 fi
 "$JDK/bin/java" -cp "$task_out/classes:$task_json" org.agentos.lab.SessionRemovalsTest "$@" | tee "$task_out/result${1:+-$1}.txt"
 if [ "$#" = 0 ]; then
+ "$JDK/bin/java" -cp "$task_out/classes:$task_json" org.agentos.lab.AcpSessionRemovalsTest | tee "$task_out/result-acp.txt"
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" org.agentos.lab.SessionRemovalsRoundRobinTest | tee "$task_out/result-round-robin.txt"
 fi

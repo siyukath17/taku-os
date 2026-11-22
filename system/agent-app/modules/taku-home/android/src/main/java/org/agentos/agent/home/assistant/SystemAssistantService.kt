@@ -97,18 +97,31 @@ object SystemAssistantEntry {
     .addCategory(Intent.CATEGORY_HOME).setClassName(context.packageName, HOME)
     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
-  fun launch(context: Context, args: Bundle?, flags: Int = 0): Intent {
-    val trigger = args?.getString(TRIGGER).orEmpty()
-    return if (trigger == "nav_handle_long_press" || trigger == "nav_handle_double_tap") {
-      Intent(context, AssistantOverlayActivity::class.java)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        .putExtra("mode", if (trigger == "nav_handle_long_press") "voice" else "text")
-        .putExtra("gestureId", args?.getString(GESTURE_ID).orEmpty())
-    } else home(context).putExtra(EXTRA_OPEN, true).apply {
-      if (flags and VoiceInteractionSession.SHOW_SOURCE_PUSH_TO_TALK != 0) {
-        action = ACTION_VOICE_ASSIST
-        removeCategory(Intent.CATEGORY_HOME)
-      }
-    }
+  /**
+   * Where a system invocation lands. Navigation-handle gestures carry [TRIGGER]; anything else
+   * (long-press power, `invocation_type` 6, `cmd voiceinteraction show`) is a hardware entry that
+   * opens the text overlay over the current app instead of sending the user to Home. Push-to-talk
+   * flags are deliberately not mapped to a hold: nothing would ever release that hold.
+   */
+  enum class Route(val mode: String, val navGesture: Boolean) {
+    NavHold("voice", true), NavDoubleTap("text", true), Hardware("text", false);
+    /** Hardware entries attach the invocation screenshot to their first message, once. */
+    val autoScreenshot: Boolean get() = this == Hardware
+  }
+
+  fun routeFor(trigger: String?): Route = when (trigger) {
+    "nav_handle_long_press" -> Route.NavHold
+    "nav_handle_double_tap" -> Route.NavDoubleTap
+    else -> Route.Hardware
+  }
+
+  fun route(args: Bundle?): Route = routeFor(args?.getString(TRIGGER))
+
+  fun launch(context: Context, args: Bundle?): Intent {
+    val route = route(args)
+    return Intent(context, AssistantOverlayActivity::class.java)
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      .putExtra("mode", route.mode)
+      .apply { if (route.navGesture) putExtra("gestureId", args?.getString(GESTURE_ID).orEmpty()) }
   }
 }

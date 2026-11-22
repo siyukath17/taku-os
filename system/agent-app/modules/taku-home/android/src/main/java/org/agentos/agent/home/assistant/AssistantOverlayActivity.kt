@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.agentos.agent.home.design.TakuTheme
+import org.agentos.agent.home.onboarding.OnboardingRepository
+import org.agentos.agent.home.onboarding.OnboardingRules
 import org.agentos.agent.home.ui.assistant.AssistantLayer
 
 /** Translucent cross-app presentation; Quickstep keeps ownership of the original pointer stream. */
@@ -57,6 +59,8 @@ class AssistantOverlayActivity : AppCompatActivity() {
 
   private fun open(intent: Intent): Boolean {
     if (getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) return false
+    // Same rule as Home: while onboarding takes over Home there is no usable AI to present.
+    if (OnboardingRules.takesOverHome(OnboardingRepository.get(this).state.value.step)) return false
     when (intent.getStringExtra("mode")) {
       "text" -> {
         if (!session.canOpenText) return false
