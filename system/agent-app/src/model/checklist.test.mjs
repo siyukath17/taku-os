@@ -21,11 +21,15 @@ test('only a complete flat bound checkbox list opts in; custom and mixed layouts
   assert.equal(checklistFields({...request, blocks: []}, spec), null);
   assert.equal(checklistFields({...request, actions: [{id: 'submit'}]}, spec), null);
   assert.equal(checklistFields({...request, blocks: [...request.blocks, {...request.blocks[0], id: 'notes', kind: 'text'}]}, spec), null);
-  for (const patch of [{type: 'Switch'}, {props: {checked: true}}, {props: {checked: {$bindState: '/ui/fields/other/draft'}}}, {on: {change: {action: 'reply'}}}]) {
+  for (const patch of [{type: 'Switch'}, {props: {checked: true}}, {props: {checked: {$bindState: '/ui/fields/other/draft'}}},
+    {on: {change: {action: 'reply'}}}, {visible: false}, {repeat: {statePath: '/data/items'}}, {watch: {'/ui/fields/phone/draft': {action: 'reply'}}}]) {
     assert.equal(checklistFields(request, {...spec, elements: {...spec.elements, 'phone-row': {...spec.elements['phone-row'], ...patch}}}), null);
   }
   const partial = {...spec, elements: {...spec.elements, root: {...spec.elements.root, children: ['room-card-row']}}};
   assert.equal(checklistFields(request, partial), null);
+  for (const patch of [{visible: true}, {repeat: {statePath: '/data/items'}}]) {
+    assert.equal(checklistFields(request, {...spec, elements: {...spec.elements, root: {...spec.elements.root, ...patch}}}), null);
+  }
 });
 
 test('count follows shared editable state, including native hydration, local taps, all-done and undo', () => {

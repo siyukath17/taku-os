@@ -5,7 +5,8 @@ import {record} from './session.ts';
 /** Presentation adapter for the existing bound Checkbox recipe, not a new wire component. */
 export function checklistFields(request: UiRequest, spec: Spec): string[] | null {
   const root = spec.elements[spec.root];
-  if (root?.type !== 'Card' || !request.blocks.length || request.actions.length) return null;
+  if (root?.type !== 'Card' || !request.blocks.length || request.actions.length
+    || root.repeat || root.visible !== undefined || Object.keys(root.watch ?? {}).length) return null;
   if (!request.blocks.every(block => block.kind === 'input' && block.value.type === 'boolean'
     && block.config.editor === 'toggle')) return null;
   const ids = new Set(request.blocks.map(block => block.id));
@@ -14,7 +15,9 @@ export function checklistFields(request: UiRequest, spec: Spec): string[] | null
   if (Object.values(root.slots ?? {}).some(children => children.length)) return null;
   for (const child of root.children ?? []) {
     const node = spec.elements[child];
-    if (node?.type !== 'Checkbox' || node.children?.length || node.on && Object.keys(node.on).length) return null;
+    if (node?.type !== 'Checkbox' || node.children?.length || node.repeat || node.visible !== undefined
+      || Object.keys(node.on ?? {}).length || Object.keys(node.watch ?? {}).length
+      || Object.values(node.slots ?? {}).some(children => children.length)) return null;
     const binding = record(node.props.checked).$bindState;
     if (typeof binding !== 'string') return null;
     const match = /^\/ui\/fields\/([^/]+)\/draft$/.exec(binding);
