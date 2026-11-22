@@ -4,6 +4,7 @@ import {isStateCardItem, parseUiRequest, type CardPresentation, type MainReply, 
 import {parseMainReply} from './genuiCompose.ts';
 import {subagentTask, type SubagentTask} from './subagents.ts';
 import {runtimeFamily} from './provider.ts';
+import {mcpPresentation, mcpTool} from './mcpTools.ts';
 
 export type Json = Record<string, unknown>;
 export type ItemStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'waiting' | 'unknown';
@@ -14,6 +15,8 @@ export interface Activity {
   name: string;
   text: string;
   status: ItemStatus;
+  /** The remote node a taku-runtime tool acts on ({node} in its label); '' when unnamed. */
+  node?: string;
   /** Epoch ms when the runtime recorded them (ACP tool items); absent otherwise. */
   startedAt?: number;
   completedAt?: number;
@@ -152,7 +155,10 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   const short = tool.replace(/^.*(?:__|\/|\.)/, '');
   const phone = tool.startsWith('taku_phone') || item.namespace === 'taku_phone';
   const agent = item.server === 'agy' && !phone;
-  const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || (type === 'agentMessage' ? 'statusNote' : 'tool');
+  const mcp = !phone && (type === 'mcpToolCall' || type === 'dynamicToolCall') && !(agent && agentToolKeys[tool])
+    ? mcpTool(string(item.server), tool, string(item.namespace)) : null;
+  const named = mcp ? mcpPresentation(mcp) : null;
+  const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || named?.titleKey || (type === 'agentMessage' ? 'statusNote' : 'tool');
   const details: string[] = [];
   for (const value of [item.command, item.aggregatedOutput || outputs[string(item.id)]]) if (typeof value === 'string' && value) details.push(value);
   if (type === 'agentMessage') details.push(string(item.text));
@@ -163,8 +169,16 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   if (error) details.push(error);
   const time = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
   const startedAt = time(item.startedAt), completedAt = time(item.completedAt);
-  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : titleKey === 'statusNote' ? statusNoteLine(string(item.text)) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item),
-    ...(startedAt ? {startedAt} : {}), ...(completedAt ? {completedAt} : {})};
+  const name = named?.name || (titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : titleKey === 'statusNote' ? statusNoteLine(string(item.text)) : '');
+  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name, text: details.filter(Boolean).join('\n'), status: itemStatus(item),
+    ...(named?.node !== undefined ? {node: named.node} : {}), ...(startedAt ? {startedAt} : {}), ...(completedAt ? {completedAt} : {})};
+}
+
+/** The name an activity row shows: its literal name, else its translated label with {node} filled in. */
+export function activityName(item: Pick<Activity, 'name' | 'titleKey' | 'node'>, t: (key: string) => string): string {
+  if (item.name) return item.name;
+  const text = t(item.titleKey);
+  return item.node === undefined ? text : text.replace('{node}', item.node || t('remoteNode'));
 }
 
 function userContent(item: Json): {text: string; attachments: string[]} {

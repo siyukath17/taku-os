@@ -13,7 +13,7 @@ import {useLiveTalk} from '../chat/useLiveTalk';
 import * as Haptics from 'expo-haptics';
 import {colors as baseColors, containsChinese, layout, typography, type TypeRole} from '../theme';
 import {languageFor, textFor, type Language, type TextKey} from '../i18n';
-import {list, record, string, type Activity, type Json, type MessagePart, type PendingQuestion, type SessionView, type ThreadSummary, type WorkspaceView} from '../model/session';
+import {activityName, list, record, string, type Activity, type Json, type MessagePart, type PendingQuestion, type SessionView, type ThreadSummary, type WorkspaceView} from '../model/session';
 import {Icon, IconButton} from './Icon';
 import {chatPresentation, type ChatMessageBlock} from '../model/chatPresentation';
 import {FIRST_RESPONSE_TIMEOUT_MS, type OptimisticSubmission} from '../model/optimisticChat';
@@ -162,7 +162,7 @@ const statusKey: Record<string, TextKey> = {running: 'working', completed: 'comp
 
 function ActivityRow({item, language}: {item: Activity; language: Language}) {
   const [open, setOpen] = useState(false), t = textFor(language);
-  const name = item.name || t(item.titleKey as TextKey);
+  const name = activityName(item, key => t(key as TextKey));
   return <View style={styles.activityItem}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${name}. ${t(statusKey[item.status])}. ${t(open ? 'hideDetails' : 'showDetails')}`}
       accessibilityState={{expanded: open}} onPress={() => setOpen(!open)} style={styles.activityRow}>

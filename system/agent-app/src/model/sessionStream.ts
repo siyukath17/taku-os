@@ -194,7 +194,7 @@ export function retainSessionBlocks(next: SessionView, prior: SessionView | null
     const sameActivity = previous.activity.length === block.activity.length && block.activity.every((item, i) => {
       const old = previous.activity[i];
       return old.id === item.id && old.type === item.type && old.titleKey === item.titleKey
-        && old.name === item.name && old.text === item.text && old.status === item.status
+        && old.name === item.name && old.node === item.node && old.text === item.text && old.status === item.status
         && old.startedAt === item.startedAt && old.completedAt === item.completedAt;
     });
     // Subagent cards and reactions change on their own (a child starts, reports, ends) while the

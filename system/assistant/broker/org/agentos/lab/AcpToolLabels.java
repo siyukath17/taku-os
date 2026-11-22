@@ -2,6 +2,7 @@ package org.agentos.lab;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,17 +28,33 @@ final class AcpToolLabels {
         final boolean phone;
         /** A human-written title (not agy's "Run …"/"File …" form), sanitized; empty otherwise. */
         final String title;
+        /** Another MCP server's name ({@code taku_memory}, {@code taku_macmini}), without disambiguator; empty otherwise. */
+        final String server;
+        /** That server's tool ({@code memory_search}, {@code taku_exec}); empty when {@link #server} is. */
+        final String serverTool;
 
         Tool(String key, String name, boolean phone, String title) {
+            this(key, name, phone, title, "", "");
+        }
+
+        Tool(String key, String name, boolean phone, String title, String server, String serverTool) {
             this.key = key;
             this.name = name;
             this.phone = phone;
             this.title = title;
+            this.server = server;
+            this.serverTool = serverTool;
+        }
+
+        /** Another MCP server's tool (not taku_phone). */
+        boolean mcp() {
+            return !server.isEmpty();
         }
 
         /** The canonical tool id the chat page understands: {@code taku_phone__<key>} or the bare key. */
         String canonical() {
             if (phone) return "taku_phone__" + key;
+            if (mcp()) return server + "__" + serverTool;
             return "tool".equals(key) && !title.isEmpty() ? title : key;
         }
     }
@@ -49,6 +66,29 @@ final class AcpToolLabels {
      */
     private static final Pattern PHONE = Pattern.compile("^(?:mcp_)?taku_phone(?:__|_|\\.|/)(?:[0-9a-f]{8}_)?([a-z][a-z0-9_]*)$");
     private static final Pattern NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.:/-]{0,79}");
+    /**
+     * Any other MCP tool as agy names it: {@code mcp_<server>_<tool>}, with an optional 8-hex
+     * disambiguator after the server ({@code mcp_taku_memory_3013b55d_memory_search}), or
+     * {@code mcp__<server>__<tool>}.
+     */
+    private static final Pattern MCP = Pattern.compile("^mcp_{1,2}([a-z0-9][a-z0-9_-]{0,119})$");
+    private static final Pattern MCP_HASHED = Pattern.compile("^([a-z0-9][a-z0-9_-]*?)_[0-9a-f]{8}_([a-z0-9][a-z0-9_-]*)$");
+    private static final Pattern MCP_PART = Pattern.compile("[a-z0-9][a-z0-9_-]*");
+    /** taku-runtime's tools on a remote node (taku-runtime/internal/server/mcp.go). */
+    private static final Set<String> RUNTIME_TOOLS = Set.of("taku_capabilities", "taku_exec", "taku_run_prompt", "taku_call_tool");
+    /** {@code en} and {@code zh} labels of taku-runtime tools; {@code %s} is the node. */
+    private static final Map<String, String[]> RUNTIME_LABELS = Map.of(
+            "taku_capabilities", new String[]{"Check %s capabilities", "查询 %s 能力"},
+            "taku_exec", new String[]{"Run a command on %s", "在 %s 执行命令"},
+            "taku_run_prompt", new String[]{"Hand a task to %s", "派 %s 运行任务"},
+            "taku_call_tool", new String[]{"Use a tool on %s", "在 %s 调用工具"});
+    /** {@code en} and {@code zh} labels of the taku_memory knowledge-base server's tools. */
+    private static final Map<String, String[]> MEMORY_LABELS = Map.of(
+            "memory_search", new String[]{"Search memory", "搜索知识库"},
+            "memory_read", new String[]{"Read memory note", "读取知识库笔记"},
+            "memory_capture", new String[]{"Capture to memory", "写入知识库"},
+            "memory_profile_summary", new String[]{"Read profile summary", "读取个人画像摘要"},
+            "memory_propose_profile", new String[]{"Propose a profile update", "提议更新个人画像"});
 
     /** {@code en} and {@code zh} labels by key. Unknown keys fall back to a generic label. */
     private static final Map<String, String[]> LABELS = Map.ofEntries(
@@ -101,8 +141,70 @@ final class AcpToolLabels {
         if (human.length() > 80) human = human.substring(0, 79) + "…";
         Matcher phone = PHONE.matcher(n);
         if (phone.matches()) return new Tool(phone.group(1), n, true, human);
+        String[] mcp = mcpParts(n);
+        if (mcp != null) return new Tool(mcp[0] + "__" + mcp[1], n, false, human, mcp[0], mcp[1]);
         String key = n.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
         return new Tool(key.isEmpty() ? "tool" : key, n, false, human);
+    }
+
+    /**
+     * {server, tool} of an agy MCP tool name, else null. A double underscore or the disambiguator
+     * separates them exactly; otherwise a taku-runtime tool name or the {@code taku_memory} prefix
+     * does, and failing that the server is the first word ({@code taku_<word>} for Taku's own).
+     */
+    static String[] mcpParts(String name) {
+        Matcher m = MCP.matcher(name == null ? "" : name);
+        if (!m.matches()) return null;
+        String rest = m.group(1), server, tool;
+        int split = rest.indexOf("__");
+        Matcher hashed = MCP_HASHED.matcher(rest);
+        if (split > 0) {
+            server = rest.substring(0, split);
+            tool = rest.substring(split + 2).replaceFirst("^[0-9a-f]{8}_", "");
+        } else if (hashed.matches()) {
+            server = hashed.group(1);
+            tool = hashed.group(2);
+        } else {
+            server = null;
+            tool = null;
+            for (String runtime : RUNTIME_TOOLS) {
+                if (rest.endsWith("_" + runtime) && rest.length() > runtime.length() + 1) {
+                    server = rest.substring(0, rest.length() - runtime.length() - 1);
+                    tool = runtime;
+                }
+            }
+            if (server == null && rest.startsWith("taku_memory_")) {
+                server = "taku_memory";
+                tool = rest.substring("taku_memory_".length());
+            }
+            if (server == null) {
+                String[] words = rest.split("_");
+                int serverWords = "taku".equals(words[0]) && words.length > 2 ? 2 : 1;
+                if (words.length <= serverWords) return null;
+                server = String.join("_", java.util.Arrays.copyOfRange(words, 0, serverWords));
+                tool = rest.substring(server.length() + 1);
+            }
+        }
+        if (!MCP_PART.matcher(server).matches() || !MCP_PART.matcher(tool).matches()) return null;
+        return new String[]{server, tool};
+    }
+
+    /** The node a taku-runtime server reaches: {@code taku_macmini} → {@code macmini}. */
+    private static String node(String server) {
+        String node = server.startsWith("taku_") ? server.substring(5) : server;
+        return node.isEmpty() || "runtime".equals(node) ? "" : node;
+    }
+
+    /** The label of another MCP server's tool: Taku's own by name, any other as {@code server · tool}. */
+    private static String mcpLabel(Tool tool, boolean zh) {
+        if (RUNTIME_TOOLS.contains(tool.serverTool)) {
+            String node = node(tool.server);
+            return String.format(RUNTIME_LABELS.get(tool.serverTool)[zh ? 1 : 0], node.isEmpty() ? (zh ? "远端节点" : "the remote node") : node);
+        }
+        String[] memory = MEMORY_LABELS.get(tool.serverTool);
+        if (memory != null && tool.server.endsWith("memory")) return memory[zh ? 1 : 0];
+        if (!tool.title.isEmpty()) return tool.title;
+        return tool.server + " · " + tool.serverTool.replace('_', ' ');
     }
 
     static boolean chinese(Locale locale) {
@@ -113,6 +215,7 @@ final class AcpToolLabels {
     static String label(Tool tool, Locale locale) {
         String[] pair = LABELS.get(tool.key);
         boolean zh = chinese(locale);
+        if (tool.mcp()) return mcpLabel(tool, zh);
         if (pair != null) return pair[zh ? 1 : 0];
         if (tool.phone) return zh ? "操作手机" : "Use the phone";
         if (!tool.title.isEmpty()) return tool.title; // Another ACP agent's own readable title.

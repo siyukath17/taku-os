@@ -3,7 +3,7 @@ import {LayoutAnimation, Pressable, StyleSheet, Text, View} from 'react-native';
 import {containsChinese} from '../theme';
 import {textFor, type Language, type TextKey} from '../i18n';
 import {chatColors, chatType, themedStyles} from '../chat/chatTheme';
-import type {Activity} from '../model/session';
+import {activityName, type Activity} from '../model/session';
 import {formatClock, formatDuration} from '../model/subagents';
 import {cleanToolDetail, isStatusNote, statusNoteLine, toolStepElapsed, toolStreamSummary, visibleToolSteps} from '../model/toolStream';
 import {Icon} from './Icon';
@@ -58,7 +58,7 @@ function ToolStep({item, language, now}: {item: Activity; language: Language; no
 
 function ToolCallStep({item, language, now}: {item: Activity; language: Language; now: number}) {
   const t = textFor(language), [open, setOpen] = useState(false);
-  const name = item.name || t(item.titleKey as TextKey);
+  const name = activityName(item, key => t(key as TextKey));
   const detail = item.text ? cleanToolDetail(item.text) : '';
   const elapsed = toolStepElapsed(item, now);
   const live = item.status === 'running' || item.status === 'waiting';

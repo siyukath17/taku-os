@@ -416,6 +416,42 @@ public final class AcpWarmPoolTest {
         check(!prose.contains("3013b55d") && !prose.contains("mcp_taku_phone"), "prose: the disambiguated identifier reads as the tool: " + prose);
     }
 
+    /**
+     * Other MCP servers' tools (Pixel 9: mcp_taku_memory_memory_search, mcp_taku_macmini_taku_exec)
+     * read as what they do, never the generic "Use a tool"; a third-party server's tool reads as
+     * "server · tool" without the disambiguator.
+     */
+    static void otherMcpToolNames() throws Exception {
+        java.util.Locale en = java.util.Locale.ENGLISH, zh = java.util.Locale.SIMPLIFIED_CHINESE;
+        AcpToolLabels.Tool search = AcpToolLabels.identify("mcp_taku_memory_memory_search", "Run mcp_taku_memory_memory_search", "other");
+        check(!search.phone && "taku_memory".equals(search.server) && "taku_memory__memory_search".equals(search.canonical()),
+                "taku_memory: server and canonical id: " + search.canonical());
+        check("Search memory".equals(AcpToolLabels.label(search, en)) && "搜索知识库".equals(AcpToolLabels.label(search, zh)),
+                "taku_memory search label: " + AcpToolLabels.label(search, zh));
+        check("写入知识库".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_memory_3013b55d_memory_capture", "", "other"), zh)),
+                "taku_memory capture label, disambiguated");
+        check("Read memory note".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_memory_memory_read", "", "other"), en)), "read label");
+        check("读取个人画像摘要".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_memory_memory_profile_summary", "", "other"), zh)), "profile label");
+        check("提议更新个人画像".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_memory_memory_propose_profile", "", "other"), zh)), "propose label");
+        AcpToolLabels.Tool exec = AcpToolLabels.identify("mcp_taku_macmini_taku_exec", "", "other");
+        check("taku_macmini".equals(exec.server) && "taku_exec".equals(exec.serverTool), "runtime: server " + exec.server);
+        check("在 macmini 执行命令".equals(AcpToolLabels.label(exec, zh)) && "Run a command on macmini".equals(AcpToolLabels.label(exec, en)),
+                "runtime exec label: " + AcpToolLabels.label(exec, zh));
+        check("查询 macmini 能力".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_macmini_9f00aa12_taku_capabilities", "", "other"), zh)),
+                "runtime capabilities label, disambiguated");
+        check("派 studio 运行任务".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_studio_taku_run_prompt", "", "other"), zh)), "run prompt on any node");
+        check("在 macmini 调用工具".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp__taku_macmini__taku_call_tool", "", "other"), zh)), "double-underscore form");
+        AcpToolLabels.Tool third = AcpToolLabels.identify("mcp_github_ab12cd34_create_issue", "", "other");
+        check("github · create issue".equals(AcpToolLabels.label(third, en)) && "github__create_issue".equals(third.canonical()),
+                "third-party label: " + AcpToolLabels.label(third, en));
+        check("brave · web search".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_brave_web_search", "", "other"), zh)), "first word is the server");
+        check("taku_notes · list".equals(AcpToolLabels.label(AcpToolLabels.identify("mcp_taku_notes_list", "", "other"), en)), "taku_<word> server");
+        check(!AcpToolLabels.label(third, en).contains("ab12cd34"), "no disambiguator shown");
+        check("Use a tool".equals(AcpToolLabels.label(AcpToolLabels.identify("brand_new_tool", "", "other"), en)), "a bare unknown tool is unchanged");
+        check("taku_phone__apps".equals(AcpToolLabels.identify("mcp_taku_phone_apps", "", "other").canonical()), "taku_phone stays a phone tool");
+        check(AcpToolLabels.mcpParts("mcp_") == null && AcpToolLabels.mcpParts("mcp_single") == null, "no tool part: not an MCP tool");
+    }
+
     /** P0: only the ACP route skips the execution display; background tasks still capture context. */
     static void displayPreparationByRoute() throws Exception {
         check(!RuntimeRouter.preparesExecutionDisplay(new RuntimeRouter.Route(RuntimeRouter.ACP, "acp", "selected-by-config", new JSONObject())),
@@ -563,6 +599,7 @@ public final class AcpWarmPoolTest {
         nativePhoneMcp();
         bridgeTurnFollowsCurrentTurn();
         disambiguatedPhoneToolNames();
+        otherMcpToolNames();
         displayPreparationByRoute();
         coalescedNotifications();
         System.out.println("AcpWarmPoolTest passed " + checks + " checks");

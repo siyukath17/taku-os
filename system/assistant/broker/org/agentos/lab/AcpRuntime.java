@@ -1934,13 +1934,15 @@ final class AcpRuntime implements TaskRuntime {
             }
             if ((update.has("title") && !update.isNull("title")) || update.has("name")) {
                 // The chat page shows "title"; "tool" is the canonical id it translates
-                // (taku_phone__<tool> with namespace taku_phone, else the agent's tool name), and
+                // (taku_phone__<tool> with namespace taku_phone, <server>__<tool> with namespace
+                // <server> for another MCP server, else the agent's tool name), and
                 // "toolName" the agent's own name, for diagnostics. agy's terminal-style title can hold
                 // internal paths ("File ../acp/home/.gemini/…"), so it is never shown.
                 AcpToolLabels.Tool tool = AcpToolLabels.identify(update.optString("name", ""), update.optString("title", ""), update.optString("kind", ""));
                 item.put("tool", tool.canonical()).put("toolName", clip(tool.name, 120))
                         .put("title", AcpToolLabels.label(tool, java.util.Locale.getDefault()));
                 if (tool.phone) item.put("namespace", "taku_phone");
+                else if (tool.mcp()) item.put("namespace", tool.server);
                 else item.remove("namespace");
             }
             if (update.has("kind") && !update.isNull("kind")) item.put("kind", update.optString("kind"));

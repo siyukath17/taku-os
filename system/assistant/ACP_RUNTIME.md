@@ -407,6 +407,15 @@ label itself. The chat page (`agent-app` `session.ts`) translates the ids (e.g. 
 tool arguments, results, errors and task results are sanitized: Markdown links to internal files or
 `conversation://` subagent links keep only their text, and internal paths (`/data/local/agentos/…`,
 `…/acp/home/…`, `.gemini/…`) become their file name or `[internal file]`.
+Tools of other MCP servers (`mcp_<server>_<tool>`, optionally `mcp_<server>_<8 hex>_<tool>` or
+`mcp__<server>__<tool>`) get `tool: "<server>__<tool>"` with `namespace: "<server>"`. taku_memory
+tools read as what they do (`memory_search` → 搜索知识库 / Search memory, `memory_capture` → 写入知识库,
+`memory_read` → 读取知识库笔记, `memory_profile_summary`, `memory_propose_profile`); taku-runtime
+tools name the node from the server (`mcp_taku_macmini_taku_exec` → 在 macmini 执行命令,
+`taku_capabilities` → 查询 macmini 能力, `taku_run_prompt` → 派 macmini 运行任务, `taku_call_tool`);
+any other server's tool reads as `<server> · <tool>` (`github · create issue`), never the generic
+"Use a tool". The chat page (`agent-app` `mcpTools.ts`) parses the same names, including Codex's
+separate `server`/`tool`.
 Internal tool identifiers in prose (`mcp_taku_phone_device_info`, `mcp__taku_phone__tap`,
 `taku_phone.open_app`, squashed `mcptakuphonedeviceinfo`) read as the tool's label in the
 broker's locale: in subagent cards (goal, report, summary) together with agy's own tool keys
