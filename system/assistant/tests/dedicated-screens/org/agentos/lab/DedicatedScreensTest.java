@@ -517,68 +517,109 @@ public final class DedicatedScreensTest {
                 "B5: releasing Y closes it, X is on top again");
     }
 
-    /** B3: while an App the session holds has a task on the main screen, its screen stays still. */
-    static void userHolds() throws Exception {
+    /**
+     * OPEN with a launch that does what Android does: a new task on the session's screen, or (a
+     * single-instance App) none while the App already has a task anywhere. Returns the launches.
+     */
+    static int[] openApp(Rig rig, int session, String pkg, boolean singleInstance) throws Exception {
+        int[] launches = {0};
+        rig.screens.withScreen(
+                session(session),
+                DedicatedScreens.Use.OPEN,
+                pkg,
+                s -> {
+                    launches[0]++;
+                    boolean exists = false;
+                    for (PhoneTasks.Task t : rig.tasks.list())
+                        if (t.packageName().equals(pkg)) exists = true;
+                    if (!singleInstance || !exists) rig.tasks.open(pkg, s.displayId);
+                    return new JSONObject().put("ran", s.displayId);
+                });
+        return launches;
+    }
+
+    static List<Integer> tasksOf(Rig rig, String pkg, int display) {
+        List<Integer> out = new ArrayList<>();
+        for (PhoneTasks.Task t : rig.tasks.list())
+            if (t.displayId() == display && t.packageName().equals(pkg)) out.add(t.id());
+        return out;
+    }
+
+    /**
+     * B3: the user's decision, "the agent may take over at any time": an App the session holds that
+     * is also open on the main screen or in Recents never blocks it (no USER_HOLDS_APP). OPEN lands
+     * the App on the session's own screen.
+     */
+    static void takesOverAnyTime() throws Exception {
         Rig rig = new Rig();
-        // left in the user's Recents
-        int users = rig.tasks.open("com.x", 0);
+        rig.screens.openSettleMs = 50;
+        int home = rig.tasks.open("org.agentos.assistant", 0);
+        // in the user's Recents, then in front on the main screen
+        int recents = rig.tasks.open("com.x", 0);
+        int front = rig.tasks.open("com.y", 0);
         JSONObject got = rig.request(1, "t", "com.x", "com.y");
         int d = got.getInt("displayId");
         check(held(got).equals(List.of("com.x", "com.y")), "B3: requesting is not checked: " + got);
-        boolean[] ran = {false};
-        String refused =
-                refusal(() ->
-                        rig.screens.withScreen(
-                                session(1),
-                                DedicatedScreens.Use.OPEN,
-                                "com.x",
-                                s -> {
-                                    ran[0] = true;
-                                    return new JSONObject();
-                                }));
-        JSONObject f = fields("USER_HOLDS_APP", refused);
-        check(
-                f.getString("packageName").equals("com.x")
-                        && f.getString("advice").contains(" X ")
-                        && !ran[0],
-                "B3: open_app blocked before running, X named by its label: " + refused);
-        rejects("USER_HOLDS_APP", () -> use(rig, 1, DedicatedScreens.Use.OPEN, "com.y"));
-        rejects("USER_HOLDS_APP", () -> use(rig, 1, DedicatedScreens.Use.ACT, null));
-        check(use(rig, 1, DedicatedScreens.Use.LOOK, null) == d, "B3: a screenshot is not checked");
-        // the user swipes X away
-        rig.tasks.remove(users);
-        check(
-                use(rig, 1, DedicatedScreens.Use.OPEN, "com.x") == d,
-                "B3: then it goes on, no new request");
+        check(use(rig, 1, DedicatedScreens.Use.ACT, null) == d, "B3: ACT runs");
+        check(use(rig, 1, DedicatedScreens.Use.LOOK, null) == d, "B3: LOOK runs");
 
-        rig.tasks.open("com.other", 0);
-        rig.tasks.open("com.x", 9);
+        // a normal App: a task of its own on the session's screen, the user's copy left alone
+        int[] n = openApp(rig, 1, "com.x", false);
         check(
-                use(rig, 1, DedicatedScreens.Use.ACT, null) == d,
-                "B3: only the session's Apps on the main screen count");
+                n[0] == 1 && tasksOf(rig, "com.x", d).size() == 1
+                        && tasksOf(rig, "com.x", 0).equals(List.of(recents)),
+                "B3: multiple-task launch, user's Recents copy kept: " + rig.tasks.list());
+        release(rig, 1, "com.x");
 
-        rig.tasks.open("com.y", d);
-        int page = rig.tasks.open("com.x", d);
-        // the user opens X: Android moves the session's task over
-        rig.tasks.remove(page);
-        int moved = rig.tasks.open("com.x", 0);
-        f = fields("USER_HOLDS_APP", refusal(() -> use(rig, 1, DedicatedScreens.Use.ACT, null)));
+        // a single-instance App reuses the user's task on the main screen: closed, then reopened here
+        n = openApp(rig, 1, "com.y", true);
         check(
-                f.getString("packageName").equals("com.x"),
-                "B3: the user opened X while the session used it, Y on top: " + f);
-        rig.tasks.remove(moved);
-        check(use(rig, 1, DedicatedScreens.Use.ACT, null) == d, "B3: X swiped away, go on");
+                n[0] == 2 && tasksOf(rig, "com.y", d).size() == 1
+                        && tasksOf(rig, "com.y", 0).isEmpty()
+                        && !rig.tasks.list().stream().anyMatch(t -> t.id() == front),
+                "B3: single-instance App moved to the session's screen: " + rig.tasks.list());
+        check(tasksOn(rig, 0).equals(List.of(recents, home)), "B3: home and other Apps untouched");
 
-        rig.tasks.open("com.x", d);
-        int usersY = rig.tasks.open("com.y", 0);
-        f = fields("USER_HOLDS_APP", refusal(() -> use(rig, 1, DedicatedScreens.Use.ACT, null)));
-        check(f.getString("packageName").equals("com.y"), "B3: acting in X while Y is held: " + f);
-        int usersX = rig.tasks.open("com.x", 0);
-        f = fields("USER_HOLDS_APP", refusal(() -> use(rig, 1, DedicatedScreens.Use.ACT, null)));
-        check(f.getString("packageName").equals("com.x"), "B3: the top one is named: " + f);
-        // an in-App jump as well: B5 is checked first
-        rig.tasks.open("com.z", d);
-        rejects("UNHELD_APP_ON_TOP", () -> use(rig, 1, DedicatedScreens.Use.ACT, null));
+        // the user opens Y on the main screen meanwhile (Android moved the session's task over)
+        rig.tasks.remove(tasksOf(rig, "com.y", d).get(0));
+        rig.tasks.open("com.y", 0);
+        check(use(rig, 1, DedicatedScreens.Use.ACT, null) == d, "B3: ACT still runs, no USER_HOLDS_APP");
+        n = openApp(rig, 1, "com.y", true);
+        check(
+                n[0] == 2 && tasksOf(rig, "com.y", d).size() == 1 && tasksOf(rig, "com.y", 0).isEmpty(),
+                "B3: and open_app takes it back: " + rig.tasks.list());
+
+        // already on its screen: a single launch, nothing on the main screen is touched
+        int mainX = rig.tasks.open("com.x", 0);
+        rig.request(1, "t", "com.x");
+        n = openApp(rig, 1, "com.x", false);
+        n = openApp(rig, 1, "com.x", true);
+        check(n[0] == 1 && tasksOf(rig, "com.x", 0).equals(List.of(mainX, recents)), "B3: App on screen, one launch: " + rig.tasks.list());
+
+        // Taku's own home/chat are never closed to make room
+        Rig own = new Rig();
+        own.screens.openSettleMs = 50;
+        int chat = own.tasks.open("org.agentos.agent", 0);
+        own.request(1, "t", "org.agentos.agent");
+        rejects("OPEN_LANDED_ON_MAIN", () -> openApp(own, 1, "org.agentos.agent", true));
+        check(tasksOf(own, "org.agentos.agent", 0).equals(List.of(chat)), "B3: Taku's chat left alone");
+
+        // an App Android keeps on the main screen even after the reopen: reported, not looped
+        Rig stuck = new Rig();
+        stuck.screens.openSettleMs = 50;
+        stuck.tasks.open("com.s", 0);
+        int sd = stuck.request(1, "t", "com.s").getInt("displayId");
+        int[] tries = {0};
+        rejects(
+                "OPEN_LANDED_ON_MAIN",
+                () -> stuck.screens.withScreen(session(1), DedicatedScreens.Use.OPEN, "com.s", s -> {
+                    tries[0]++;
+                    stuck.tasks.open("com.s", 0);
+                    return new JSONObject();
+                }));
+        check(tries[0] == 2 && tasksOf(stuck, "com.s", sd).isEmpty(), "B3: one reopen only");
+        openApp(stuck, 1, "com.s", false);
+        check(tasksOf(stuck, "com.s", sd).size() == 1, "B3: a normal launch then lands on the screen");
     }
 
     static JSONObject release(Rig rig, int session, String... packages) throws Exception {
@@ -2821,7 +2862,7 @@ public final class DedicatedScreensTest {
         requestRefusals();
         beforeUse();
         topApp();
-        userHolds();
+        takesOverAnyTime();
         releaseApps();
         turnEnds();
         listRows();

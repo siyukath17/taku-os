@@ -2,24 +2,27 @@
 """Dedicated screens, script S2: the user has an App the thread holds on the main screen. Covers B3 and C4 (design
 doc section 2).
 
-The user is simulated from the shell: `am start --display 0` opens an App on the main screen the way tapping its icon
-does, and `am stack remove` swipes its task away in Recents. Three parts:
+The user decided the agent may take an App over at any time: an App open on the main screen or in Recents never
+blocks the thread (no USER_HOLDS_APP). The user is simulated from the shell: `am start --display 0` opens an App on
+the main screen the way tapping its icon does, and `am stack remove` swipes its task away in Recents. Three parts:
 
-1. Clock is in the user's Recents before the thread asks for it: the request is granted, open_app and tap are refused
-   with USER_HOLDS_APP and the user's Clock stays put; once it is swiped away, open_app goes on without a new
-   request. (A screenshot is not checked: host tests and S4 cover that; an empty screen gives no frame to capture.)
-2. The user opens Settings while the thread uses it: Android moves the thread's task to the main screen and the next
-   tap is refused; once it is swiped away, the thread goes on and Settings starts over in a new task.
+1. APP (TAKU_S2_APP, default Clock) is in front on the main screen before the thread asks for it: the request is
+   granted, tap and open_app run at once, and APP ends up on the thread's screen (its own task, or the user's task
+   moved over for a single-instance App).
+2. The user opens Settings while the thread uses it: Android moves the thread's task to the main screen; the next
+   tap still runs and open_app brings Settings back to the thread's screen.
 3. C4: after the turn ends, the user opens Settings and gets a new task, not the thread's page.
 
 Needs what S1 needs.
 
     python3 system/assistant/tests/dedicated-screens/e2e/s2.py [serial]
 """
-import json, re, sys, uuid
+import os, sys, uuid
 
 import s1
-from s1 import CLOCK, SETTINGS, Refused, apps_on, check, shell, tasks, tool, turn_ended
+from s1 import CLOCK, SETTINGS, apps_on, check, shell, tasks, tool, turn_ended
+
+APP = os.environ.get('TAKU_S2_APP', CLOCK)
 
 
 def task_of(pkg, display):
@@ -41,53 +44,34 @@ def user_swipes(task):
     s1.until(lambda: task not in [i for i, _, _ in tasks()], f'task {task} swiped away: {tasks()}', seconds=15)
 
 
-def blocked(thread, name, arguments=None):
-    """The fields of the USER_HOLDS_APP refusal the tool call gets."""
-    try:
-        tool(thread, name, arguments)
-    except Refused as error:
-        m = re.search(r'USER_HOLDS_APP: (\{.*\})', str(error))
-        check(m is not None, f'{name}: expected USER_HOLDS_APP, got {error}')
-        return json.loads(m.group(1))
-    raise AssertionError(f'{name}: expected USER_HOLDS_APP, but it ran')
-
-
 def main():
     s1.require_this_broker()
     on_main = set(apps_on(0))
-    if on_main & {SETTINGS, CLOCK}:
-        sys.exit(f'clear {sorted(on_main & {SETTINGS, CLOCK})} from the main screen first')
+    if on_main & {SETTINGS, APP}:
+        sys.exit(f'clear {sorted(on_main & {SETTINGS, APP})} from the main screen first')
 
     t1, t2 = str(uuid.uuid4()), str(uuid.uuid4())
     try:
-        # 1. Clock is in the user's Recents before the thread asks for it (plan 4.2)
-        users = user_opens(CLOCK)
-        shell('input keyevent HOME')  # back to Taku; Clock stays in Recents
-        got = tool(t1, 'request_apps', {'packages': [CLOCK], 'taskTitle': 'S2 clock'})
+        # 1. APP is in front on the main screen before the thread asks for it
+        user_opens(APP)
+        got = tool(t1, 'request_apps', {'packages': [APP], 'taskTitle': 'S2 takeover'})
         display = got['displayId']
-        check(got['heldApps'] == [CLOCK], f'B3: requesting is not checked: {got}')
-        check(blocked(t1, 'open_app', {'packageName': CLOCK})['packageName'] == CLOCK, 'B3: open_app, Clock named')
-        check(blocked(t1, 'tap', {'x': 5, 'y': 5})['packageName'] == CLOCK, 'B3: a tap on the empty screen too')
-        check(apps_on(display) == [] and task_of(CLOCK, 0) == users, f'B3: the user\'s Clock stays put: {tasks()}')
-        user_swipes(users)
-        tool(t1, 'open_app', {'packageName': CLOCK})
-        check(apps_on(display) == [CLOCK], f'B3: swiped away, open_app goes on without a new request: {tasks()}')
+        check(got['heldApps'] == [APP], f'B3: requesting is not checked: {got}')
+        tool(t1, 'tap', {'x': 5, 'y': 5})  # no USER_HOLDS_APP
+        tool(t1, 'open_app', {'packageName': APP})
+        s1.until(lambda: task_of(APP, display), f'B3: {APP} taken over onto the thread\'s screen: {tasks()}')
+        tool(t1, 'release_apps', {'packages': [APP]})
         turn_ended(t1)
 
-        # 2. the user opens Settings while the thread uses it (plan 4.3)
+        # 2. the user opens Settings while the thread uses it
         display = tool(t2, 'request_apps', {'packages': [SETTINGS], 'taskTitle': 'S2 settings'})['displayId']
         tool(t2, 'open_app', {'packageName': SETTINGS})
         page = s1.until(lambda: task_of(SETTINGS, display), f'Settings on the thread\'s screen: {tasks()}')
-        tool(t2, 'tap', {'x': 5, 'y': 5})
         moved = user_opens(SETTINGS)
-        check(moved == page and apps_on(display) == [],
-              f'Android moves the thread\'s task to the main screen: {page} -> {tasks()}')
-        check(blocked(t2, 'tap', {'x': 5, 'y': 5})['packageName'] == SETTINGS, 'B3: the next tap is refused')
-        user_swipes(moved)
-        tool(t2, 'tap', {'x': 5, 'y': 5})
+        tool(t2, 'tap', {'x': 5, 'y': 5})  # still runs
         tool(t2, 'open_app', {'packageName': SETTINGS})
-        again = s1.until(lambda: task_of(SETTINGS, display), f'Settings reopened: {tasks()}')
-        check(again != page, f'B3: Settings starts over in a new task: {tasks()}')
+        again = s1.until(lambda: task_of(SETTINGS, display), f'B3: Settings back on the thread\'s screen: {tasks()}')
+        check(again is not None, f'B3: taken back: {page} {moved} -> {tasks()}')
 
         # 3. C4: once the turn has ended, the user gets a new Settings task, not the thread's page
         turn_ended(t2)
@@ -95,12 +79,11 @@ def main():
         users = user_opens(SETTINGS)
         check(users not in (page, again), f'C4: a new Settings task for the user: {tasks()}')
         user_swipes(users)
-        check(set(apps_on(0)) == on_main, f'the main screen is as it was: {tasks()}')
     finally:
         turn_ended(t1)
         turn_ended(t2)
         for i, p, d in tasks():
-            if d == 0 and p in (SETTINGS, CLOCK):
+            if d == 0 and p in (SETTINGS, APP):
                 shell(f'am stack remove {i}')
     print(f'S2: {s1.checks} checks passed')
 

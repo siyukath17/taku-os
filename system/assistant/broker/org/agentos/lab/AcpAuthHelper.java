@@ -69,6 +69,28 @@ final class AcpAuthHelper {
         }
     }
 
+    /**
+     * The main screen's tasks, so the browser window the sign-in opened can be closed when it ends.
+     * Device: {@code am stack list} / {@code am stack remove} (wired in TaskBroker through PhoneTasks).
+     */
+    interface Windows {
+        /** Task id to the package of its root activity, main screen only. */
+        Map<Integer, String> list() throws Exception;
+
+        void remove(int id) throws Exception;
+
+        Windows NONE = new Windows() {
+            public Map<Integer, String> list() { return Map.of(); }
+
+            public void remove(int id) {}
+        };
+    }
+
+    /** Never closed by the sign-in cleanup: the home screen and Taku's own chat. */
+    static final java.util.Set<String> KEEP_PACKAGES = java.util.Set.of(
+            "org.agentos.assistant", "org.agentos.agent",
+            "com.android.launcher3", "com.google.android.apps.nexuslauncher");
+
     static final List<String> DEFAULT_URL_HOSTS = List.of("accounts.google.com");
     /** ACP "request cancelled": agy's authenticate answer when its stdin closes mid sign-in. */
     static final int SIGN_IN_CANCELLED = -32800;
@@ -79,16 +101,23 @@ final class AcpAuthHelper {
     private final AcpProcessTransport transport;
     private final IntentLauncher launcher;
     private final long timeoutMillis;
+    private final Windows windows;
     private final Object lock = new Object();
     private Thread worker;
     private volatile boolean cancelled;
     private volatile AcpProcessTransport.Connection active;
 
     AcpAuthHelper(File statusFile, AcpProcessTransport transport, IntentLauncher launcher, long timeoutMillis) {
+        this(statusFile, transport, launcher, timeoutMillis, Windows.NONE);
+    }
+
+    AcpAuthHelper(File statusFile, AcpProcessTransport transport, IntentLauncher launcher, long timeoutMillis,
+            Windows windows) {
         this.statusFile = statusFile;
         this.transport = transport;
         this.launcher = launcher;
         this.timeoutMillis = timeoutMillis;
+        this.windows = windows;
     }
 
     /** Starts one sign-in in the background; a second call while one runs returns its status. */
@@ -173,6 +202,7 @@ final class AcpAuthHelper {
         reader(connection.stderr(), inbox, "acp-auth-stderr");
         OutputStream out = connection.stdin();
         String opened = null;
+        List<Integer> browserTasks = new ArrayList<>();
         try {
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
             send(out, new JSONObject().put("id", 1).put("method", "initialize").put("params", new JSONObject()
@@ -207,8 +237,10 @@ final class AcpAuthHelper {
                 if (opened == null) {
                     String url = authorizationUrl(line, hosts);
                     if (url != null) {
+                        Map<Integer, String> beforeView = tasks();
                         try {
                             launcher.view(url);
+                            browserTasks.addAll(opened(beforeView));
                         } catch (IOException launchFailed) {
                             writeStatus("failed", method, host(url), "browser-launch-failed");
                             return;
@@ -270,6 +302,51 @@ final class AcpAuthHelper {
             active = null;
             connection.destroy(1000);
             if (bridge != null) bridge.close();
+            closeWindows(browserTasks);
+        }
+    }
+
+    // ---- the browser window -----------------------------------------------------------------------
+
+    private Map<Integer, String> tasks() {
+        try {
+            return windows.list();
+        } catch (Exception unavailable) {
+            return Map.of();
+        }
+    }
+
+    /**
+     * Tasks the browser launch added to the main screen. A browser that reused a window the user
+     * already had adds none, and that window is left alone. Android creates the task before
+     * {@code am start} returns; a short re-check covers a slow trampoline.
+     */
+    private List<Integer> opened(Map<Integer, String> before) {
+        List<Integer> added = new ArrayList<>();
+        for (int i = 0; i < 4 && added.isEmpty(); i++) {
+            if (i > 0) {
+                try {
+                    Thread.sleep(150);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            for (Map.Entry<Integer, String> t : tasks().entrySet())
+                if (!before.containsKey(t.getKey()) && !KEEP_PACKAGES.contains(t.getValue())) added.add(t.getKey());
+            if (windows == Windows.NONE) break;
+        }
+        return added;
+    }
+
+    /** Signed in, cancelled, timed out or failed: the window opened for the sign-in goes. */
+    private void closeWindows(List<Integer> ids) {
+        for (int id : ids) {
+            try {
+                windows.remove(id);
+            } catch (Exception ignored) {
+                // Already gone (the user closed it), or Android unavailable: nothing left to do.
+            }
         }
     }
 

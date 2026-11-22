@@ -57,7 +57,19 @@ public final class TaskBroker {
     /** The agent's own oauth-personal sign-in, opened in the phone's browser. Status only, never credentials. */
     static final AcpAuthHelper ACP_AUTH = new AcpAuthHelper(
             new File(ROOT, "acp-login.json"), AcpProcessTransport.process(),
-            AcpAuthHelper.IntentLauncher.activityManager(), TimeUnit.MINUTES.toMillis(10));
+            AcpAuthHelper.IntentLauncher.activityManager(), TimeUnit.MINUTES.toMillis(10),
+            new AcpAuthHelper.Windows() {
+                public Map<Integer, String> list() throws Exception {
+                    Map<Integer, String> main = new LinkedHashMap<>();
+                    for (PhoneTasks.Task t : PhoneTasks.DEVICE.list())
+                        if (t.displayId() == DedicatedScreens.MAIN_DISPLAY) main.put(t.id(), t.packageName());
+                    return main;
+                }
+
+                public void remove(int id) throws Exception {
+                    PhoneTasks.DEVICE.remove(id);
+                }
+            });
 
     /** NativeBridge op {@code acpRuntime}: runtime.json read/update and the sign-in trigger. */
     static JSONObject acpRuntimeControl(JSONObject input) throws Exception {

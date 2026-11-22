@@ -1200,9 +1200,11 @@ final class DedicatedScreens implements PhoneExecutionScreens.Ledger {
     /**
      * A screen tool for the session: only on its own screen, never the default one. LOOK needs the
      * screen; ACT needs an App held; OPEN needs that App held. ACT and OPEN also need the App on
-     * top of the screen to be held (an in-App jump may have opened another one), then none of the
-     * held Apps to have a task on the main screen (the user holds it: acting could move the user's
-     * task over, or the user has just moved the session's task away).
+     * top of the screen to be held (an in-App jump may have opened another one).
+     *
+     * <p>The same App open on the main screen or in Recents never blocks the session (the user's
+     * decision: the agent may take an App over at any time). OPEN lands the App on the session's
+     * screen: see {@link #settleOpen}.
      */
     JSONObject withScreen(String session, Use use, String pkg, PhoneExecutionScreens.Action action)
             throws Exception {
@@ -1229,13 +1231,14 @@ final class DedicatedScreens implements PhoneExecutionScreens.Ledger {
                                                     "The App on top of your screen is not one you"
                                                             + " hold. request_apps it, then use it"
                                                             + " or release_apps it to close it."));
-                for (PhoneTasks.Task t : now)
-                    if (t.displayId() == MAIN_DISPLAY && screen.apps.contains(t.packageName()))
-                        throw userHoldsApp(t.packageName(), screen.labels.get(t.packageName()));
             }
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
             try {
-                return action.run(screen.screenHandle());
+                PhoneExecutionScreens.Screen handle = screen.screenHandle();
+                JSONObject result = action.run(handle);
+                if (use == Use.OPEN && pkg != null && !pkg.isEmpty())
+                    result = settleOpen(screen, pkg, now, () -> action.run(handle), result);
+                return result;
             } catch (InterruptedException stopped) {
                 throw stopped;
             } catch (Exception failed) {
@@ -1307,28 +1310,85 @@ final class DedicatedScreens implements PhoneExecutionScreens.Ledger {
         }
     }
 
-    /** The refusal while the user holds an App; the model asks the user with a one-button card. */
-    private static IOException userHoldsApp(String pkg, String label) throws Exception {
-        return new IOException(
-                "USER_HOLDS_APP: "
-                        + new JSONObject()
-                                .put("packageName", pkg)
-                                .put(
-                                        "advice",
-                                        "The user has "
-                                                + label
-                                                + " open on the main screen or in Recents, so your"
-                                                + " screen actions stay blocked. ask_user in the"
-                                                + " user's language with the one option Continue:"
-                                                + " \"I need "
-                                                + label
-                                                + ". Please swipe it away in Recents, then tap"
-                                                + " Continue. If it's not in Recents, open "
-                                                + label
-                                                + " from its icon, then swipe it away.\" After"
-                                                + " Continue, retry; you still"
-                                                + " hold it. Your page in it is gone; open_app it"
-                                                + " to start over."));
+    /**
+     * Never closed to make room: the home screen and Taku's own chat. Their tasks on the main screen
+     * are the user's way back, so a takeover leaves them alone even if a session holds them.
+     */
+    static final Set<String> PROTECTED_PACKAGES =
+            Set.of(
+                    "org.agentos.assistant",
+                    "org.agentos.agent",
+                    "com.android.launcher3",
+                    "com.google.android.apps.nexuslauncher");
+
+    /** How long OPEN waits for Android to place the App when it was already on the main screen. */
+    long openSettleMs = 2_000;
+
+    interface Launch {
+        JSONObject run() throws Exception;
+    }
+
+    /**
+     * OPEN, after the launch (started with --activity-multiple-task, so a normal App gets a new
+     * task on the session's screen and the user's copy stays put): the App must end up on the
+     * session's screen. A singleTask/singleInstance App reuses its one task instead; if that task
+     * stays on the main screen, it is closed and the App launched again, now on the session's
+     * screen. The input lock is held. Nothing to settle when the App had no task on the main
+     * screen and still has none.
+     */
+    private JSONObject settleOpen(
+            DedicatedScreen screen,
+            String pkg,
+            List<PhoneTasks.Task> before,
+            Launch launch,
+            JSONObject result)
+            throws Exception {
+        boolean onMainBefore = false;
+        for (PhoneTasks.Task t : before)
+            if (t.displayId() == MAIN_DISPLAY && t.packageName().equals(pkg)) onMainBefore = true;
+        for (int attempt = 0; ; attempt++) {
+            List<PhoneTasks.Task> now = placed(screen, pkg, onMainBefore);
+            List<Integer> onMain = new ArrayList<>();
+            boolean onScreen = false;
+            for (PhoneTasks.Task t : now) {
+                if (!t.packageName().equals(pkg)) continue;
+                if (t.displayId() == screen.display) onScreen = true;
+                else if (t.displayId() == MAIN_DISPLAY) onMain.add(t.id());
+            }
+            if (onScreen || onMain.isEmpty()) return result;
+            if (attempt > 0 || PROTECTED_PACKAGES.contains(pkg))
+                throw new IOException(
+                        "OPEN_LANDED_ON_MAIN: "
+                                + new JSONObject()
+                                        .put("packageName", pkg)
+                                        .put(
+                                                "advice",
+                                                "Android kept this App on the main screen. Do not"
+                                                        + " act in it; tell the user it cannot run"
+                                                        + " in the background."));
+            // a single-instance App reused the main screen's task: close it, launch again
+            for (int id : onMain) tasks.remove(id);
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+            result = launch.run();
+            if (result != null) result.put("takenOverFromMain", true);
+        }
+    }
+
+    /**
+     * The tasks once Android has placed pkg: on the session's screen at once if it is there, else
+     * (only when it was on the main screen before, where a reused task shows up late) up to
+     * openSettleMs.
+     */
+    private List<PhoneTasks.Task> placed(DedicatedScreen screen, String pkg, boolean wait)
+            throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(wait ? openSettleMs : 0);
+        for (; ; ) {
+            List<PhoneTasks.Task> now = tasks.list();
+            for (PhoneTasks.Task t : now)
+                if (t.packageName().equals(pkg) && t.displayId() == screen.display) return now;
+            if (System.nanoTime() >= deadline) return now;
+            Thread.sleep(150);
+        }
     }
 
     /**

@@ -128,7 +128,13 @@ final class PhoneNativeTools {
     if(app.getInt("userId")!=screen.userId)throw new IOException("ANDROID_USER_CHANGED");
     if(Thread.currentThread().isInterrupted())throw new InterruptedException();WorkspacePolicy.requireAppAllowed(pkg);
     if(PhoneAppCatalog.currentUser()!=app.getInt("userId"))throw new IOException("ANDROID_USER_CHANGED");
-    return text(TaskBroker.command("/system/bin/am","start","--user",Integer.toString(app.getInt("userId")),"--display",display,"-n",component));};
+    // A task of its own on this screen even when the user has the App open on the main screen or in Recents;
+    // a single-instance App that reuses the user's task instead is moved over by DedicatedScreens.settleOpen.
+    // Already on this screen: brought to front as before, no second task piling up.
+    boolean here=false;for(PhoneTasks.Task t:PhoneTasks.DEVICE.list())if(t.displayId()==screen.displayId&&t.packageName().equals(pkg))here=true;
+    java.util.List<String> am=new java.util.ArrayList<>(java.util.List.of("/system/bin/am","start","--user",Integer.toString(app.getInt("userId")),"--display",display));
+    if(!here)am.add("--activity-multiple-task");am.add("-n");am.add(component);
+    return text(TaskBroker.command(am.toArray(new String[0])));};
     return start.run(screen);
    case "tap":
     // On a dead screen Android drops the tap and input still reports success: ask the screen process first.

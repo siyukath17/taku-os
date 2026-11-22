@@ -7,11 +7,32 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /** oauth-personal trigger: URL capture, host allow-list, browser hand-off, and no credential leaks. */
 public final class AcpAuthHelperTest {
     private static int checks;
+
+    /** The main screen's tasks: id to package, in memory. */
+    static final class Windows implements AcpAuthHelper.Windows {
+        final Map<Integer, String> tasks = new ConcurrentHashMap<>();
+        final List<Integer> removed = new CopyOnWriteArrayList<>();
+        int next = 100;
+
+        synchronized int open(String pkg) {
+            tasks.put(next, pkg);
+            return next++;
+        }
+
+        public Map<Integer, String> list() { return Map.copyOf(tasks); }
+
+        public void remove(int id) {
+            removed.add(id);
+            tasks.remove(id);
+        }
+    }
 
     private static void check(boolean value, String message) {
         checks++;
@@ -171,6 +192,54 @@ public final class AcpAuthHelperTest {
         eofHelper.join(5000);
         check("cancelled".equals(eofHelper.status().getString("state")) && eofHelper.status().isNull("error"),
                 "cancel answered by -32800 is reported as cancelled (" + eofHelper.status() + ")");
+
+        // The browser window the sign-in opened is closed when it ends; the user's own stay.
+        Windows windows = new Windows();
+        int home = windows.open("org.agentos.assistant");
+        int usersBrowser = windows.open("org.lineageos.jelly");
+        FakeAcpAgent windowed = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_URL_STDERR);
+        int[] signInWindow = {-1};
+        AcpAuthHelper closing = new AcpAuthHelper(new File(dir, "acp-login-window.json"), windowed, url -> {
+            signInWindow[0] = windows.open("org.lineageos.jelly");
+            windows.open("org.agentos.agent"); // never closed, even if it shows up meanwhile
+            windowed.browserVisited.countDown();
+        }, 5000, windows);
+        closing.run(options(dir), AcpAuthHelper.DEFAULT_URL_HOSTS);
+        check("signed_in".equals(closing.status().getString("state")), "windowed sign-in completes");
+        check(windows.removed.equals(List.of(signInWindow[0])) && windows.tasks.containsKey(usersBrowser)
+                        && windows.tasks.containsKey(home) && windows.tasks.containsValue("org.agentos.agent"),
+                "signed in: only the sign-in's own browser task is removed (" + windows.removed + ")");
+
+        Windows cancelWindows = new Windows();
+        FakeAcpAgent eofWindow = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_CANCEL_ON_EOF);
+        AcpAuthHelper cancelClosing = new AcpAuthHelper(new File(dir, "acp-login-window-cancel.json"), eofWindow,
+                url -> cancelWindows.open("org.lineageos.jelly"), 10000, cancelWindows);
+        cancelClosing.start(options(dir), null);
+        for (int i = 0; i < 200 && !"browser_opened".equals(cancelClosing.status().getString("state")); i++) Thread.sleep(20);
+        check(cancelWindows.tasks.size() == 1, "cancel: browser window open while signing in");
+        cancelClosing.cancel();
+        cancelClosing.join(5000);
+        check("cancelled".equals(cancelClosing.status().getString("state")) && cancelWindows.tasks.isEmpty()
+                && cancelWindows.removed.size() == 1, "cancelled: the sign-in's browser window is removed");
+
+        Windows timeoutWindows = new Windows();
+        int reused = timeoutWindows.open("org.lineageos.jelly");
+        FakeAcpAgent timeoutAgent = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_CANCEL_ON_EOF);
+        AcpAuthHelper timing = new AcpAuthHelper(new File(dir, "acp-login-window-timeout.json"), timeoutAgent,
+                url -> timeoutWindows.open("org.lineageos.jelly"), 800, timeoutWindows);
+        timing.run(options(dir), AcpAuthHelper.DEFAULT_URL_HOSTS);
+        check("timed_out".equals(timing.status().getString("state")) && timeoutWindows.removed.size() == 1
+                && timeoutWindows.tasks.keySet().equals(java.util.Set.of(reused)),
+                "timed out: the sign-in's browser window is removed, the user's kept (" + timing.status() + ")");
+
+        Windows reuseWindows = new Windows();
+        int only = reuseWindows.open("org.lineageos.jelly");
+        FakeAcpAgent reuseAgent = new FakeAcpAgent(FakeAcpAgent.Scenario.AUTH_URL_STDERR);
+        AcpAuthHelper reusing = new AcpAuthHelper(new File(dir, "acp-login-window-reuse.json"), reuseAgent,
+                url -> reuseAgent.browserVisited.countDown(), 5000, reuseWindows);
+        reusing.run(options(dir), AcpAuthHelper.DEFAULT_URL_HOSTS);
+        check(reuseWindows.removed.isEmpty() && reuseWindows.tasks.containsKey(only),
+                "a browser that reused the user's window adds no task, so nothing is closed");
         System.out.println("AcpAuthHelperTest passed " + checks + " checks");
     }
 }
