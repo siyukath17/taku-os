@@ -38,15 +38,31 @@ final class PhoneMcpBridge {
     /** Who is calling: the per-task thread identity that owns a background screen. */
     static final class Session {
         final String threadId, permissionMode, turnId;
+        /**
+         * The thread's running turn when the connection outlives turns (a warm ACP agent keeps its
+         * MCP server across turns); null or empty falls back to {@link #turnId}.
+         */
+        private final java.util.function.Supplier<String> currentTurn;
 
         Session(String threadId, String permissionMode) {
             this(threadId, permissionMode, "");
         }
 
         Session(String threadId, String permissionMode, String turnId) {
+            this(threadId, permissionMode, turnId, null);
+        }
+
+        Session(String threadId, String permissionMode, String turnId, java.util.function.Supplier<String> currentTurn) {
             this.threadId = threadId;
             this.permissionMode = permissionMode == null || permissionMode.isEmpty() ? "full" : permissionMode;
             this.turnId = turnId == null ? "" : turnId;
+            this.currentTurn = currentTurn;
+        }
+
+        /** The turn a call made now belongs to. */
+        String turnId() {
+            String current = currentTurn == null ? null : currentTurn.get();
+            return current == null || current.isEmpty() ? turnId : current;
         }
     }
 
@@ -247,13 +263,13 @@ final class PhoneMcpBridge {
         if (result.optBoolean("isError")) {
             String text = firstText(result);
             String code = Failures.code(text);
-            Failures.record(session.turnId, name, code == null ? "TOOL_FAILED" : code, text);
+            Failures.record(session.turnId(), name, code == null ? "TOOL_FAILED" : code, text);
         }
         return ok(id, result);
     }
 
     private JSONObject failed(String tool, String code, String message) throws Exception {
-        Failures.record(session.turnId, tool, code, message);
+        Failures.record(session.turnId(), tool, code, message);
         return toolError(code, message);
     }
 

@@ -142,9 +142,12 @@ public final class AcpChatRuntimeTest {
         String phoneThread = "", phoneTurn = "";
         for (int i = 0; i < env.length(); i++) {
             if ("TAKU_MCP_THREAD".equals(env.getJSONObject(i).getString("name"))) phoneThread = env.getJSONObject(i).getString("value");
-            if ("TAKU_MCP_TURN".equals(env.getJSONObject(i).getString("name"))) phoneTurn = env.getJSONObject(i).getString("value");
+            if ("TAKU_MCP_TURN".equals(env.getJSONObject(i).getString("name"))) phoneTurn = "declared:" + env.getJSONObject(i).getString("value");
         }
-        check(CONV.equals(phoneThread) && turn1.getString("id").equals(phoneTurn), "turn 1: phone tools run as the conversation's thread and this turn");
+        check(CONV.equals(phoneThread) && phoneTurn.isEmpty()
+                && PhoneTurnLog.events().contains("start " + CONV + " " + turn1.getString("id"))
+                && PhoneTurnLog.events().contains("end " + CONV + " " + turn1.getString("id")),
+                "turn 1: phone tools run as the conversation's thread and this turn (explicit turn start/end): " + PhoneTurnLog.events());
         JSONObject info = json(dir1, "runtime-info.json");
         check(CONV.equals(info.getString("threadId")) && turn1.getString("id").equals(info.getString("turnId"))
                 && info.getBoolean("turnStarted") && !info.getBoolean("sessionResumed"), "turn 1: runtime-info names the thread and turn " + info);
@@ -297,6 +300,7 @@ public final class AcpChatRuntimeTest {
     }
 
     public static void main(String[] args) throws Exception {
+        PhoneTurnLog.install();
         failedToolKeepsItsError();
         multiTurnConversation();
         nativeHistoryCarriedIntoFirstAcpTurn();

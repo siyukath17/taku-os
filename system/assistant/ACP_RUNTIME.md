@@ -135,11 +135,45 @@ island for every task after the first hour (`cmd statusbar island list` → `act
 
 ## Protocol and records
 
-ACP v1, newline-delimited JSON-RPC 2.0 on stdio, with one agent process per task:
-`initialize` → `session/new` (declares `taku_phone`) → `session/prompt` while
+ACP v1, newline-delimited JSON-RPC 2.0 on stdio: `initialize` → `session/new`
+or `session/load` (declares `taku_phone`) → `session/prompt` while
 `session/update` streams → `session/cancel` when `cancel` appears or the
 15-minute budget runs out. If the agent does not confirm within the grace period,
 its process is killed.
+
+### Warm agent process (`AcpAgentPool`)
+
+agy answers `initialize` in ~0.5s but boots its backend on the first session call
+(~5s on the Pixel 9, agy 1.5.14); afterwards `session/new` takes ~0.2s. The broker
+keeps **one** warm process (~240MB) between turns:
+
+- **Prewarm** (`initialize` + a read-only `session/list`) runs in the background when
+  new conversations route to ACP and `acp-login.json` says `signed_in`: 3s after the
+  broker starts, and on `agent_control thread/start` ("new conversation") while the
+  slot is empty. It never blocks either caller.
+- **Reuse.** A turn takes the warm process after a probe (agy answers an unknown
+  method with -32601 at once); a dead or silent one is destroyed and the turn starts
+  cold. `runtime-info.json` records `agentProcess: warm|cold`.
+- **Validity.** Same command line, environment and cwd (fingerprint), and the same
+  stamp: agy binary size/mtime, runtime.json and `acp-login.json`. A changed stamp
+  retires the process; another permission mode (another command line) runs cold and
+  leaves the warm one alone.
+- **Release.** Back to the pool only after a turn that ended with the agent idle:
+  prompt and steers answered, no subagents, not a budget timeout. Cancel sends
+  `session/cancel` and keeps the process when agy confirms it; an unconfirmed stop
+  kills it and empties the pool. Crashes, sign-in errors and automatic
+  continuations never reuse a process.
+- **Limits.** Idle TTL 13 minutes, 2 hours age, 40 turns, 8 distinct phone MCP
+  declarations (agy keeps one MCP server per distinct declaration and stops none on
+  `session/close`).
+
+### Task start without the execution display
+
+`TaskBroker.run` routes first. An ACP task skips the Codex execution display
+(`phone-display start/id`, the activity snapshot) and the 700ms settle sleep (kept
+only for a background task's context screenshot); its phone tools open dedicated
+screens on demand. Task update broadcasts (`am broadcast`) go through
+`CoalescingNotifier`: one daemon thread, in order, one pending update per task.
 
 Files written to the task directory: `state.json`, `progress.json` (the Dynamic
 Island summary: `phase`, `summary`, `tool`, tool and plan counters), `runtime-info.json`, `result.txt` (the task-result schema),
@@ -373,12 +407,24 @@ turn run on it.
 Schema argument checks (-32602), and permission checks (`readOnly` and `ask`
 deny non-observation tools as `PERMISSION_DENIED` tool errors). Execution goes to
 `PhoneNativeTools.execute`, the dispatcher Codex uses. `ask_user` and
-`confirm_action` are not exposed yet. `PhoneMcpHost` relays the agent's stdio
-child (`app_process … PhoneMcpHost relay`) to the broker socket `taku-phone-mcp`.
-That socket serves root and system peers only. The phone session is the conversation id for a chat
-turn and a name-based UUID of the task id for a background task (`TAKU_MCP_THREAD`; the screen
-registries reject non-UUID sessions with `INVALID_SCREEN_THREAD`), and the MCP connection is the turn
-(`TAKU_MCP_TURN`): gestures start/end with it and its background screen is released when it closes.
+`confirm_action` are not exposed yet. `PhoneMcpHost` serves the agent's stdio child over two
+root/system-only sockets:
+
+- **native (default):** `sh -c '{ printf "%s\n" "$TAKU_MCP_HELLO"; exec cat; } | exec toybox nc -U
+  "$TAKU_MCP_SOCKET"'` to the filesystem socket `/data/local/agentos/acp/run/phone-mcp.sock`
+  (0600 in a 0700 directory, peer uid checked). No JVM start: a few ms instead of ~750ms of
+  `app_process` per session. agy 1.5.14 advertises no `mcpCapabilities` (http/sse), so stdio stays.
+- **fallback:** `app_process … PhoneMcpHost relay` to the abstract socket `taku-phone-mcp`, declared
+  when the filesystem socket is missing or runtime.json sets its own `phoneMcp`
+  (`"phoneMcpNative": false` forces it).
+
+The phone session is the conversation id for a chat turn and a name-based UUID of the task id for a
+background task (`TAKU_MCP_THREAD`; the screen registries reject non-UUID sessions with
+`INVALID_SCREEN_THREAD`). The declaration names no turn, so a conversation keeps one relay in a warm
+process. **A connection is not a turn:** `AcpRuntime` opens the turn in `AcpPhoneTurns` before the
+agent starts and closes it exactly once when the task ends (completed, failed, cancelled, needs_user):
+the gesture owner starts/ends and the background screen is released then, never on disconnect. Each
+tool call runs in the thread's current turn.
 The screen registry answers `thread/read` for ACP phone sessions as root threads instead of asking
 Codex (which answered `thread not loaded`).
 

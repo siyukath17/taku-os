@@ -3,10 +3,12 @@ package org.agentos.lab;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
+import android.system.Os;
 
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -15,10 +17,19 @@ import java.nio.charset.StandardCharsets;
  * Device hosting for {@link PhoneMcpBridge}.
  *
  * <p>Phone tools must run inside the broker (it owns the dedicated-screen registry), but an ACP
- * agent starts MCP servers as stdio child processes. So the agent starts a tiny relay
- * ({@code app_process ... PhoneMcpHost relay}) that forwards stdio to the broker's
- * {@value #SOCKET} socket; the broker serves each connection with a bridge bound to that task.
+ * agent starts MCP servers as stdio child processes. So the agent starts a tiny relay that forwards
+ * stdio to the broker, which serves each connection with a bridge bound to that conversation:
+ * <ul>
+ *   <li>native (default): {@code sh -c '{ printf hello; exec cat; } | toybox nc -U'} to the root-only
+ *       filesystem socket {@link AcpRuntime#PHONE_MCP_SOCKET} — a few ms, no JVM;</li>
+ *   <li>fallback: {@code app_process ... PhoneMcpHost relay} to the abstract {@value #SOCKET} socket
+ *       (~750ms of JVM start), used when the filesystem socket is unavailable.</li>
+ * </ul>
  * Only root/system peers (the broker-spawned agent) are served.
+ *
+ * <p>A connection is not a turn: a warm agent keeps its MCP server across turns. A call's turn is the
+ * thread's running turn in {@link AcpPhoneTurns}; {@link AcpRuntime} starts and ends turns there
+ * (gesture owner, background screen release) explicitly.
  */
 final class PhoneMcpHost {
     static final String SOCKET = "taku-phone-mcp";
@@ -26,6 +37,8 @@ final class PhoneMcpHost {
             ENV_THREAD = "TAKU_MCP_THREAD", ENV_TURN = "TAKU_MCP_TURN";
     private static final String THREAD_ID = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
     private static boolean started;
+    /** Keeps the bound filesystem socket's descriptor reachable for the broker's lifetime. */
+    private static LocalSocket filesystemSocket;
 
     private PhoneMcpHost() {}
 
@@ -45,6 +58,36 @@ final class PhoneMcpHost {
         if (started) return;
         LocalServerSocket server = new LocalServerSocket(SOCKET);
         started = true;
+        listen(server, "phone-mcp-listener");
+        // The native relay's socket. Without it, AcpRuntime declares the Java relay instead.
+        try {
+            listen(bindFilesystem(new File(AcpRuntime.PHONE_MCP_SOCKET)), "phone-mcp-fs-listener");
+        } catch (Exception unavailable) {
+            System.err.println("phone mcp native socket unavailable: " + unavailable.getMessage());
+        }
+    }
+
+    /** A root-only (0600, in a 0700 directory) filesystem socket, replacing a stale one. */
+    private static LocalServerSocket bindFilesystem(File path) throws Exception {
+        File dir = path.getParentFile();
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("cannot create " + dir);
+        Os.chmod(dir.getPath(), 0700);
+        if (path.exists() && !path.delete()) throw new java.io.IOException("cannot replace " + path);
+        LocalSocket bound = new LocalSocket(LocalSocket.SOCKET_STREAM);
+        try {
+            bound.bind(new LocalSocketAddress(path.getPath(), LocalSocketAddress.Namespace.FILESYSTEM));
+            Os.chmod(path.getPath(), 0600);
+            LocalServerSocket server = new LocalServerSocket(bound.getFileDescriptor());
+            filesystemSocket = bound;
+            return server;
+        } catch (Exception failed) {
+            try { bound.close(); } catch (Exception ignored) {}
+            path.delete();
+            throw failed;
+        }
+    }
+
+    private static void listen(LocalServerSocket server, String name) {
         Thread listener = new Thread(() -> {
             while (true) try {
                 LocalSocket socket = server.accept();
@@ -54,7 +97,7 @@ final class PhoneMcpHost {
             } catch (Exception stopped) {
                 break;
             }
-        }, "phone-mcp-listener");
+        }, name);
         listener.setDaemon(true);
         listener.start();
     }
@@ -69,32 +112,42 @@ final class PhoneMcpHost {
             if (!task.matches("[A-Za-z0-9._-]{1,128}")) return;
             String turn = hello.optString("turn", "");
             if (!turn.matches("[A-Za-z0-9._-]{1,160}")) turn = "acp-task-" + task;
-            PhoneMcpBridge.Session session = new PhoneMcpBridge.Session(threadFor(task, hello.optString("thread", "")),
-                    hello.optString("permissionMode", "full"), turn);
-            // The agent's MCP connection lives exactly as long as its ACP turn (one agent process per
-            // task): it is the turn, as turn/started..turn/completed is for a Codex turn.
+            String thread = threadFor(task, hello.optString("thread", ""));
+            // A warm agent keeps this connection across turns: each call runs in the thread's current
+            // turn. AcpRuntime starts and ends turns (gestures, background screen) itself; closing the
+            // connection releases nothing, or a warm process would leak or steal a turn's screen.
+            PhoneMcpBridge.Session session = new PhoneMcpBridge.Session(thread,
+                    hello.optString("permissionMode", "full"), turn, () -> AcpPhoneTurns.current(thread));
             AcpConversations.phoneSessionStarted(session.threadId);
-            PhoneGestures.startTurn(session.threadId, session.turnId);
-            try {
-                new PhoneMcpBridge(PhoneNativeTools::definitions, PhoneMcpHost::execute, PhoneMcpBridge.modePolicy(), session)
-                        .serve(in, s.getOutputStream());
-            } finally {
-                PhoneGestures.endTurn(session.threadId, session.turnId);
-                // Release the turn's background screen as NativeBridge does on turn/completed.
-                try { DedicatedScreensOnDevice.shared().turnEnded(session.threadId); }
-                catch (Exception releaseFailed) { System.err.println("phone mcp screen release: " + releaseFailed.getMessage()); }
-            }
+            new PhoneMcpBridge(PhoneNativeTools::definitions, PhoneMcpHost::execute, PhoneMcpBridge.modePolicy(), session)
+                    .serve(in, s.getOutputStream());
         } catch (Exception closed) {
             System.err.println("phone mcp: " + closed.getClass().getSimpleName());
         }
     }
+
+    /**
+     * Device side of {@link AcpPhoneTurns}: an ACP turn owns its gesture pointer from start to end and
+     * its background screen is released when it ends, as NativeBridge does on turn/completed.
+     */
+    static final AcpPhoneTurns.Hooks TURN_HOOKS = new AcpPhoneTurns.Hooks() {
+        @Override public void started(String thread, String turn) {
+            AcpConversations.phoneSessionStarted(thread);
+            PhoneGestures.startTurn(thread, turn);
+        }
+
+        @Override public void ended(String thread, String turn) throws Exception {
+            PhoneGestures.endTurn(thread, turn);
+            DedicatedScreensOnDevice.shared().turnEnded(thread);
+        }
+    };
 
     static JSONObject execute(String tool, JSONObject arguments, PhoneMcpBridge.Session session) throws Exception {
         return PhoneNativeTools.execute(new JSONObject()
                 .put("tool", tool)
                 .put("arguments", arguments)
                 .put("threadId", session.threadId)
-                .put("turnId", session.turnId));
+                .put("turnId", session.turnId()));
     }
 
     private static String readLine(InputStream in, int limit) throws Exception {

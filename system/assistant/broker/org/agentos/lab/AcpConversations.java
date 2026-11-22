@@ -100,6 +100,8 @@ final class AcpConversations {
     /** agent_control thread/start on ACP: a standalone conversation, projected and listable at once. */
     static JSONObject start() throws Exception {
         String id = STORE.startNew();
+        // The user is about to type the first message: warm the agent now (background, never blocks).
+        TaskBroker.prewarmAcp("thread/start");
         changed(id);
         JSONObject view = AgentViews.snapshot(id);
         return AcpConversationStore.startAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)));

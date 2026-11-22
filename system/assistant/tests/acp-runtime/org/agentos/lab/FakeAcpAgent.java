@@ -113,12 +113,19 @@ final class FakeAcpAgent implements AcpProcessTransport {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
     }
 
+    /**
+     * The turn a phone tool call would run in, as the broker resolves it: the current ACP turn of the
+     * relay's TAKU_MCP_THREAD (the declaration itself names no turn).
+     */
     static String phoneTurnOf(JSONObject message) {
         JSONArray servers = message.getJSONObject("params").optJSONArray("mcpServers");
         if (servers != null) for (int i = 0; i < servers.length(); i++) {
             JSONArray env = servers.getJSONObject(i).optJSONArray("env");
             if (env != null) for (int j = 0; j < env.length(); j++)
-                if ("TAKU_MCP_TURN".equals(env.getJSONObject(j).optString("name"))) return env.getJSONObject(j).getString("value");
+                if ("TAKU_MCP_THREAD".equals(env.getJSONObject(j).optString("name"))) {
+                    String turn = AcpPhoneTurns.current(env.getJSONObject(j).getString("value"));
+                    return turn == null ? "" : turn;
+                }
         }
         return "";
     }
@@ -356,6 +363,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     if ("perm-1".equals(String.valueOf(id))) finishNormal();
                     return false;
                 default:
+                    // Like agy: an unknown request is answered at once (the pool's liveness probe).
+                    if (id != null && !method.isEmpty())
+                        send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32601).put("message", "Method not found: " + method)));
                     return false;
             }
         }

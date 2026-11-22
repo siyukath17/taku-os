@@ -124,6 +124,20 @@ final class RuntimeRouter {
         return route(new JSONObject().put("conversationId", ""));
     }
 
+    /**
+     * Whether TaskBroker prepares the Codex execution display ({@code phone-display start/id}, the
+     * activity snapshot) for a task on this route. Codex and remote T3 use it; ACP never does (its
+     * phone tools open dedicated screens on demand), so an ACP turn starts without that ~2.6s.
+     */
+    static boolean preparesExecutionDisplay(Route route) {
+        return !ACP.equals(route.runtime);
+    }
+
+    /** A background task (no conversation) carries a screenshot of the phone as its context. */
+    static boolean capturesContext(JSONObject request) {
+        return !request.has("conversationId");
+    }
+
     /** Task shapes ACP cannot serve: agent controls and panel updates. Chat turns are served. */
     private static String acpIneligible(JSONObject request) {
         if ("agent_control".equals(request.optString("kind"))) return "control";

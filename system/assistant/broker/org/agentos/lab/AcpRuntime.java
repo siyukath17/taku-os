@@ -3,13 +3,9 @@ package org.agentos.lab;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -18,18 +14,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Agent Client Protocol (ACP) client runtime: drives a local ACP agent (the on-device
  * {@code android_arm64} {@code agy acp}) over newline-delimited JSON-RPC 2.0 on stdio.
  *
- * <p>Lifecycle per task, one agent process per task so a crash never leaks into the next task:
- * {@code initialize} → {@code session/new} (with the phone MCP server declarations; an
+ * <p>Lifecycle per task: a warm agent process from {@link AcpAgentPool} (already past
+ * {@code initialize} and agy's backend boot) or a cold one → {@code initialize} (cold only) →
+ * {@code session/new} (with the phone MCP server declarations; an
  * {@code auth_required} error becomes {@code needs_user}) → {@code session/prompt} while
  * {@code session/update} notifications stream progress → {@code session/cancel} when the task's
- * {@code cancel} file appears or the turn budget runs out → process reclaimed.
+ * {@code cancel} file appears or the turn budget runs out → the process goes back to the pool when the
+ * turn ended with the agent idle, otherwise it is destroyed (a crash never leaks into the next task).
  *
  * <p>Credentials: this runtime never reads, writes, copies or embeds credentials. Sign-in is the
  * agent's own {@code oauth-personal} flow, performed by the user in the phone's browser; the
@@ -41,9 +38,18 @@ final class AcpRuntime implements TaskRuntime {
     static final int AUTH_REQUIRED = -32000;
     static final String DEFAULT_LOGIN_METHOD = "oauth-personal";
     static final String DEFAULT_APP_DATA_DIR = "taku-acp";
+    /**
+     * The broker's root-only filesystem socket for the phone MCP host (see PhoneMcpHost). When it
+     * exists, the {@code taku_phone} server is a native {@code sh | toybox nc -U} relay (a few ms)
+     * instead of a {@code app_process} Java relay (~750ms of JVM start per session).
+     */
+    static final String PHONE_MCP_SOCKET = "/data/local/agentos/acp/run/phone-mcp.sock";
     private static final int MAX_LINE_CHARS = 8 * 1024 * 1024;
     private static final int MAX_TEXT_CHARS = 1024 * 1024;
     private static final int MAX_SCREENSHOT_BYTES = 3_000_000;
+    /** The native phone MCP relay: the handshake line, then stdio both ways over the broker's socket. */
+    static final String NATIVE_RELAY_SCRIPT =
+            "{ printf '%s\\n' \"$TAKU_MCP_HELLO\"; exec cat; } | exec @TOYBOX@ nc -U \"$TAKU_MCP_SOCKET\"";
 
     interface Notifier {
         void taskUpdated(String taskId);
@@ -85,6 +91,14 @@ final class AcpRuntime implements TaskRuntime {
         JSONArray mcpServers = new JSONArray();
         /** The taku_phone MCP relay (see PhoneMcpHost); null disables it. */
         JSONObject phoneMcp = defaultPhoneMcp();
+        /**
+         * Use the native relay ({@link #phoneMcpSocket} through {@link #toybox} nc) while the socket
+         * exists; the Java {@link #phoneMcp} relay otherwise. Off when runtime.json sets its own phoneMcp.
+         */
+        boolean phoneMcpNative = true;
+        File phoneMcpSocket = new File(PHONE_MCP_SOCKET);
+        String toybox = "/system/bin/toybox";
+        String shell = "/system/bin/sh";
         long turnLimitMillis = TimeUnit.MINUTES.toMillis(15);
         long cancelGraceMillis = TimeUnit.SECONDS.toMillis(10);
         long requestTimeoutMillis = TimeUnit.SECONDS.toMillis(60);
@@ -143,7 +157,11 @@ final class AcpRuntime implements TaskRuntime {
             JSONObject env = c.optJSONObject("env");
             if (env != null) for (java.util.Iterator<String> it = env.keys(); it.hasNext(); ) { String key = it.next(); o.extraEnv.put(key, env.getString(key)); }
             if (c.optJSONArray("mcpServers") != null) o.mcpServers = new JSONArray(c.getJSONArray("mcpServers").toString());
-            if (c.has("phoneMcp")) o.phoneMcp = c.optJSONObject("phoneMcp");
+            if (c.has("phoneMcp")) {
+                o.phoneMcp = c.optJSONObject("phoneMcp");
+                o.phoneMcpNative = false;
+            }
+            o.phoneMcpNative = c.optBoolean("phoneMcpNative", o.phoneMcpNative);
             o.turnLimitMillis = c.optLong("turnLimitMillis", o.turnLimitMillis);
             o.cancelGraceMillis = c.optLong("cancelGraceMillis", o.cancelGraceMillis);
             o.requestTimeoutMillis = c.optLong("requestTimeoutMillis", o.requestTimeoutMillis);
@@ -181,17 +199,63 @@ final class AcpRuntime implements TaskRuntime {
     private final Notifier notifier;
     private final Runnable idle;
     private final ChatHost chatHost;
+    /** Warm agent processes shared across tasks; null starts (and destroys) one process per task. */
+    private final AcpAgentPool pool;
 
     AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle) {
         this(options, transport, notifier, idle, null);
     }
 
     AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle, ChatHost chatHost) {
+        this(options, transport, notifier, idle, chatHost, null);
+    }
+
+    AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle, ChatHost chatHost, AcpAgentPool pool) {
         this.options = options;
         this.transport = transport;
         this.notifier = notifier == null ? id -> {} : notifier;
         this.idle = idle == null ? () -> {} : idle;
         this.chatHost = chatHost;
+        this.pool = pool;
+    }
+
+    /**
+     * Starts a warm agent process in the background (see {@link AcpAgentPool#prewarm}) for the command
+     * line most chat turns use (full access); never blocks. A no-op without a pool or a binary.
+     */
+    void prewarm(String reason) {
+        if (pool == null || options.binary.isEmpty()) return;
+        try {
+            for (String path : new String[]{options.home, options.cwd})
+                if (!path.isEmpty()) new File(path).mkdirs();
+            pool.prewarm(launch(new JSONObject().put("permissionMode", "full")), reason);
+        } catch (Exception unavailable) {
+            System.err.println("acp prewarm skipped: " + unavailable);
+        }
+    }
+
+    /** The {@code initialize} parameters, shared by turns and the pool's warm-up. */
+    static JSONObject initializeParams() throws Exception {
+        return new JSONObject()
+                .put("protocolVersion", PROTOCOL_VERSION)
+                .put("clientCapabilities", new JSONObject()
+                        .put("fs", new JSONObject().put("readTextFile", false).put("writeTextFile", false))
+                        .put("terminal", false))
+                .put("clientInfo", new JSONObject().put("name", "taku-os").put("version", "1"));
+    }
+
+    private AcpAgentPool.Agent startAgent(AcpProcessTransport.Launch launch) throws IOException {
+        if (pool != null) {
+            AcpAgentPool.Agent warm = pool.take(launch, idle);
+            if (warm != null) return warm;
+            return pool.startCold(launch);
+        }
+        return new AcpAgentPool.Agent(transport.start(launch), "", "");
+    }
+
+    private void releaseAgent(AcpAgentPool.Agent agent, boolean reusable) {
+        if (pool != null) pool.release(agent, reusable);
+        else agent.destroy(Math.min(2000, options.cancelGraceMillis));
     }
 
     @Override
@@ -247,13 +311,36 @@ final class AcpRuntime implements TaskRuntime {
         Chat chat = Chat.begin(chatHost, request, Math.min(250, options.progressIntervalMillis));
         TaskRecords.state(directory, request, "running", "Starting the on-device agent…");
         notifier.taskUpdated(request.getString("id"));
-        AcpProcessTransport.Connection connection;
+        // The turn owns its phone thread from here until finish(): its gesture owner and background
+        // screen are released when it ends, not when an MCP connection closes (a warm agent keeps it).
+        phoneThread = phoneThread(request);
+        phoneTurn = chat != null ? chat.turnId : "acp-task-" + request.getString("id");
+        AcpPhoneTurns.begin(phoneThread, phoneTurn);
+        try {
+            runTurns(directory, request, chat);
+        } finally {
+            endPhoneTurn();
+        }
+    }
+
+    private String phoneThread = "", phoneTurn = "";
+
+    /** Closes the task's phone turn once (finish() does it before {@code done}; run() as a backstop). */
+    private void endPhoneTurn() {
+        if (phoneTurn.isEmpty()) return;
+        String thread = phoneThread, turn = phoneTurn;
+        phoneTurn = "";
+        AcpPhoneTurns.end(thread, turn);
+    }
+
+    private void runTurns(File directory, JSONObject request, Chat chat) throws Exception {
+        AcpAgentPool.Agent agent;
         try {
             // Best effort: a missing working directory would otherwise fail the start opaquely.
             // appDataDir is relative to $HOME/.gemini and created by the agent itself.
             for (String path : new String[]{options.home, options.cwd})
                 if (!path.isEmpty()) new File(path).mkdirs();
-            connection = transport.start(launch(request));
+            agent = startAgent(launch(request));
         } catch (IOException startFailed) {
             diagnostic(directory, "start-failed", startFailed.getMessage(), "");
             if (chat != null) chat.end("failed", null);
@@ -266,13 +353,15 @@ final class AcpRuntime implements TaskRuntime {
         activeChat = chat;
         try {
             for (int attempt = 0; ; attempt++) {
-                Turn turn = new Turn(directory, attemptRequest, connection, chat, attempt, resume, budgetEnd);
+                Turn turn = new Turn(directory, attemptRequest, agent, chat, attempt, resume, budgetEnd);
                 activeTurn = turn;
                 Retry retry;
                 try {
                     retry = turn.execute();
                 } finally {
-                    connection.destroy(Math.min(2000, options.cancelGraceMillis));
+                    releaseAgent(agent, turn.reusable);
+                    // A stop agy never confirmed: no process of this launch is trusted any more.
+                    if (turn.stopUnconfirmed && pool != null) pool.invalidate("stop-unconfirmed");
                 }
                 if (retry == null) return;
                 // An external, transient failure with continuations left: wait, then resume the same
@@ -283,7 +372,9 @@ final class AcpRuntime implements TaskRuntime {
                 // The continuation's text is a new message after whatever the interrupted attempt said.
                 if (chat != null) chat.breakMessage();
                 try {
-                    connection = transport.start(launch(attemptRequest));
+                    if (pool != null) pool.invalidate("transient-failure");
+                    agent = pool != null ? pool.startCold(launch(attemptRequest))
+                            : new AcpAgentPool.Agent(transport.start(launch(attemptRequest)), "", "");
                 } catch (IOException startFailed) {
                     diagnostic(directory, "start-failed", startFailed.getMessage(), "");
                     finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);
@@ -410,6 +501,8 @@ final class AcpRuntime implements TaskRuntime {
                     .put("status", "cancelled".equals(status) ? "failed" : status)
                     .put("message", reply == null || reply.isEmpty() ? message : reply)
                     .put("evidence", new JSONArray()).toString());
+        // The turn's background screen and gesture owner are released before the task closes.
+        endPhoneTurn();
         TaskRecords.state(directory, request, status, message);
         TaskRecords.write(new File(directory, "done"), status);
         notifier.taskUpdated(request.getString("id"));
@@ -494,7 +587,7 @@ final class AcpRuntime implements TaskRuntime {
         }
     }
 
-    private static final class AgentExited extends IOException {
+    static final class AgentExited extends IOException {
         AgentExited(String detail) { super(detail); }
     }
 
@@ -506,7 +599,7 @@ final class AcpRuntime implements TaskRuntime {
         StopUnconfirmed() { super("stop unconfirmed"); }
     }
 
-    private static final class NoResponse extends IOException {
+    static final class NoResponse extends IOException {
         NoResponse(String method) { super("no response to " + method); }
     }
 
@@ -554,20 +647,22 @@ final class AcpRuntime implements TaskRuntime {
         void run() throws Exception;
     }
 
-    private static final Object EOF = new Object();
+    private static final Object EOF = AcpAgentPool.EOF;
 
     private final class Turn {
         final File directory;
         final JSONObject request;
+        final AcpAgentPool.Agent agent;
         final AcpProcessTransport.Connection connection;
-        final BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
-        final StringBuilder stderrTail = new StringBuilder();
+        final BlockingQueue<Object> inbox;
         final StringBuilder reply = new StringBuilder();
         final Map<String, JSONObject> toolCalls = new LinkedHashMap<>();
         final String permissionMode;
-        final OutputStream out;
-        long nextId = 1;
         String sessionId = "";
+        /** The turn ended with the agent idle: its process may serve the next turn (see AcpAgentPool). */
+        boolean reusable;
+        /** session/cancel was never answered: the process was given up. */
+        boolean stopUnconfirmed;
         boolean cancelSent, timedOut, inPrompt;
         long turnDeadline, stopDeadline;
         String summary = "", phase = "starting", plan = "", currentTool = "";
@@ -603,7 +698,7 @@ final class AcpRuntime implements TaskRuntime {
         /** The agent accepts image prompt blocks ({@code promptCapabilities.image}). */
         boolean promptImages;
 
-        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat,
+        Turn(File directory, JSONObject request, AcpAgentPool.Agent agent, Chat chat,
              int attempt, String resumeSession, long budgetEnd) {
             this.attempt = attempt;
             this.resumeSession = resumeSession == null ? "" : resumeSession;
@@ -611,59 +706,15 @@ final class AcpRuntime implements TaskRuntime {
             this.chat = chat;
             this.directory = directory;
             this.request = request;
-            this.connection = connection;
+            this.agent = agent;
+            this.connection = agent.connection;
+            this.inbox = agent.inbox;
             this.permissionMode = request.optString("permissionMode", "full");
-            this.out = connection.stdin();
             this.lastIdle = System.nanoTime() - TimeUnit.SECONDS.toNanos(1);
-            startReaders();
-        }
-
-        void startReaders() {
-            Thread stdout = new Thread(() -> {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.stdout(), StandardCharsets.UTF_8))) {
-                    StringBuilder line = new StringBuilder();
-                    int c;
-                    while ((c = reader.read()) != -1) {
-                        if (c == '\n') {
-                            inbox.put(line.toString());
-                            line.setLength(0);
-                        } else if (line.length() < MAX_LINE_CHARS) {
-                            line.append((char) c);
-                        } else {
-                            inbox.put(new AgentExited("agent sent an oversized message"));
-                            return;
-                        }
-                    }
-                    if (line.length() > 0) inbox.put(line.toString());
-                } catch (Exception ignored) {
-                    // A broken pipe is the agent going away: report EOF below.
-                } finally {
-                    inbox.offer(EOF);
-                }
-            }, "acp-stdout");
-            stdout.setDaemon(true);
-            stdout.start();
-            Thread stderr = new Thread(() -> {
-                try (InputStream in = connection.stderr()) {
-                    if (in == null) return;
-                    byte[] buffer = new byte[4096];
-                    int n;
-                    while ((n = in.read(buffer)) != -1) synchronized (stderrTail) {
-                        stderrTail.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
-                        if (stderrTail.length() > 8192) stderrTail.delete(0, stderrTail.length() - 8192);
-                    }
-                } catch (Exception ignored) {
-                    // Diagnostics only.
-                }
-            }, "acp-stderr");
-            stderr.setDaemon(true);
-            stderr.start();
         }
 
         String stderr() {
-            synchronized (stderrTail) {
-                return stderrTail.toString();
-            }
+            return agent.stderr();
         }
 
         /**
@@ -681,12 +732,10 @@ final class AcpRuntime implements TaskRuntime {
         Retry executeTurn() throws Exception {
             String id = request.getString("id");
             try {
-                JSONObject init = call("initialize", new JSONObject()
-                        .put("protocolVersion", PROTOCOL_VERSION)
-                        .put("clientCapabilities", new JSONObject()
-                                .put("fs", new JSONObject().put("readTextFile", false).put("writeTextFile", false))
-                                .put("terminal", false))
-                        .put("clientInfo", new JSONObject().put("name", "taku-os").put("version", "1")));
+                // A warm process already did the handshake (and booted agy's backend).
+                boolean warm = agent.init != null;
+                JSONObject init = warm ? agent.init : call("initialize", initializeParams());
+                agent.init = init;
                 if (init.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
                     diagnostic(directory, "protocol-version", init.optString("protocolVersion"), stderr());
                     finish(directory, request, "failed", "The on-device agent speaks an unsupported ACP version. Update the ROM's agent, then retry.", null);
@@ -744,7 +793,8 @@ final class AcpRuntime implements TaskRuntime {
                         .put("protocolVersion", PROTOCOL_VERSION)
                         .put("agentInfo", init.optJSONObject("agentInfo") == null ? JSONObject.NULL : init.getJSONObject("agentInfo"))
                         .put("sessionId", sessionId)
-                        .put("turnStarted", true);
+                        .put("turnStarted", true)
+                        .put("agentProcess", warm ? "warm" : "cold");
                 String model = AcpModelCatalog.current(configOptions, AcpModelCatalog.MODEL);
                 String effort = AcpModelCatalog.current(configOptions, AcpModelCatalog.EFFORT);
                 if (!model.isEmpty()) info.put("model", model);
@@ -815,8 +865,11 @@ final class AcpRuntime implements TaskRuntime {
                 completed(stopReason);
                 return null;
             } catch (CancelledEarly cancelled) {
+                // No prompt was sent; a request still in flight is answered later and dropped.
+                reusable = connection.alive() && pendingSteers.isEmpty();
                 finish(directory, request, "cancelled", "Cancelled before execution.", null);
             } catch (StopUnconfirmed unconfirmed) {
+                stopUnconfirmed = true;
                 diagnostic(directory, "stop-unconfirmed", "", stderr());
                 finish(directory, request, "failed", "Stopping was not confirmed by the agent; its process was ended. Check the results of any actions.", null);
             } catch (AgentExited exited) {
@@ -1021,29 +1074,55 @@ final class AcpRuntime implements TaskRuntime {
             return configOptions;
         }
 
-        /** Configured servers plus the per-task phone tool relay, in ACP's stdio declaration shape. */
+        /**
+         * Configured servers plus the phone tool relay, in ACP's stdio declaration shape.
+         *
+         * <p>The declaration is the same for every turn of a conversation (no turn id in it): agy keeps
+         * one MCP server per distinct declaration for the life of its process and stops none on
+         * {@code session/close}, so a per-turn value would start one more relay per turn in a warm
+         * process. The broker resolves each call's turn through {@link AcpPhoneTurns}.
+         */
         JSONArray mcpServers() throws Exception {
             JSONArray servers = new JSONArray(options.mcpServers.toString());
             JSONObject phone = options.phoneMcp;
             if (phone == null || phone.optString("command", "").isEmpty()) return servers;
+            // The phone tools' session identity (screens, Apps, gestures): the conversation for a chat
+            // turn, as for a Codex chat turn; a stable UUID per background task otherwise.
+            String thread = phoneThread(request);
+            String task = chat != null ? chat.conversationId : request.getString("id");
+            agent.mcpConfigs.add(thread + "\n" + permissionMode);
             JSONArray env = new JSONArray();
+            env.put(new JSONObject().put("name", "TAKU_MCP_TASK").put("value", task));
+            env.put(new JSONObject().put("name", "TAKU_MCP_THREAD").put("value", thread));
+            env.put(new JSONObject().put("name", "TAKU_MCP_PERMISSION").put("value", permissionMode));
+            if (nativePhoneMcp()) {
+                // The relay's handshake line is the Java relay's, prepared here; sh prints it, then cat
+                // and toybox nc carry stdio to the broker's socket (no JVM start).
+                env.put(new JSONObject().put("name", "TAKU_MCP_HELLO").put("value", new JSONObject()
+                        .put("task", task).put("permissionMode", permissionMode).put("thread", thread).put("turn", "").toString()));
+                env.put(new JSONObject().put("name", "TAKU_MCP_SOCKET").put("value", options.phoneMcpSocket.getPath()));
+                return servers.put(new JSONObject()
+                        .put("name", "taku_phone")
+                        .put("command", options.shell)
+                        .put("args", new JSONArray().put("-c").put(NATIVE_RELAY_SCRIPT.replace("@TOYBOX@", options.toybox)))
+                        .put("env", env));
+            }
             JSONObject configured = phone.optJSONObject("env");
             if (configured != null) for (java.util.Iterator<String> it = configured.keys(); it.hasNext(); ) {
                 String key = it.next();
                 env.put(new JSONObject().put("name", key).put("value", configured.getString(key)));
             }
-            env.put(new JSONObject().put("name", "TAKU_MCP_TASK").put("value", request.getString("id")));
-            // The phone tools' session identity (screens, Apps, gestures): the conversation for a chat
-            // turn, as for a Codex chat turn; a stable UUID per background task otherwise.
-            env.put(new JSONObject().put("name", "TAKU_MCP_THREAD").put("value", phoneThread(request)));
-            env.put(new JSONObject().put("name", "TAKU_MCP_TURN").put("value", chat != null ? chat.turnId : "acp-task-" + request.getString("id")));
-            env.put(new JSONObject().put("name", "TAKU_MCP_PERMISSION").put("value", permissionMode));
             JSONArray args = phone.optJSONArray("args");
             return servers.put(new JSONObject()
                     .put("name", "taku_phone")
                     .put("command", phone.getString("command"))
                     .put("args", args == null ? new JSONArray() : new JSONArray(args.toString()))
                     .put("env", env));
+        }
+
+        boolean nativePhoneMcp() {
+            return options.phoneMcpNative && options.phoneMcpSocket != null && options.phoneMcpSocket.exists()
+                    && new File(options.toybox).canExecute() && new File(options.shell).canExecute();
         }
 
         Integer waitExit() {
@@ -1054,6 +1133,9 @@ final class AcpRuntime implements TaskRuntime {
         }
 
         void completed(String stopReason) throws Exception {
+            // The prompt (and every steer) was answered and no subagent runs in the background: the
+            // agent is idle. A budget timeout keeps nothing (its cancel may still be unwinding).
+            reusable = pendingSteers.isEmpty() && subagentCalls.isEmpty() && !followUp && !timedOut && connection.alive();
             String text = AcpToolLabels.sanitize(reply.toString()).trim();
             // After subagents, the parent's last wake-up is the answer; its first line heads the task.
             String last = lastSegment > 0 ? AcpToolLabels.sanitize(reply.substring(Math.min(lastSegment, reply.length()))).trim() : "";
@@ -1114,19 +1196,11 @@ final class AcpRuntime implements TaskRuntime {
         // ---- JSON-RPC ---------------------------------------------------------------------------
 
         void send(JSONObject message) throws Exception {
-            byte[] line = (message.put("jsonrpc", "2.0").toString() + "\n").getBytes(StandardCharsets.UTF_8);
-            try {
-                synchronized (out) {
-                    out.write(line);
-                    out.flush();
-                }
-            } catch (IOException broken) {
-                throw new AgentExited("agent stdin closed");
-            }
+            agent.send(message);
         }
 
         JSONObject call(String method, JSONObject params) throws Exception {
-            long id = nextId++;
+            long id = agent.nextId();
             send(new JSONObject().put("id", id).put("method", method).put("params", params));
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.requestTimeoutMillis);
             for (; ; ) {
@@ -1226,7 +1300,7 @@ final class AcpRuntime implements TaskRuntime {
                     steerResult(requestId, false, code);
                     continue;
                 }
-                long id = nextId++;
+                long id = agent.nextId();
                 pendingSteers.put(id, new Steer(requestId, id));
                 String text = steer.optString("text", "");
                 JSONArray attachments = steer.optJSONArray("attachments");

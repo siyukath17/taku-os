@@ -71,6 +71,39 @@ public final class TaskBroker {
                 }
             });
 
+    static final File ACP_LOGIN = new File(ROOT, "acp-login.json");
+
+    /**
+     * The warm {@code agy acp} process shared by ACP turns (see AcpAgentPool). Its stamp is the broker
+     * state a warm process depends on: a changed runtime.json or sign-in status retires it.
+     */
+    static final AcpAgentPool ACP_POOL = new AcpAgentPool(AcpProcessTransport.process(),
+            () -> stamp(RUNTIME_CONFIG) + "|" + stamp(ACP_LOGIN));
+
+    private static String stamp(File f) {
+        return f.length() + ":" + f.lastModified();
+    }
+
+    /**
+     * Starts the warm ACP process in the background when new conversations route to ACP and the agent
+     * is signed in (broker start, {@code thread/start}). Never blocks the caller and never throws.
+     */
+    static void prewarmAcp(String reason) {
+        Thread worker = new Thread(() -> {
+            try {
+                if (!"signed_in".equals(new JSONObject(read(ACP_LOGIN)).optString("state"))) return;
+                RuntimeRouter.Route route = router().newConversation();
+                if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) return;
+                new AcpRuntime(acpOptions(route.acpConfig), AcpProcessTransport.process(), null, null, null, ACP_POOL)
+                        .prewarm(reason);
+            } catch (Exception | LinkageError unavailable) {
+                System.err.println("acp prewarm (" + reason + ") skipped: " + unavailable);
+            }
+        }, "acp-prewarm-trigger");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
     /** NativeBridge op {@code acpRuntime}: runtime.json read/update and the sign-in trigger. */
     static JSONObject acpRuntimeControl(JSONObject input) throws Exception {
         return AcpRuntimeSettings.control(RUNTIME_CONFIG, input, ACP_AUTH);
@@ -102,7 +135,8 @@ public final class TaskBroker {
                         AcpProcessTransport.process(),
                         TaskBroker::notifyUser,
                         () -> serviceWhileTurnRuns("acp"),
-                        AcpConversations.HOST),
+                        AcpConversations.HOST,
+                        ACP_POOL),
                 remoteConfig -> {
                     RemoteT3Runtime.Options options = RemoteT3Runtime.Options.fromJson(remoteConfig);
                     return new RemoteT3Runtime(
@@ -133,18 +167,23 @@ public final class TaskBroker {
         return b.toString("UTF-8");
     }
 
+    /** Task update broadcasts, sent in order off the task loop (see CoalescingNotifier). */
+    static final CoalescingNotifier NOTIFIER = new CoalescingNotifier(TaskBroker::broadcastUpdate);
+
     static void notifyUser(String id) {
+        NOTIFIER.notify(id);
+    }
+
+    /** One {@code am broadcast}; its own process, never the cleanup-bounded {@link #command}. */
+    private static void broadcastUpdate(String id) {
         try {
-            command(
-                    "/system/bin/am",
-                    "broadcast",
-                    "-a",
-                    "org.agentos.assistant.TASK_UPDATE",
-                    "-n",
-                    "org.agentos.assistant/.TaskNotificationReceiver",
-                    "--es",
-                    "task_id",
-                    id);
+            java.lang.Process p = new ProcessBuilder("/system/bin/am", "broadcast", "-a", "org.agentos.assistant.TASK_UPDATE",
+                    "-n", "org.agentos.assistant/.TaskNotificationReceiver", "--es", "task_id", id)
+                    .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+            if (!p.waitFor(10, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                System.err.println("notification: am broadcast timed out");
+            } else if (p.exitValue() != 0) System.err.println("notification: am exit=" + p.exitValue());
         } catch (Exception e) {
             System.err.println("notification: " + e);
         }
@@ -209,9 +248,18 @@ public final class TaskBroker {
         AgentViews.overlay = AcpConversations::overlay;
         AccountBridge.start();
         NativeBridge.start();
+        // ACP turns open and close their phone turn explicitly (gestures, background screen).
+        AcpPhoneTurns.hooks = PhoneMcpHost.TURN_HOOKS;
         try { PhoneMcpHost.start(); }
         catch (Exception unavailable) { System.err.println("phone mcp host unavailable: " + unavailable.getMessage()); }
         MagpieSettings.start();
+        // Once the broker settled: warm the ACP agent so the first turn skips agy's backend boot.
+        Thread warmup = new Thread(() -> {
+            try { Thread.sleep(3000); } catch (InterruptedException stopped) { return; }
+            prewarmAcp("broker-start");
+        }, "acp-prewarm-start");
+        warmup.setDaemon(true);
+        warmup.start();
         for (; ; ) {
             // Nothing a task, a damaged record or a runtime does may end this loop: it is the broker.
             try {
@@ -324,23 +372,31 @@ public final class TaskBroker {
             notifyUser(r.getString("id"));
             return;
         }
-        state(dir, r, "running", "Preparing the independent execution screen…");
+        // The route first: an ACP turn uses none of the Codex execution display (its phone tools open
+        // dedicated screens on demand), so it skips the display preparation entirely.
+        RuntimeRouter router = router();
+        RuntimeRouter.Route route = router.route(r);
+        boolean display = RuntimeRouter.preparesExecutionDisplay(route);
+        state(dir, r, "running", display ? "Preparing the independent execution screen…" : "Starting the on-device agent…");
         notifyUser(r.getString("id"));
-        Thread.sleep(700);
+        if (display || RuntimeRouter.capturesContext(r)) {
+            // Lets the assistant surface leave the screen before the context screenshot.
+            Thread.sleep(700);
+        }
         File contextImage = new File(dir, "context.png");
-        if (!r.has("conversationId")) {
+        if (RuntimeRouter.capturesContext(r)) {
             command("/system/bin/screencap", "-p", contextImage.getPath());
             r.put("screenshot", contextImage.getPath());
         }
-        command("/system_ext/bin/phone-display", "start");
-        String id = command("/system_ext/bin/phone-display", "id").trim();
-        if (!id.matches("[1-9][0-9]*")) throw new IOException("invalid virtual display ID");
-        write(new File(dir, "display.id"), id);
-        String primary = command("/system/bin/dumpsys", "activity", "activities");
-        write(new File(dir, "activity-before.txt"), primary);
-        r.put("displayId",id);
-        RuntimeRouter router = router();
-        RuntimeRouter.Route route = router.route(r);
+        if (display) {
+            command("/system_ext/bin/phone-display", "start");
+            String id = command("/system_ext/bin/phone-display", "id").trim();
+            if (!id.matches("[1-9][0-9]*")) throw new IOException("invalid virtual display ID");
+            write(new File(dir, "display.id"), id);
+            String primary = command("/system/bin/dumpsys", "activity", "activities");
+            write(new File(dir, "activity-before.txt"), primary);
+            r.put("displayId", id);
+        }
         write(new File(dir, "runtime-route.json"), route.json().toString());
         // "Continue" after a failed turn carries no user text. ACP resumes its agent session; other
         // runtimes get the continuation instruction as the turn's text.
