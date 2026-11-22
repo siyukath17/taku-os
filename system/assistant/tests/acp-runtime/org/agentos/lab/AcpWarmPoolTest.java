@@ -79,6 +79,8 @@ public final class AcpWarmPoolTest {
 
         File run(String id, String prompt) throws Exception {
             File dir = taskDir(id);
+            // Like TaskBroker's queue: the request is submitted by its ready mark (claimDelayMs).
+            Files.write(new File(dir, "ready").toPath(), new byte[0]);
             runtime().run(dir, chat(id, prompt));
             return dir;
         }
@@ -86,6 +88,22 @@ public final class AcpWarmPoolTest {
 
     private static JSONObject info(File dir) throws Exception {
         return new JSONObject(read(dir, "runtime-info.json"));
+    }
+
+    private static final String[] TIMING_KEYS = {"poolState", "warmWaitMs", "claimDelayMs", "sessionPrepareMs",
+            "configOptionMs", "totalPrepMs", "promptToFirstChunkMs", "promptToFirstTextMs", "promptToFirstToolMs", "turnTotalMs"};
+
+    /** runtime-info.json's timings: every key present, the milliseconds non-negative and consistent. */
+    private static JSONObject timings(File dir, String poolState) throws Exception {
+        JSONObject t = info(dir).getJSONObject("timings");
+        for (String key : TIMING_KEYS) check(t.has(key), "timings." + key + " present: " + t);
+        check(poolState.equals(t.getString("poolState")), "timings.poolState " + poolState + ": " + t);
+        for (String key : TIMING_KEYS)
+            if (key.endsWith("Ms") && !t.isNull(key)) check(t.getLong(key) >= 0, "timings." + key + " >= 0: " + t);
+        check(t.getLong("totalPrepMs") >= t.getLong("sessionPrepareMs") && t.getLong("turnTotalMs") >= t.getLong("totalPrepMs"),
+                "timings are ordered (session <= prep <= total): " + t);
+        check(t.getLong("promptToFirstTextMs") >= t.getLong("promptToFirstChunkMs"), "first chunk precedes first text: " + t);
+        return t;
     }
 
     private static JSONObject phoneServer(JSONObject sessionCall) {
@@ -99,12 +117,18 @@ public final class AcpWarmPoolTest {
         Env env = new Env(new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL), TimeUnit.MINUTES.toMillis(5));
         File t1 = env.run("701", "first");
         check("completed".equals(read(t1, "done")) && "cold".equals(info(t1).getString("agentProcess")), "turn 1: cold start completes");
+        JSONObject cold = timings(t1, "cold_start");
+        check(cold.has("initializeMs") && !cold.has("pingMs"), "cold start: a handshake time, no warm probe: " + cold);
+        check(!cold.isNull("promptToFirstToolMs") && cold.getLong("promptToFirstToolMs") >= cold.getLong("promptToFirstChunkMs"),
+                "cold start: the first tool call is timed after the first update: " + cold);
         check(env.pool.hasIdle() && env.pool.checkedOut() == 0 && !env.pool.empty(), "turn 1: the idle agent is kept warm (pool not empty)");
         File t2 = env.run("702", "second");
         check("completed".equals(read(t2, "done")), "turn 2: completes on the warm process");
         check(env.agent.launches.size() == 1 && env.agent.methods("initialize").size() == 1,
                 "turn 2: no new process and no second initialize: launches=" + env.agent.launches.size());
         check("warm".equals(info(t2).getString("agentProcess")), "turn 2: runtime-info says warm");
+        JSONObject hit = timings(t2, "warm_hit");
+        check(hit.has("pingMs") && !hit.has("initializeMs"), "warm hit: the probe is timed, no handshake: " + hit);
         check(env.agent.methods("$/ping").size() == 1, "turn 2: the warm process was probed before reuse");
         List<JSONObject> loads = env.agent.methods("session/load");
         check(loads.size() == 1 && "s-1".equals(loads.get(0).getJSONObject("params").getString("sessionId")),
@@ -138,6 +162,7 @@ public final class AcpWarmPoolTest {
         File t1 = env.run("711", "hello");
         check("completed".equals(read(t1, "done")) && "warm".equals(info(t1).getString("agentProcess")),
                 "first turn after prewarm runs warm");
+        check(timings(t1, "warm_hit").getLong("warmWaitMs") < 1000, "a ready warm process is taken without waiting");
         check(env.agent.launches.size() == 1 && env.agent.methods("initialize").size() == 1, "first turn: no cold start");
         List<String> command = env.agent.launches.get(0).command;
         check(command.contains("--dangerously-skip-permissions"), "prewarm uses the full-access command line of chat turns");
@@ -147,10 +172,13 @@ public final class AcpWarmPoolTest {
     /** A take waits for a warm-up already in flight instead of starting a second process. */
     static void takeWaitsForWarming() throws Exception {
         Env env = new Env(new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL), TimeUnit.MINUTES.toMillis(5));
+        env.agent.sessionListDelayMillis = 400;
         env.runtime().prewarm("test");
         File t1 = env.run("715", "right away");
         check("completed".equals(read(t1, "done")) && env.agent.launches.size() == 1,
                 "a turn during the warm-up uses the warming process: launches=" + env.agent.launches.size());
+        JSONObject waited = timings(t1, "waited_prewarm");
+        check(waited.getLong("warmWaitMs") >= 200, "waited_prewarm: the wait for the warm-up is counted: " + waited);
         env.pool.invalidate("test");
     }
 

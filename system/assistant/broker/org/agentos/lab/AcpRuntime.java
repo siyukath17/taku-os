@@ -201,6 +201,105 @@ final class AcpRuntime implements TaskRuntime {
     private final ChatHost chatHost;
     /** Warm agent processes shared across tasks; null starts (and destroys) one process per task. */
     private final AcpAgentPool pool;
+    /** The current task's timings (reset by {@link #run}); see {@link Timings}. */
+    private Timings timings = new Timings();
+
+    /**
+     * Where one task's time went, from the broker taking the request to its end: written into
+     * runtime-info.json as {@code timings} and summed up in one broker.log line per task. Plain
+     * nanoTime stamps on the turn's own thread, no extra I/O except a runtime-info rewrite on the first
+     * update / text / tool of the prompt. Unset values are left out ({@code promptToFirstToolMs} is
+     * null when the turn called no tool).
+     *
+     * <ul>
+     * <li>{@code poolState}: {@code warm_hit} (an idle warm process was taken at once),
+     *     {@code waited_prewarm} (a warm-up in flight was awaited), {@code cold_start} (a new process).
+     * <li>{@code warmWaitMs}: getting the process (waiting for the warm-up, or spawning a cold one);
+     *     {@code pingMs}: the warm process's liveness probe; {@code initializeMs}: a cold handshake.
+     * <li>{@code claimDelayMs}: the request's {@code ready} mark (its submission) to the broker taking it.
+     * <li>{@code sessionPrepareMs}: {@code session/load} or {@code session/new}; {@code configOptionMs}:
+     *     model / effort {@code session/set_config_option}; {@code totalPrepMs}: taken to
+     *     {@code session/prompt} sent.
+     * <li>{@code promptToFirstChunkMs} / {@code promptToFirstTextMs} / {@code promptToFirstToolMs}: the
+     *     prompt to the first {@code session/update}, the first visible reply text, the first tool call.
+     * <li>{@code turnTotalMs}: taken to finished.
+     * </ul>
+     */
+    static final class Timings {
+        static final String WARM_HIT = "warm_hit", WAITED_PREWARM = "waited_prewarm", COLD_START = "cold_start";
+        final long claimed = System.nanoTime();
+        String poolState = "";
+        long claimDelayMs = -1, warmWaitMs = -1, pingMs = -1, initializeMs = -1, sessionPrepareMs = -1,
+                configOptionMs = -1, totalPrepMs = -1, promptToFirstChunkMs = -1, promptToFirstTextMs = -1,
+                promptToFirstToolMs = -1, turnTotalMs = -1;
+        long promptSent;
+
+        static long millisSince(long nanos) {
+            return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - nanos);
+        }
+
+        /** The request's submission: its {@code ready} mark (or request.json) on disk. */
+        void claimedFrom(File directory) {
+            File ready = new File(directory, "ready");
+            long submitted = ready.isFile() ? ready.lastModified() : new File(directory, "request.json").lastModified();
+            if (submitted > 0) claimDelayMs = Math.max(0, System.currentTimeMillis() - submitted);
+        }
+
+        void promptSent() {
+            if (promptSent != 0) return;
+            promptSent = System.nanoTime();
+            totalPrepMs = TimeUnit.NANOSECONDS.toMillis(promptSent - claimed);
+        }
+
+        /** True when this update set a first-* value (runtime-info is then rewritten once). */
+        boolean update(String kind, boolean visibleText) {
+            if (promptSent == 0) return false;
+            long since = millisSince(promptSent);
+            boolean changed = false;
+            if (promptToFirstChunkMs < 0) { promptToFirstChunkMs = since; changed = true; }
+            if (visibleText && promptToFirstTextMs < 0) { promptToFirstTextMs = since; changed = true; }
+            if ("tool_call".equals(kind) && promptToFirstToolMs < 0) { promptToFirstToolMs = since; changed = true; }
+            return changed;
+        }
+
+        void finished() {
+            if (turnTotalMs < 0) turnTotalMs = millisSince(claimed);
+        }
+
+        JSONObject toJson() throws Exception {
+            JSONObject out = new JSONObject();
+            if (!poolState.isEmpty()) out.put("poolState", poolState);
+            put(out, "warmWaitMs", warmWaitMs);
+            put(out, "pingMs", pingMs);
+            put(out, "initializeMs", initializeMs);
+            put(out, "claimDelayMs", claimDelayMs);
+            put(out, "sessionPrepareMs", sessionPrepareMs);
+            put(out, "configOptionMs", configOptionMs);
+            put(out, "totalPrepMs", totalPrepMs);
+            put(out, "promptToFirstChunkMs", promptToFirstChunkMs);
+            put(out, "promptToFirstTextMs", promptToFirstTextMs);
+            if (promptSent != 0) out.put("promptToFirstToolMs", promptToFirstToolMs < 0 ? JSONObject.NULL : (Object) promptToFirstToolMs);
+            put(out, "turnTotalMs", turnTotalMs);
+            return out;
+        }
+
+        private static void put(JSONObject out, String key, long value) throws Exception {
+            if (value >= 0) out.put(key, value);
+        }
+
+        /** One broker.log line: {@code acp turn <id> <status> pool=warm_hit wait=3 ping=2 ...}. */
+        String summary(String taskId, String status) {
+            return "acp turn " + taskId + " " + status + " pool=" + (poolState.isEmpty() ? "-" : poolState)
+                    + " wait=" + v(warmWaitMs) + " ping=" + v(pingMs) + " init=" + v(initializeMs)
+                    + " claim=" + v(claimDelayMs) + " session=" + v(sessionPrepareMs) + " config=" + v(configOptionMs)
+                    + " prep=" + v(totalPrepMs) + " firstChunk=" + v(promptToFirstChunkMs) + " firstText=" + v(promptToFirstTextMs)
+                    + " firstTool=" + v(promptToFirstToolMs) + " total=" + v(turnTotalMs) + " (ms)";
+        }
+
+        private static String v(long value) {
+            return value < 0 ? "-" : Long.toString(value);
+        }
+    }
 
     AcpRuntime(Options options, AcpProcessTransport transport, Notifier notifier, Runnable idle) {
         this(options, transport, notifier, idle, null);
@@ -245,12 +344,18 @@ final class AcpRuntime implements TaskRuntime {
     }
 
     private AcpAgentPool.Agent startAgent(AcpProcessTransport.Launch launch) throws IOException {
+        long begin = System.nanoTime();
+        AcpAgentPool.Agent agent;
         if (pool != null) {
-            AcpAgentPool.Agent warm = pool.take(launch, idle);
-            if (warm != null) return warm;
-            return pool.startCold(launch);
-        }
-        return new AcpAgentPool.Agent(transport.start(launch), "", "");
+            agent = pool.take(launch, idle);
+            if (agent != null) {
+                timings.poolState = agent.waitedForWarm ? Timings.WAITED_PREWARM : Timings.WARM_HIT;
+                timings.pingMs = agent.pingMillis;
+            } else agent = pool.startCold(launch);
+        } else agent = new AcpAgentPool.Agent(transport.start(launch), "", "");
+        if (timings.poolState.isEmpty()) timings.poolState = Timings.COLD_START;
+        timings.warmWaitMs = Timings.millisSince(begin);
+        return agent;
     }
 
     private void releaseAgent(AcpAgentPool.Agent agent, boolean reusable) {
@@ -304,6 +409,8 @@ final class AcpRuntime implements TaskRuntime {
 
     @Override
     public void run(File directory, JSONObject request) throws Exception {
+        timings = new Timings();
+        timings.claimedFrom(directory);
         if (new File(directory, "cancel").exists()) {
             finish(directory, request, "cancelled", "Cancelled before execution.", null);
             return;
@@ -502,6 +609,9 @@ final class AcpRuntime implements TaskRuntime {
     private void finish(File directory, JSONObject request, String status, String message, String reply) throws Exception {
         // Steers still waiting for agy are settled before the turn and the task close ("done").
         if (activeTurn != null) activeTurn.closeSteers();
+        timings.finished();
+        if (activeTurn != null) activeTurn.writeInfo();
+        System.err.println(timings.summary(request.optString("id"), status));
         // Agent text can link or quote agent-internal paths; never shown or stored in results.
         if (reply != null) reply = AcpToolLabels.sanitize(reply);
         // The conversation shows the turn's end before the task record does.
@@ -718,6 +828,19 @@ final class AcpRuntime implements TaskRuntime {
         final Map<Long, Steer> pendingSteers = new LinkedHashMap<>();
         /** The agent accepts image prompt blocks ({@code promptCapabilities.image}). */
         boolean promptImages;
+        /** runtime-info.json's content once the session is ready (null before). */
+        JSONObject info;
+
+        /** Rewrites runtime-info.json with the current {@link Timings}; never fails the turn. */
+        void writeInfo() {
+            if (info == null) return;
+            try {
+                info.put("timings", timings.toJson());
+                TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+            } catch (Exception unavailable) {
+                System.err.println("acp runtime-info timings: " + unavailable);
+            }
+        }
 
         Turn(File directory, JSONObject request, AcpAgentPool.Agent agent, Chat chat,
              int attempt, String resumeSession, long budgetEnd) {
@@ -755,7 +878,9 @@ final class AcpRuntime implements TaskRuntime {
             try {
                 // A warm process already did the handshake (and booted agy's backend).
                 boolean warm = agent.init != null;
+                long initBegin = System.nanoTime();
                 JSONObject init = warm ? agent.init : call("initialize", initializeParams());
+                if (!warm && timings.initializeMs < 0) timings.initializeMs = Timings.millisSince(initBegin);
                 agent.init = init;
                 if (init.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
                     diagnostic(directory, "protocol-version", init.optString("protocolVersion"), stderr());
@@ -766,6 +891,7 @@ final class AcpRuntime implements TaskRuntime {
                 JSONObject capabilities = init.optJSONObject("agentCapabilities");
                 boolean resumed = false;
                 String loadFailure = "";
+                long sessionBegin = System.nanoTime();
                 // A chat (or an automatic continuation) resumes its previous agent session when the
                 // agent can load it.
                 if (!resumeSession.isEmpty()) {
@@ -807,8 +933,11 @@ final class AcpRuntime implements TaskRuntime {
                     configOptions = session.optJSONArray("configOptions");
                     AcpModelCatalog.remember(options.modelCatalog, options.binary, configOptions);
                 }
+                if (timings.sessionPrepareMs < 0) timings.sessionPrepareMs = Timings.millisSince(sessionBegin);
+                long configBegin = System.nanoTime();
                 configOptions = applyModelSelection(configOptions);
-                JSONObject info = new JSONObject()
+                if (timings.configOptionMs < 0) timings.configOptionMs = Timings.millisSince(configBegin);
+                info = new JSONObject()
                         .put("taskId", id)
                         .put("runtime", "acp")
                         .put("protocolVersion", PROTOCOL_VERSION)
@@ -846,7 +975,7 @@ final class AcpRuntime implements TaskRuntime {
                     if (continuation == null) text = withChatGuidance(text);
                 }
                 if (attempt > 0) info.put("autoContinuation", attempt);
-                TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+                writeInfo();
                 JSONObject promptCaps = capabilities == null ? null : capabilities.optJSONObject("promptCapabilities");
                 promptImages = promptCaps != null && promptCaps.optBoolean("image");
                 JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", text));
@@ -858,7 +987,7 @@ final class AcpRuntime implements TaskRuntime {
                         appendAttachments(prompt, AcpTurnControl.attachments(request.optJSONArray("attachments")));
                     } catch (IOException unavailable) {
                         info.put("attachmentsSkipped", clip(String.valueOf(unavailable.getMessage()), 80));
-                        TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+                        writeInfo();
                     }
                 }
                 phase = "working";
@@ -868,6 +997,8 @@ final class AcpRuntime implements TaskRuntime {
                 subagents = new AcpSubagents(AcpSubagents.sessionRoot(options.home, options.appDataDir, sessionId));
                 subagents.baseline();
                 JSONObject result;
+                timings.promptSent();
+                writeInfo();
                 try {
                     result = call("session/prompt", new JSONObject().put("sessionId", sessionId).put("prompt", prompt));
                 } catch (AcpError error) {
@@ -1511,6 +1642,10 @@ final class AcpRuntime implements TaskRuntime {
             JSONObject update = params.optJSONObject("update");
             if (update == null) return;
             lastUpdate = System.nanoTime();
+            String kind = update.optString("sessionUpdate");
+            JSONObject firstContent = update.optJSONObject("content");
+            if (timings.update(kind, "agent_message_chunk".equals(kind) && firstContent != null
+                    && "text".equals(firstContent.optString("type")) && !firstContent.optString("text").isBlank())) writeInfo();
             // Children run while the parent is still in its turn: their cards follow from the first update on.
             refreshSubagentCards(false);
             switch (update.optString("sessionUpdate")) {

@@ -242,6 +242,9 @@ class AgentGatewayProvider : ContentProvider() {
             "readJev" -> return AiConnections.jevStatus(context!!)
             "connectJev" -> return AiConnections.connectJev(context!!, input.getString("key"))
             "enableJev" -> return AiConnections.enableJev(context!!)
+            // Foreground warm-up of the on-device agent: the broker answers at once and decides (ACP
+            // default, signed in, empty pool, 5s interval); the warm-up runs in its background.
+            "prewarmAgent" -> return NativeClient.exchange(JSONObject().put("op", "acpPrewarm").put("surface", input.getString("surface")))
             "listThreads" -> return AgentGatewayProtocol.clean(TaskRequests.control("thread/list", JSONObject()), 0) as JSONObject
             "createThread" -> {
                 val result = ComposerDelivery.createThread()

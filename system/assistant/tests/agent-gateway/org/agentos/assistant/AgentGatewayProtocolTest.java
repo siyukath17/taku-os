@@ -131,6 +131,11 @@ public final class AgentGatewayProtocolTest {
         rejects(() -> AgentGatewayProtocol.request("bindSystemAi", "{\"scene\":\"memory.text\",\"group\":\"memory\",\"credentials\":\"secret\"}"));
         rejects(() -> AgentGatewayProtocol.request("readSystemAi", "{\"command\":\"settings\"}"));
         check(AgentGatewayProtocol.request("openMagpieManagement", "{}").length() == 0);
+        for (String surface : new String[]{"onResume", "overlay", "focus"})
+            check(AgentGatewayProtocol.request("prewarmAgent", "{\"surface\":\"" + surface + "\"}").getString("surface").equals(surface));
+        rejectsWithCode("UNSUPPORTED_SURFACE", () -> AgentGatewayProtocol.request("prewarmAgent", "{\"surface\":\"codex\"}"));
+        rejects(() -> AgentGatewayProtocol.request("prewarmAgent", "{}"));
+        rejects(() -> AgentGatewayProtocol.request("prewarmAgent", "{\"surface\":\"focus\",\"runtime\":\"codex\"}"));
         check(AgentGatewayProtocol.request("readAccount", "{}").length() == 0);
         rejects(() -> AgentGatewayProtocol.request("readAccount", "{\"refreshToken\":true}"));
         check(AgentGatewayProtocol.request("connectChatGpt", "{}").length() == 0);

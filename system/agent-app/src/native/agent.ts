@@ -48,7 +48,7 @@ export type AgentAction =
   | 'composer/submit' | 'composer/settle' | 'composer/release'
   /** @deprecated composer/restoreTask: a failed task is continued (continueTask), never restored into the draft. */
   | 'composer/handoff' | 'composer/restore' | 'composer/restoreTask' | 'composer/preserveDraft'
-  | 'sendMessage' | 'steer' | 'interrupt' | 'cancelQueued' | 'continueTask' | 'answer'
+  | 'sendMessage' | 'steer' | 'interrupt' | 'cancelQueued' | 'continueTask' | 'answer' | 'prewarmAgent'
   | 'getWorkspaces' | 'openWorkspace' | 'openSettings'
   | 'requests/list' | 'requests/read' | 'requests/submit' | 'requests/cancel'
   | 'readTaskDetail' | 'workspaces/list' | 'workspaces/apps' | 'workspaces/configure'

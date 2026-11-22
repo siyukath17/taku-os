@@ -56,7 +56,9 @@ internal class AgentGatewayProtocol private constructor() {
             COMPOSER_REMOVE, COMPOSER_OPTIONS_READ, COMPOSER_OPTIONS_WRITE, COMPOSER_SUBMIT, COMPOSER_SETTLE, COMPOSER_RELEASE,
             COMPOSER_HANDOFF, COMPOSER_RESTORE, COMPOSER_RESTORE_TASK, COMPOSER_CREATE_THREAD, COMPOSER_PRESERVE_DRAFT,
             LIVE_TASK_READ, LIVE_TASK_REPLACE, LIVE_TASK_CANCEL,
-            "connectChatGpt", "cancelChatGpt", "readJev", "connectJev", "enableJev")
+            "connectChatGpt", "cancelChatGpt", "readJev", "connectJev", "enableJev", "prewarmAgent")
+        /** `prewarmAgent` surfaces (the broker's prewarm reasons): app back in front, overlay shown, composer focused. */
+        @JvmField val PREWARM_SURFACES: Set<String> = java.util.Set.of("onResume", "overlay", "focus")
         @JvmField val QUESTIONS: Set<String> = java.util.Set.of("phone/askUser", "phone/confirmAction",
             "phone/action/requestApproval", "item/tool/requestUserInput")
         private val SECRET_KEYS: Set<String> = java.util.Set.of("accesstoken", "refreshtoken", "idtoken",
@@ -243,6 +245,7 @@ internal class AgentGatewayProtocol private constructor() {
                 "setAppPermissionScope" -> java.util.Set.of("packageName", "scope", "allowed")
                 "resetAppPermission" -> java.util.Set.of("packageName")
                 "connectJev" -> java.util.Set.of("key")
+                "prewarmAgent" -> java.util.Set.of("surface")
                 else -> java.util.Set.of()
             }
             val keys = input.keys()
@@ -322,6 +325,7 @@ internal class AgentGatewayProtocol private constructor() {
                 }
             }
             if (action == "connectJev") text(input, "key", 4096)
+            if (action == "prewarmAgent" && !PREWARM_SURFACES.contains(text(input, "surface", 16))) throw IOException("UNSUPPORTED_SURFACE")
             if (action == "openSettings" && !java.util.Set.of("models", "system", "workspaces", "account").contains(input.optString("page", "models")))
                 throw IOException("INVALID_SETTINGS_PAGE")
             if (action == "pluginManager") {

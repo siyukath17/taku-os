@@ -290,6 +290,7 @@ class AssistantSession private constructor(private val context: Context, private
   fun activateHold(id: String) {
     if (gesture.source == "system" && gesture.expired(android.os.SystemClock.uptimeMillis())) { cancelVoice(); return }
     if (!gesture.activate(id)) return
+    prewarmAgent()
     publishGesture()
     flow.update { it.copy(expansionRequest = ++expansionSequence) }
     startVoice(VoiceTarget.Hold, VoiceDestination.AwaitGesture)
@@ -489,9 +490,28 @@ class AssistantSession private constructor(private val context: Context, private
   /** Opening another text entry must not discard a recording or its pending final result. */
   val canOpenText: Boolean get() = !voice.state.value.listening && !gesture.held
 
+  private var lastPrewarm = Long.MIN_VALUE
+
+  /**
+   * The AI entry was shown (Home, the in-place overlay): ask the broker to warm the on-device agent
+   * (gateway `prewarmAgent`, surface `overlay`) so the first message skips its cold start. At most once
+   * per 5s from here; the broker applies its own checks (ACP default, signed in, empty pool) and
+   * answers at once. Main thread only; the call runs on IO and is never awaited, failures ignored.
+   */
+  fun prewarmAgent() {
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (lastPrewarm != Long.MIN_VALUE && now - lastPrewarm < PREWARM_INTERVAL_MS) return
+    lastPrewarm = now
+    scope.launch(Dispatchers.IO) {
+      runCatching { gateway.call("prewarmAgent", JSONObject().put("surface", "overlay")) }
+        .onFailure { Log.d(TAG, "prewarm skipped: ${it.message}") }
+    }
+  }
+
   /** Opens an input (double tap: text, hold: voice); the island shows the greeting or the current turn. */
   fun open(mode: EntryMode) {
     if (mode == EntryMode.None) return closeEntry()
+    prewarmAgent()
     if (mode == EntryMode.Voice) { beginDesktopHold(); return }
     if (mode == EntryMode.Text && !canOpenText) return
     if (mode == EntryMode.Text && flow.value.entry != EntryMode.Text) revokeVoice()
@@ -1409,6 +1429,8 @@ class AssistantSession private constructor(private val context: Context, private
   companion object {
     private const val CHAT_ACTIVITY = "org.agentos.agent.MainActivity"
     const val MAX_TEXT = 16_000
+    /** `prewarmAgent` throttle, as the React Native client and the broker. */
+    private const val PREWARM_INTERVAL_MS = 5_000L
     /** Failures of a request that was delivered: continued, never put back into the draft. */
     val TASK_FAILURES = setOf("TASK_FAILED", "TURN_FAILED")
     /** Saved dictation settings the desktop entry and its field microphone share. */

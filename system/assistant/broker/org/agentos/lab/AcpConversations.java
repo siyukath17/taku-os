@@ -103,7 +103,7 @@ final class AcpConversations {
     static JSONObject start() throws Exception {
         String id = STORE.startNew();
         // The user is about to type the first message: warm the agent now (background, never blocks).
-        TaskBroker.prewarmAcp("thread/start");
+        TaskBroker.prewarmAcp("thread_start");
         changed(id);
         JSONObject view = AgentViews.snapshot(id);
         return AcpConversationStore.startAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)));
@@ -214,6 +214,17 @@ final class AcpConversations {
     /** Native-RPC model/list on ACP without Codex, else null ({@link AcpModelCatalog#nativeAnswer}). */
     static JSONObject nativeModels(String method) throws Exception {
         return AcpModelCatalog.nativeAnswer(method, TaskBroker.router().newConversation(), TaskBroker.ACP_MODELS);
+    }
+
+    /**
+     * Native {@code acpPrewarm}: a client surface came to the front ({@code surface}: onResume,
+     * overlay, focus). Answers at once with {@code started}; the warm-up itself runs in the
+     * background and only when the pool is empty, ACP is the new-conversation runtime and the agent is
+     * signed in (see {@link AcpReadWarmup#onForeground}). Never starts Codex.
+     */
+    static JSONObject prewarm(JSONObject input) throws Exception {
+        boolean started = TaskBroker.ACP_READ_WARMUP.onForeground(input.optString("surface"));
+        return new JSONObject().put("started", started);
     }
 
     /** Native {@code acpRuntime} control: ACP runtime settings and sign-in ({@link TaskBroker#acpRuntimeControl}). */

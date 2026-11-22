@@ -76,6 +76,8 @@ export interface AgentChatScreenProps {
   onRemoveAttachment: (id: string) => void;
   conversationKey?: string;
   optimisticSubmissions?: readonly OptimisticSubmission[];
+  /** The composer got focus: warm the on-device agent (throttled, fire-and-forget). */
+  onComposerFocus?: () => void;
   pendingSubmission?: {threadId: string; text: string; requestId: string; action: 'sendMessage' | 'steer' | 'continue'} | null;
   onRetrySubmission: () => void;
   onContinueWithoutResending: () => void;
@@ -210,6 +212,7 @@ function Message({block, language, renderMarkdown, renderCard, provider, demand,
       {!!block.text && <Text selectable style={[chatType.bodyLg(containsChinese(block.text)), styles.userText]}>{block.text}</Text>}
       {block.attachments.map((name, i) => <Label key={`${name}-${i}`} role="caption" style={styles.attachment}>{name === 'image' ? t('image') : name}</Label>)}
       {block.requestStopped && <Label role="caption" style={styles.secondary}>{t('requestStopped')}</Label>}
+      {block.steerDelivered && <Label testID="steer-delivered" role="caption" style={styles.secondary}>{t('steerDelivered')}</Label>}
     </View>;
     return <View style={styles.userWrap}>{block.reaction ? <View>
       <View style={styles.userWrapReacted}>{bubble}</View>
@@ -688,7 +691,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
           selection.current = {threadId: props.draftSessionId, range};
           if (caret !== null && range.start === caret && range.end === caret) setInsertedCaret(null);
         }}
-        editable={!props.loading && !props.busy} onFocus={() => { void showKeyboard().catch(() => {}); }}
+        editable={!props.loading && !props.busy} onFocus={() => { props.onComposerFocus?.(); void showKeyboard().catch(() => {}); }}
         onContentSizeChange={event => setComposerHeight(Math.max(40, Math.min(144, Math.ceil(event.nativeEvent.contentSize.height))))}
         style={[chatType.bodyLg(language === 'zh' || containsChinese(props.draft)), styles.input, {height: Math.min(composerHeight, composerMaximum)}]} maxLength={16000}/>
       {(running || props.session?.queued) && <Pressable testID="stop-turn" accessibilityRole="button" accessibilityLabel={t(props.session?.queued ? 'cancelQueued' : 'stop')}

@@ -151,9 +151,22 @@ keeps **one** warm process (~240MB) between turns:
   new conversations route to ACP and `acp-login.json` says `signed_in`: 3s after the
   broker starts, and on `agent_control thread/start` ("new conversation") while the
   slot is empty. Reopening an existing ACP conversation (`agent_control thread/read` or native-RPC
-  `thread/read` of a standalone one) also warms it (`AcpReadWarmup`, reason `thread/read`): only while
+  `thread/read` of a standalone one) also warms it (`AcpReadWarmup`, reason `thread_read`): only while
   the pool holds no process (idle, warming or in a turn), never for a removed conversation, at most
   once per 5s across chat-page refreshes, on its own daemon thread. It never blocks any caller.
+- **Foreground prewarm.** An open chat page that comes back to the front issues no `thread/read`, so
+  the client asks explicitly: native op `{"op":"acpPrewarm","surface":"onResume|overlay|focus"}`
+  (gateway action `prewarmAgent {surface}`; the React Native app sends `onResume` when it becomes
+  active and `focus` when the composer gets focus, Home's AI entry / the in-place overlay sends
+  `overlay`). It answers `{started}` at once and shares `AcpReadWarmup`'s pool-empty check and 5s
+  interval; an unknown surface is refused (`UNSUPPORTED_SURFACE`). Clients throttle to one request
+  per 5s and never await it. Root shell test:
+  `printf '{"op":"acpPrewarm","surface":"onResume"}'` to the `@taku-agent-native` socket.
+- **Prewarm reasons** in the log: `startup`, `thread_start`, `thread_read`, `onResume`, `overlay`,
+  `focus`. Each trigger ends in one line: `acp prewarm (<reason>) ready in <N>ms`, `... failed: <e>`
+  or `... skipped: <why>` (`not-signed-in`, `default=<runtime>`, `pool-busy`, `debounced`,
+  `already-warm`, `already-warming`, `in-turn`; the `pool-busy`/`debounced` skips are logged at most
+  once per 5s).
 - **Broker log.** init runs the broker with stdio on `/dev/null`; `BrokerLog` sends its stderr to
   `/data/local/agentos/acp/logs/broker.log` (timestamped lines; past 1.5 MiB it becomes
   `broker.log.1`, replacing the older one, so at most ~3 MiB is kept). Prewarm timings
@@ -161,6 +174,18 @@ keeps **one** warm process (~240MB) between turns:
 - **Reuse.** A turn takes the warm process after a probe (agy answers an unknown
   method with -32601 at once); a dead or silent one is destroyed and the turn starts
   cold. `runtime-info.json` records `agentProcess: warm|cold`.
+- **Timings.** `runtime-info.json` carries `timings` (milliseconds; unset keys are left out,
+  `promptToFirstToolMs` is `null` when no tool was called), rewritten when the prompt is sent, on
+  the first update / text / tool and at the end:
+  `poolState` (`warm_hit` an idle warm process taken at once, `waited_prewarm` a warm-up in flight
+  awaited, `cold_start` a new process), `warmWaitMs` (getting the process: the wait or the spawn),
+  `pingMs` (the warm probe), `initializeMs` (a cold handshake), `claimDelayMs` (the request's `ready`
+  mark to the broker taking it), `sessionPrepareMs` (`session/load` or `session/new`),
+  `configOptionMs` (model / effort `session/set_config_option`), `totalPrepMs` (taken to
+  `session/prompt` sent), `promptToFirstChunkMs` (to the first `session/update`),
+  `promptToFirstTextMs` (to the first visible reply text), `promptToFirstToolMs`, `turnTotalMs`.
+  Each task also ends with one broker.log line:
+  `acp turn <id> <status> pool=… wait=… ping=… init=… claim=… session=… config=… prep=… firstChunk=… firstText=… firstTool=… total=… (ms)`.
 - **Validity.** Same command line, environment and cwd (fingerprint), and the same
   stamp: agy binary size/mtime, runtime.json and `acp-login.json`. A changed stamp
   retires the process; another permission mode (another command line) runs cold and

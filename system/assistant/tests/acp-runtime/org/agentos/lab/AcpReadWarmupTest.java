@@ -51,8 +51,8 @@ public final class AcpReadWarmupTest {
         long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin);
         check(tookMillis < 500, "the read is not blocked by the warm-up (" + tookMillis + "ms)");
         check(started.await(5, TimeUnit.SECONDS), "the warm-up runs");
-        check(reasons.size() == 1 && reasons.get(0).equals("thread/read@acp-prewarm-read"),
-                "the warm-up runs on its own thread with reason thread/read: " + reasons);
+        check(reasons.size() == 1 && reasons.get(0).equals("thread_read@acp-prewarm-read"),
+                "the warm-up runs on its own thread with reason thread_read: " + reasons);
         release.countDown();
 
         check(!warmup.onRead(live, store), "a refresh within the interval does not trigger again");
@@ -79,6 +79,33 @@ public final class AcpReadWarmupTest {
         } finally {
             Thread.setDefaultUncaughtExceptionHandler(previous);
         }
+        // Foreground entries (acpPrewarm): same pool check and interval as reads, reason = the surface.
+        AtomicBoolean fgEmpty = new AtomicBoolean(true);
+        AtomicLong fgNow = new AtomicLong(5_000_000);
+        List<String> fgReasons = new CopyOnWriteArrayList<>();
+        CountDownLatch fgRan = new CountDownLatch(2);
+        AcpReadWarmup foreground = new AcpReadWarmup(fgEmpty::get, reason -> {
+            fgReasons.add(reason + "@" + Thread.currentThread().getName());
+            fgRan.countDown();
+        }, fgNow::get);
+        for (String bad : new String[]{null, "", "codex", "chat", "../x"}) {
+            try {
+                foreground.onForeground(bad);
+                check(false, "an unknown surface is refused: " + bad);
+            } catch (IllegalArgumentException refused) {
+                check("UNSUPPORTED_SURFACE".equals(refused.getMessage()), "refusal code");
+            }
+        }
+        fgEmpty.set(false);
+        check(!foreground.onForeground("onResume"), "a held process (idle, warming or in a turn) is left alone");
+        fgEmpty.set(true);
+        check(foreground.onForeground("onResume"), "chat back in front with an empty pool warms");
+        check(!foreground.onForeground("overlay") && !foreground.onRead(live, store), "foreground and read share one interval");
+        fgNow.addAndGet(AcpReadWarmup.MIN_INTERVAL_MILLIS);
+        check(foreground.onForeground("focus"), "after the interval a new surface warms again");
+        check(fgRan.await(5, TimeUnit.SECONDS), "both foreground warm-ups ran");
+        check(fgReasons.contains("onResume@acp-prewarm-foreground") && fgReasons.contains("focus@acp-prewarm-foreground"),
+                "foreground reasons and thread: " + fgReasons);
         System.out.println("AcpReadWarmupTest passed " + checks + " checks");
     }
 }

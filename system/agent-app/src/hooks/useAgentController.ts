@@ -10,6 +10,7 @@ import {ComposerDraft, isDraftRevisionConflict, parseComposerSnapshot, type Comp
 import {isThreadUnavailable, onConversationRemoved, readCurrent, restoreConversation, selectionAfterRemoval} from './readLifecycle';
 import {sessionReadOptions} from './sessionRead';
 import {emptySessionStream, reduceSessionBatch, retainSessionBlocks, streamCursor, streamSessionRoot, sessionRootForDisplay, reconcileStreamHistory} from '../model/sessionStream';
+import {requestPrewarm, type PrewarmSurface} from '../native/prewarm';
 import {acceptOptimisticReceipt, beginOptimisticSubmission, reconcileOptimisticSubmission, recoverQueuedSubmission, FIRST_RESPONSE_TIMEOUT_MS, type OptimisticSubmission} from '../model/optimisticChat';
 
 const SELECTED = 'taku.agent.selected.v1';
@@ -23,6 +24,8 @@ const submissionTarget = (pending: ComposerSubmission) => ({
   ...(pending.expectedTurnId ? {expectedTurnId: pending.expectedTurnId} : {}),
   ...(pending.action === 'continue' ? {panelId: pending.panel?.panelId, expectedSourceVersion: pending.panel?.expectedSourceVersion} : {}),
 });
+/** Foreground warm-up of the agent (see native/prewarm): throttled, never awaited, failures ignored. */
+const prewarm = (surface: PrewarmSurface) => requestPrewarm(surface, kind => callAgent('prewarmAgent', {surface: kind}));
 const unconfirmedArchiveKey = (threadId: string, requestId: string) => `${unconfirmedArchivePrefix(threadId)}${requestId}`;
 
 /** Gateway failures after which a submission may still be in flight (as HomeComposer.deliveryCouldBeUnknown). */
@@ -334,7 +337,14 @@ export function useAgentController() {
     mounted.current = true;
     let appActive = AppState.currentState === 'active', conversationStarted = false;
     const updateVisibility = () => setVisible(appActive && conversationStarted);
-    const listener = AppState.addEventListener('change', state => { appActive = state === 'active'; updateVisibility(); });
+    // Back in front (screen on, app switched to, opened from Home): warm the agent before the user types.
+    if (appActive) prewarm('onResume');
+    const listener = AppState.addEventListener('change', state => {
+      const wasActive = appActive;
+      appActive = state === 'active';
+      if (appActive && !wasActive) prewarm('onResume');
+      updateVisibility();
+    });
     const visibility = watchConversationVisible(started => { conversationStarted = started; updateVisibility(); });
     const openListener = onOpenThread((id, target, problem) => {
       if (problem) {
@@ -825,6 +835,7 @@ export function useAgentController() {
     onRemoveAttachment: removeAttachment,
     onDictationDraftChange: applyDictation,
     onSend: () => { void send(); }, onStop: () => { void stop(); },
+    onComposerFocus: () => { prewarm('focus'); },
     onSelectThread: (id: string) => {
       if (actionRunning.current) return;
       selectConversation(id);

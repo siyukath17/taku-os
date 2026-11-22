@@ -52,3 +52,17 @@ test('presentation does not persist a stopped caption when later native history 
   assert.equal(chat[0].requestStopped, undefined);
   assert.deepEqual(input, [request, reply]);
 });
+
+test('an accepted steer says it was delivered until the agent answers it', () => {
+  const running = {id: 'turn/a', turnId: 'turn', role: 'assistant', text: 'Working on it', attachments: [], activity: [], status: 'running', active: true};
+  const steer = {threadId: 't', requestId: 'r1', text: 'Also check Wi-Fi', action: 'steer', expectedTurnId: 'turn',
+    startedAt: 0, baselineBlockIds: ['turn/a'], baselineTurnIds: ['turn'], state: 'accepted', turnId: 'turn'};
+  const user = blocks => blocks.find(block => block.role === 'user' && block.text === 'Also check Wi-Fi');
+  assert.equal(user(chatPresentation([running], [steer])).steerDelivered, true);
+  for (const state of ['sending', 'failed', 'settled', 'stopped'])
+    assert.notEqual(user(chatPresentation([running], [{...steer, state}]))?.steerDelivered, true, state);
+  assert.notEqual(user(chatPresentation([running], [{...steer, action: 'sendMessage'}])).steerDelivered, true, 'a plain send');
+  const answered = [running, {id: 'turn/u2', turnId: 'turn', role: 'user', text: 'Also check Wi-Fi', attachments: [], activity: [], status: 'running', active: false},
+    {id: 'turn/a2', turnId: 'turn', role: 'assistant', text: 'Wi-Fi is on', attachments: [], activity: [], status: 'running', active: true}];
+  assert.notEqual(user(chatPresentation(answered, [{...steer, userBlockId: 'turn/u2', assistantBlockId: 'turn/a2'}])).steerDelivered, true, 'answered');
+});

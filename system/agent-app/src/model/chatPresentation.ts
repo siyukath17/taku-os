@@ -1,7 +1,8 @@
 import type {MessageBlock} from './session';
 import {hasResponse, type OptimisticSubmission, type ResponseErrorKey} from './optimisticChat.ts';
 
-export type ChatMessageBlock = MessageBlock & {requestStopped?: boolean; responsePending?: boolean; responseError?: string; responseErrorKey?: ResponseErrorKey};
+/** steerDelivered: a message added to the running turn was accepted and waits for the current step to finish. */
+export type ChatMessageBlock = MessageBlock & {requestStopped?: boolean; steerDelivered?: boolean; responsePending?: boolean; responseError?: string; responseErrorKey?: ResponseErrorKey};
 
 function optimisticBlocks(blocks: readonly MessageBlock[], requests: readonly OptimisticSubmission[]): ChatMessageBlock[] {
   const result: ChatMessageBlock[] = [...blocks];
@@ -29,6 +30,9 @@ function optimisticBlocks(blocks: readonly MessageBlock[], requests: readonly Op
     const failed = !hasResponse(assistant) && (request.state === 'failed' || request.state === 'timedOut');
     const stopped = request.state === 'stopped' && !hasResponse(assistant);
     if (stopped) result[userIndex] = {...result[userIndex], status: 'stopped', active: false};
+    // A steer the running turn accepted: say it arrived, until the agent answers it (or the turn ends).
+    else if (request.action === 'steer' && request.state === 'accepted' && !hasResponse(assistant))
+      result[userIndex] = {...result[userIndex], steerDelivered: true};
     result[assistantIndex] = {...assistant, id: `${prefix}/assistant`, responsePending,
       ...(failed ? {status: 'failed', active: false, responseError: request.error, responseErrorKey: request.errorKey || 'replyFailed'} : {}),
       ...(stopped ? {status: 'stopped', active: false} : {})};

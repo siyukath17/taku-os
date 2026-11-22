@@ -108,6 +108,8 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
     /** Delay before each subagent report in the SUBAGENTS scenarios. */
     volatile long subagentDelayMillis = 300;
+    /** Delays the warm-up's session/list answer (a turn then waits for the warm-up in flight). */
+    volatile long sessionListDelayMillis;
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
@@ -276,6 +278,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
         boolean handle(JSONObject message) throws Exception {
             String method = message.optString("method");
             Object id = message.opt("id");
+            if ("session/list".equals(method) && sessionListDelayMillis > 0) Thread.sleep(sessionListDelayMillis);
             switch (method) {
                 case "initialize":
                     send(new JSONObject().put("id", id).put("result", new JSONObject()

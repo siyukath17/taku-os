@@ -97,9 +97,15 @@ public final class TaskBroker {
     /** {@link #prewarmAcp}'s body on the caller's thread (already a background one); never throws. */
     static void prewarmAcpNow(String reason) {
         try {
-            if (!"signed_in".equals(new JSONObject(read(ACP_LOGIN)).optString("state"))) return;
+            if (!"signed_in".equals(new JSONObject(read(ACP_LOGIN)).optString("state"))) {
+                System.err.println("acp prewarm (" + reason + ") skipped: not-signed-in");
+                return;
+            }
             RuntimeRouter.Route route = router().newConversation();
-            if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) return;
+            if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) {
+                System.err.println("acp prewarm (" + reason + ") skipped: default=" + route.runtime);
+                return;
+            }
             new AcpRuntime(acpOptions(route.acpConfig), AcpProcessTransport.process(), null, null, null, ACP_POOL)
                     .prewarm(reason);
         } catch (Throwable unavailable) {
@@ -271,7 +277,7 @@ public final class TaskBroker {
         // Once the broker settled: warm the ACP agent so the first turn skips agy's backend boot.
         Thread warmup = new Thread(() -> {
             try { Thread.sleep(3000); } catch (InterruptedException stopped) { return; }
-            prewarmAcp("broker-start");
+            prewarmAcp("startup");
         }, "acp-prewarm-start");
         warmup.setDaemon(true);
         warmup.start();

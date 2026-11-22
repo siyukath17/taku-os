@@ -77,6 +77,12 @@ final class AcpAgentPool {
         volatile boolean eof, warmedUp;
         volatile long idleSince;
         int turns;
+        /**
+         * Set by {@link AcpAgentPool#take} on the process it hands out: whether it waited for a warm-up in
+         * flight, how long the whole take took, and how long the liveness probe ({@code $/ping}) took.
+         */
+        volatile boolean waitedForWarm;
+        volatile long takeMillis = -1, pingMillis = -1;
 
         Agent(AcpProcessTransport.Connection connection, String fingerprint, String stamp) {
             this(connection, fingerprint, stamp, "");
@@ -299,10 +305,13 @@ final class AcpAgentPool {
      */
     Agent take(AcpProcessTransport.Launch launch, Runnable idleHook) {
         String fingerprint = fingerprint(launch), stampNow = stamp(launch);
-        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(warmingWaitMillis);
+        long begin = System.nanoTime();
+        long until = begin + TimeUnit.MILLISECONDS.toNanos(warmingWaitMillis);
+        boolean waited = false;
         for (; ; ) {
             synchronized (this) {
                 if (!(warming && warmingFingerprint.equals(fingerprint) && idle == null) || System.nanoTime() >= until) break;
+                waited = true;
                 try {
                     wait(100);
                 } catch (InterruptedException interrupted) {
@@ -330,7 +339,10 @@ final class AcpAgentPool {
             idle = null;
             checkedOut++;
         }
-        if (!probe(candidate)) {
+        long probeBegin = System.nanoTime();
+        boolean answered = probe(candidate);
+        candidate.pingMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - probeBegin);
+        if (!answered) {
             probeFailures.incrementAndGet();
             synchronized (this) {
                 checkedOut--;
@@ -339,6 +351,8 @@ final class AcpAgentPool {
             return null;
         }
         reused.incrementAndGet();
+        candidate.waitedForWarm = waited;
+        candidate.takeMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin);
         return candidate;
     }
 
@@ -398,15 +412,23 @@ final class AcpAgentPool {
     void prewarm(AcpProcessTransport.Launch launch, String reason) {
         String fingerprint = fingerprint(launch), stampNow = stamp(launch);
         Agent stale = null;
+        String busy;
         synchronized (this) {
-            if (idleTtlMillis <= 0 || warming || checkedOut > 0) return;
-            if (idle != null) {
-                if (idle.fingerprint.equals(fingerprint) && idle.stamp.equals(stampNow) && idle.alive()) return;
-                stale = idle;
-                idle = null;
+            busy = idleTtlMillis <= 0 ? "pool-disabled" : warming ? "already-warming" : checkedOut > 0 ? "in-turn" : null;
+            if (busy == null && idle != null && idle.fingerprint.equals(fingerprint) && idle.stamp.equals(stampNow) && idle.alive())
+                busy = "already-warm";
+            if (busy == null) {
+                if (idle != null) {
+                    stale = idle;
+                    idle = null;
+                }
+                warming = true;
+                warmingFingerprint = fingerprint;
             }
-            warming = true;
-            warmingFingerprint = fingerprint;
+        }
+        if (busy != null) {
+            System.err.println("acp prewarm (" + reason + ") skipped: " + busy);
+            return;
         }
         if (stale != null) retire(stale, "replaced-by-prewarm");
         Thread worker = new Thread(() -> {

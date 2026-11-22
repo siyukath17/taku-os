@@ -56,4 +56,5 @@ final class AcpConversations {
     static String steerErrorCode(Throwable failure) { return null; }
     static void cancelTask(String threadId, String taskId, String turnId) { throw outside("task cancel"); }
     static JSONObject runtimeControl(JSONObject input) { throw outside("runtime control"); }
+    static JSONObject prewarm(JSONObject input) { throw outside("prewarm"); }
 }
