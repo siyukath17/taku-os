@@ -440,6 +440,27 @@ final class AcpRuntime implements TaskRuntime {
                     + "(The previous turn was interrupted mid-run. Using the conversation and tool results so far, continue the original task from where it stopped; "
                     + "do not repeat steps that already succeeded, and check the current state before any action with side effects.)";
 
+    /**
+     * Reply pacing for a chat turn (the user watches the chat page, which shows only the agent's text
+     * and tool cards): say in a sentence what is about to be checked before any multi-step tool work,
+     * and report progress in a sentence or two at each milestone, instead of running tools silently
+     * for tens of seconds. Simple questions are answered directly. It rides on the turn's prompt text
+     * only: the chat record keeps the user's own words (so a carried-over transcript never repeats it),
+     * steers and continuations are sent without it, and the phone tool protocol is untouched.
+     */
+    static final String CHAT_TURN_GUIDANCE =
+            "[Taku 回复节奏，非用户消息，勿复述] 需要执行多步命令或调用工具排查时：先用一句话告诉用户你要查什么，再开始调用工具；"
+                    + "执行过程中每到关键节点或阶段有进展（查到关键结果、换方向、开始下一阶段），顺手用一两句简短人话同步进展，不要长时间闷头调用工具；"
+                    + "简单问题直接回答，不加开场白。\n"
+                    + "(Taku reply pacing, not from the user, do not repeat: before multi-step commands or tool investigations, first tell the user in one "
+                    + "short sentence what you are about to check, then call tools; at each milestone or stage of progress, give a one- or two-sentence plain "
+                    + "update instead of running tools silently for long; answer simple questions directly with no preamble.)";
+
+    /** A chat turn's opening prompt text: {@link #CHAT_TURN_GUIDANCE}, then the message (and any carried context). */
+    static String withChatGuidance(String text) {
+        return CHAT_TURN_GUIDANCE + "\n\n" + text;
+    }
+
     /** A copy of {@code request} that continues task {@code ofTaskId} (same id; the user's text is not resent). */
     static JSONObject continuationRequest(JSONObject request, String reason, int attempt) throws Exception {
         JSONObject copy = new JSONObject(request.toString());
@@ -821,6 +842,8 @@ final class AcpRuntime implements TaskRuntime {
                     if (!resumed && !chat.transcript.isEmpty())
                         text = "Earlier messages in this conversation, for context (the previous agent session could not be resumed):\n"
                                 + chat.transcript + "\n\n" + (continuation != null ? "" : "Current message:\n") + text;
+                    // A continuation resumes with its own instruction; only a new chat turn gets the pacing note.
+                    if (continuation == null) text = withChatGuidance(text);
                 }
                 if (attempt > 0) info.put("autoContinuation", attempt);
                 TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
@@ -1044,7 +1067,8 @@ final class AcpRuntime implements TaskRuntime {
          * The composer's model and reasoning effort ({@code request.model} / {@code request.effort},
          * from the ACP catalog the picker showed) applied to the session with
          * {@code session/set_config_option}, when the agent offers that value and it is not already
-         * current. A refusal leaves the agent's own choice in place: the turn still runs.
+         * current. A request without an effort runs on {@link AcpModelCatalog#DEFAULT_EFFORT} (agy's own
+         * default is "high"). A refusal leaves the agent's own choice in place: the turn still runs.
          * Returns the session's configOptions after the changes (null when unknown).
          */
         final JSONArray configRefusals = new JSONArray();
@@ -1052,7 +1076,7 @@ final class AcpRuntime implements TaskRuntime {
         JSONArray applyModelSelection(JSONArray configOptions) throws Exception {
             if (configOptions == null) return null;
             String[][] wanted = {{AcpModelCatalog.MODEL, request.optString("model", "")},
-                    {AcpModelCatalog.EFFORT, request.optString("effort", "")}};
+                    {AcpModelCatalog.EFFORT, AcpModelCatalog.effortFor(request.optString("effort", ""))}};
             for (String[] pair : wanted) {
                 String configId = pair[0], value = pair[1];
                 if (value.isEmpty() || value.equals(AcpModelCatalog.current(configOptions, configId))

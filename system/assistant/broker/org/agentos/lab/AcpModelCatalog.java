@@ -28,6 +28,13 @@ import java.util.Set;
  */
 final class AcpModelCatalog {
     static final String MODEL = "model", EFFORT = "thought_level";
+    /**
+     * Taku's default thinking level on ACP. agy reports {@code thought_level} {@code currentValue: "high"}
+     * on every session/new (its own default); mirroring that as the picker's default made every send
+     * carry {@code effort: "high"}. The picker defaults to this level when the agent offers it, and a turn
+     * whose request names no effort applies it ({@link #effortFor}); an explicit choice still wins.
+     */
+    static final String DEFAULT_EFFORT = "medium";
     static final int MAX_BYTES = 262144;
 
     /** Shown until the agent has reported its own list: agy's default model and thinking levels. */
@@ -45,7 +52,7 @@ final class AcpModelCatalog {
                             .put("currentValue", "gemini-4-neon")
                             .put("options", new JSONArray().put(new JSONObject().put("value", "gemini-4-neon").put("name", "Gemini 4 Neon"))))
                     .put(new JSONObject().put("id", EFFORT).put("category", "thought_level").put("type", "select")
-                            .put("currentValue", "high").put("options", efforts));
+                            .put("currentValue", DEFAULT_EFFORT).put("options", efforts));
         } catch (Exception impossible) {
             throw new IllegalStateException(impossible);
         }
@@ -77,8 +84,10 @@ final class AcpModelCatalog {
                 if (value.isEmpty()) continue;
                 efforts.put(new JSONObject().put("reasoningEffort", value).put("description", option.optString("name", value)));
             }
+            Set<String> offered = values(configOptions, EFFORT);
             String current = effort.optString("currentValue", "");
-            if (values(configOptions, EFFORT).contains(current)) defaultEffort = current;
+            if (offered.contains(DEFAULT_EFFORT)) defaultEffort = DEFAULT_EFFORT;
+            else if (offered.contains(current)) defaultEffort = current;
         }
         JSONArray data = new JSONArray();
         JSONArray options = model.optJSONArray("options");
@@ -124,6 +133,11 @@ final class AcpModelCatalog {
             if (!value.isEmpty()) out.add(value);
         }
         return out;
+    }
+
+    /** The thinking level a turn applies: the request's own choice, else {@link #DEFAULT_EFFORT}. */
+    static String effortFor(String requested) {
+        return requested == null || requested.isEmpty() ? DEFAULT_EFFORT : requested;
     }
 
     static String current(JSONArray configOptions, String id) {

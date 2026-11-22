@@ -150,7 +150,14 @@ keeps **one** warm process (~240MB) between turns:
 - **Prewarm** (`initialize` + a read-only `session/list`) runs in the background when
   new conversations route to ACP and `acp-login.json` says `signed_in`: 3s after the
   broker starts, and on `agent_control thread/start` ("new conversation") while the
-  slot is empty. It never blocks either caller.
+  slot is empty. Reopening an existing ACP conversation (`agent_control thread/read` or native-RPC
+  `thread/read` of a standalone one) also warms it (`AcpReadWarmup`, reason `thread/read`): only while
+  the pool holds no process (idle, warming or in a turn), never for a removed conversation, at most
+  once per 5s across chat-page refreshes, on its own daemon thread. It never blocks any caller.
+- **Broker log.** init runs the broker with stdio on `/dev/null`; `BrokerLog` sends its stderr to
+  `/data/local/agentos/acp/logs/broker.log` (timestamped lines; past 1.5 MiB it becomes
+  `broker.log.1`, replacing the older one, so at most ~3 MiB is kept). Prewarm timings
+  (`acp prewarm (<reason>) ready in <N>ms`) and runtime failures are read there.
 - **Reuse.** A turn takes the warm process after a probe (agy answers an unknown
   method with -32601 at once); a dead or silent one is destroyed and the turn starts
   cold. `runtime-info.json` records `agentProcess: warm|cold`.
@@ -193,6 +200,11 @@ thread (created by `agent_control thread/start`). The ACP agent's part lives in 
 thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall` with `tool`,
 `status`, `arguments`, `result`; turn `status` `inProgress|completed|failed|interrupted`).
 
+- A new chat turn's prompt text starts with a short reply-pacing note (`AcpRuntime.CHAT_TURN_GUIDANCE`):
+  before multi-step commands or tool investigations, say in one sentence what is about to be checked;
+  at each milestone give a one- or two-sentence progress update; answer simple questions directly.
+  It is not recorded in the chat (the record and any carried transcript keep the user's words) and is
+  not added to steers or continuations.
 - The user's message is recorded and published before the agent starts; agent text and tool calls
   stream into the turn (throttled to `min(250 ms, progressIntervalMillis)`).
 - A later turn calls `session/load` with the bound session when the agent advertises
@@ -382,6 +394,12 @@ picker, list conversations or send:
   `session/set_config_option` (`model`, `thought_level`) when the agent offers the value, records the
   effective `model` / `effort` in `runtime-info.json`, and lists refusals in `configRefusals` (the
   turn still runs on the agent's choice). A Codex model id saved earlier resolves to the ACP default.
+- **Default thinking level: `medium`** (`AcpModelCatalog.DEFAULT_EFFORT`). agy reports
+  `thought_level` `currentValue: "high"` on every `session/new`; the catalog used to mirror it as
+  `defaultReasoningEffort`, so with no saved choice every send carried `effort: "high"`. The catalog
+  now reports `medium` as the default when the agent offers it (else the agent's current level), and
+  a request without `effort` (background tasks) applies `medium`. A level picked in the composer is
+  sent explicitly and still wins.
 - `agent_control thread/list` is built from the broker's projection index without starting Codex
   (`AcpCodexGate`); a Codex app server that is already running is still asked.
 - Every Codex app-server cold start is recorded with its cause in

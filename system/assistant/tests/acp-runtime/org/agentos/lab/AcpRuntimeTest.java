@@ -378,8 +378,8 @@ public final class AcpRuntimeTest {
         check(agent.methods("session/load").size() == 1
                 && "s-1".equals(agent.methods("session/load").get(0).getJSONObject("params").getString("sessionId")),
                 "auto continue: the interrupted session is loaded");
-        check("Turn on Wi-Fi".equals(promptText(agent, 0)) && AcpRuntime.CONTINUE_PROMPT.equals(promptText(agent, 1)),
-                "auto continue: the second prompt is the continuation instruction, not the user's text");
+        check(AcpRuntime.withChatGuidance("Turn on Wi-Fi").equals(promptText(agent, 0)) && AcpRuntime.CONTINUE_PROMPT.equals(promptText(agent, 1)),
+                "auto continue: the second prompt is the continuation instruction alone (no user text, no pacing note)");
         check(recorder.messages.contains("Network hiccup, continuing (1/2)…"), "auto continue: progress names the attempt " + recorder.messages);
         JSONArray turns = host.view().getJSONArray("turns");
         JSONObject turn = turns.getJSONObject(turns.length() - 1);

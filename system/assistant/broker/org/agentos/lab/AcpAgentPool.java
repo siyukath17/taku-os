@@ -475,6 +475,11 @@ final class AcpAgentPool {
         if (victim != null) retire(victim, victim.alive() ? "idle-ttl" : "exited");
     }
 
+    /** True with no process idle, warming or checked out by a turn: a prewarm would start one. */
+    synchronized boolean empty() {
+        return idle == null && !warming && checkedOut == 0;
+    }
+
     synchronized boolean hasIdle() {
         return idle != null;
     }

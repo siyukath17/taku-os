@@ -110,7 +110,12 @@ public final class AcpChatRuntimeTest {
         new AcpRuntime(options(), agent1, null, null, host).run(dir1, chat("201", "hi"));
         check("completed".equals(read(dir1, "done")), "turn 1 completes");
         check(agent1.methods("session/new").size() == 1 && agent1.methods("session/load").isEmpty(), "turn 1: new session, nothing to load");
-        check("hi".equals(promptText(agent1, 0)), "turn 1: the prompt is the user's message alone");
+        check(AcpRuntime.withChatGuidance("hi").equals(promptText(agent1, 0)), "turn 1: the pacing note, then the user's message");
+        String guidance = AcpRuntime.CHAT_TURN_GUIDANCE;
+        check(guidance.contains("先用一句话") && guidance.contains("关键节点") && guidance.contains("简单问题直接回答")
+                && guidance.contains("before multi-step") && guidance.contains("milestone"),
+                "guidance: one sentence before tools, progress at milestones, direct answers for simple questions");
+        check(!host.view().toString().contains("Taku 回复节奏"), "turn 1: the chat record keeps only the user's own words");
         check("s-1".equals(host.store.sessionId(CONV)), "turn 1: session bound to the conversation");
         // The user's message was visible before the agent produced anything.
         JSONObject firstPublished = lastTurn(host.published.get(0));
@@ -162,7 +167,7 @@ public final class AcpChatRuntimeTest {
         check(loads.size() == 1 && "s-1".equals(loads.get(0).getJSONObject("params").getString("sessionId"))
                 && loads.get(0).getJSONObject("params").getJSONArray("mcpServers").length() == 1, "turn 2: session/load with the bound session and phone tools");
         check(agent2.methods("session/new").isEmpty(), "turn 2: no new session");
-        check("and now?".equals(promptText(agent2, 0)), "turn 2: no transcript when the session resumed");
+        check(AcpRuntime.withChatGuidance("and now?").equals(promptText(agent2, 0)), "turn 2: no transcript when the session resumed");
         check(!read(dir2, "result.txt").contains("REPLAYED"), "turn 2: replayed history is not part of the reply");
         check(json(dir2, "runtime-info.json").getBoolean("sessionResumed"), "turn 2: runtime-info records the resume");
         JSONObject view2 = host.view();
@@ -181,6 +186,8 @@ public final class AcpChatRuntimeTest {
         String text = promptText(agent3, 0);
         check(text.contains("User: hi\nAssistant: Done: Wi-Fi is on.") && text.contains("User: and now?") && text.endsWith("Current message:\nthird")
                 && !text.contains("User: third"), "turn 3: earlier turns carried as a transcript: " + text);
+        check(text.startsWith(AcpRuntime.CHAT_TURN_GUIDANCE + "\n\nEarlier messages") && text.indexOf("Taku 回复节奏") == text.lastIndexOf("Taku 回复节奏"),
+                "turn 3: the pacing note leads once and never leaks into the carried transcript: " + text);
         check("s-2".equals(host.store.sessionId(CONV)), "turn 3: the conversation is rebound to the new session");
         JSONObject info3 = json(dir3, "runtime-info.json");
         check(!info3.getBoolean("sessionResumed") && info3.getString("sessionLoadFailure").startsWith("-32002"), "turn 3: load failure recorded " + info3);

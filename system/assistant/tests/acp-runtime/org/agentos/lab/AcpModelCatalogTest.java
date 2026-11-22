@@ -84,8 +84,14 @@ public final class AcpModelCatalogTest {
         JSONArray efforts = neon.getJSONArray("supportedReasoningEfforts");
         check(efforts.length() == 4 && "low".equals(efforts.getJSONObject(0).getString("reasoningEffort"))
                 && "xhigh".equals(efforts.getJSONObject(3).getString("reasoningEffort"))
-                && "high".equals(neon.getString("defaultReasoningEffort")),
-                "shape: thought_level becomes the reasoning efforts (Codex keys), got " + neon);
+                && "medium".equals(neon.getString("defaultReasoningEffort")),
+                "shape: thought_level becomes the reasoning efforts (Codex keys); Taku defaults to medium although agy reports high, got " + neon);
+        JSONArray noMedium = agyConfigOptions();
+        noMedium.getJSONObject(1).put("options", new JSONArray().put(option("low", "Low")).put(option("high", "High")));
+        check("high".equals(AcpModelCatalog.modelList(noMedium).getJSONArray("data").getJSONObject(0).getString("defaultReasoningEffort")),
+                "shape: an agent without medium keeps its own current level as the default");
+        check("medium".equals(AcpModelCatalog.select(AcpModelCatalog.BUILTIN, "thought_level").getString("currentValue")),
+                "shape: the built-in catalog (before the first turn) also defaults to medium");
         JSONObject noEffort = AcpModelCatalog.modelList(new JSONArray().put(agyConfigOptions().getJSONObject(0)))
                 .getJSONArray("data").getJSONObject(0);
         check(noEffort.getJSONArray("supportedReasoningEfforts").length() == 0 && !noEffort.has("defaultReasoningEffort"),
@@ -185,7 +191,16 @@ public final class AcpModelCatalogTest {
         File same = temp("same");
         FakeAcpAgent unchanged = agent();
         new AcpRuntime(options(cache), unchanged, null, null).run(same, request("302", "gemini-4-neon", "high"));
-        check(unchanged.methods("session/set_config_option").isEmpty(), "select: current values are not re-sent");
+        check(unchanged.methods("session/set_config_option").isEmpty(), "select: current values are not re-sent (an explicit high stays high)");
+
+        File unset = temp("unset");
+        FakeAcpAgent defaults = agent();
+        new AcpRuntime(options(cache), defaults, null, null).run(unset, request("306", null, null));
+        List<JSONObject> defaultSets = defaults.methods("session/set_config_option");
+        check(defaultSets.size() == 1 && "thought_level".equals(defaultSets.get(0).getJSONObject("params").getString("configId"))
+                && "medium".equals(defaultSets.get(0).getJSONObject("params").getString("value")),
+                "select: a request without an effort runs on medium, not agy's high, got " + defaultSets);
+        check("medium".equals(json(unset, "runtime-info.json").getString("effort")), "select: runtime-info records medium");
 
         File stale = temp("stale");
         FakeAcpAgent codexModel = agent();

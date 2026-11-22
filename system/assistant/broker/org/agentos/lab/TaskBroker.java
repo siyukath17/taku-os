@@ -89,21 +89,28 @@ public final class TaskBroker {
      * is signed in (broker start, {@code thread/start}). Never blocks the caller and never throws.
      */
     static void prewarmAcp(String reason) {
-        Thread worker = new Thread(() -> {
-            try {
-                if (!"signed_in".equals(new JSONObject(read(ACP_LOGIN)).optString("state"))) return;
-                RuntimeRouter.Route route = router().newConversation();
-                if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) return;
-                new AcpRuntime(acpOptions(route.acpConfig), AcpProcessTransport.process(), null, null, null, ACP_POOL)
-                        .prewarm(reason);
-            } catch (Throwable unavailable) {
-                // A background helper must never end the broker (an uncaught throwable kills app_process).
-                System.err.println("acp prewarm (" + reason + ") skipped: " + unavailable);
-            }
-        }, "acp-prewarm-trigger");
+        Thread worker = new Thread(() -> prewarmAcpNow(reason), "acp-prewarm-trigger");
         worker.setDaemon(true);
         worker.start();
     }
+
+    /** {@link #prewarmAcp}'s body on the caller's thread (already a background one); never throws. */
+    static void prewarmAcpNow(String reason) {
+        try {
+            if (!"signed_in".equals(new JSONObject(read(ACP_LOGIN)).optString("state"))) return;
+            RuntimeRouter.Route route = router().newConversation();
+            if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) return;
+            new AcpRuntime(acpOptions(route.acpConfig), AcpProcessTransport.process(), null, null, null, ACP_POOL)
+                    .prewarm(reason);
+        } catch (Throwable unavailable) {
+            // A background helper must never end the broker (an uncaught throwable kills app_process).
+            System.err.println("acp prewarm (" + reason + ") skipped: " + unavailable);
+        }
+    }
+
+    /** Opening an existing ACP conversation warms the agent (see {@link AcpReadWarmup}). */
+    static final AcpReadWarmup ACP_READ_WARMUP = new AcpReadWarmup(ACP_POOL::empty, TaskBroker::prewarmAcpNow,
+            () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
 
     /** NativeBridge op {@code acpRuntime}: runtime.json read/update and the sign-in trigger. */
     static JSONObject acpRuntimeControl(JSONObject input) throws Exception {
@@ -244,6 +251,8 @@ public final class TaskBroker {
         guard = new FileOutputStream(new File(ROOT, "broker.lock"));
         guardLock = guard.getChannel().tryLock();
         if (guardLock == null) return;
+        // init runs the broker with stderr on /dev/null: keep its diagnostics in a size-capped file.
+        BrokerLog.install("broker start pid " + Process.myPid());
         command("/system/bin/chown", "system:system", ROOT.getParent());
         command("/system/bin/chown", "-R", "system:system", ROOT.getPath());
         command("/system/bin/restorecon", "-R", ROOT.getPath());

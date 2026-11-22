@@ -146,8 +146,8 @@ public final class AcpStandaloneConversationTest {
         new AcpRuntime(options(), agent, null, null, host).run(dir, first);
         check("completed".equals(read(dir, "done")), "first turn completes");
         check(agent.methods("session/new").size() == 1 && agent.methods("session/load").isEmpty(), "first turn: new ACP session");
-        check("hi".equals(agent.methods("session/prompt").get(0).getJSONObject("params").getJSONArray("prompt").getJSONObject(0).getString("text")),
-                "first turn: the prompt is the message alone (no transcript of an empty conversation)");
+        check(AcpRuntime.withChatGuidance("hi").equals(agent.methods("session/prompt").get(0).getJSONObject("params").getJSONArray("prompt").getJSONObject(0).getString("text")),
+                "first turn: the pacing note and the message alone (no transcript of an empty conversation)");
         check("s-1".equals(host.store.sessionId(id)) && host.store.standalone(id), "session bound; still standalone");
         JSONObject after = AcpConversationStore.readAnswer(id, host.view(id));
         JSONArray turns = after.getJSONObject("thread").getJSONArray("turns");

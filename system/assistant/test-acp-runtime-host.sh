@@ -18,6 +18,8 @@ task_sources=(
  system/assistant/broker/org/agentos/lab/RuntimeRouter.java
  system/assistant/broker/org/agentos/lab/AcpProcessTransport.java
  system/assistant/broker/org/agentos/lab/AcpAgentPool.java
+ system/assistant/broker/org/agentos/lab/AcpReadWarmup.java
+ system/assistant/broker/org/agentos/lab/BrokerLog.java
  system/assistant/broker/org/agentos/lab/AcpPhoneTurns.java
  system/assistant/broker/org/agentos/lab/CoalescingNotifier.java
  system/assistant/broker/org/agentos/lab/AcpRuntime.java
@@ -57,6 +59,8 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpSteerRuntimeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/ThreadListOrderTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpWarmPoolTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpReadWarmupTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/BrokerLogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/PhoneTurnLog.java \
  system/assistant/tests/acp-runtime/org/agentos/assistant/AcpChatProjectionTest.java \
  system/assistant/src/org/agentos/assistant/AgentConversation.java \
@@ -65,7 +69,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest ThreadListOrderTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest ThreadListOrderTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" "$main"
 done | tee "$task_out/result.txt"

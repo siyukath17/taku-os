@@ -88,6 +88,8 @@ final class AcpConversations {
 
     /** Republishes the projection, then answers like the Codex path (see {@link AcpConversationStore#readAnswer}). */
     static JSONObject read(String id) throws Exception {
+        // Reopening an existing conversation: warm the agent for its next message (background only).
+        TaskBroker.ACP_READ_WARMUP.onRead(id, STORE);
         changed(id);
         return AcpConversationStore.readAnswer(id, AgentViews.snapshot(id));
     }
@@ -110,6 +112,7 @@ final class AcpConversations {
     /** Native-RPC thread/read for a standalone ACP conversation (see {@link AcpConversationStore#nativeReadAnswer}). */
     static JSONObject nativeRead(JSONObject params) throws Exception {
         String id = params.getString("threadId");
+        TaskBroker.ACP_READ_WARMUP.onRead(id, STORE);
         changed(id);
         JSONObject view = AgentViews.snapshot(id);
         return AcpConversationStore.nativeReadAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)),
