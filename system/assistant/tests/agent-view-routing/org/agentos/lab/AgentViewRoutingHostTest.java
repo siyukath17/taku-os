@@ -133,6 +133,25 @@ public final class AgentViewRoutingHostTest {
         }
     }
 
+    private static void threadsIndexIsNewestUpdatedFirst() throws Exception {
+        // Saved in UUID order (as thread/list merges them); the late-UUID row was updated last.
+        String[][] rows = {
+            {"01a1fe6b-0000-4000-8000-000000000001", "1795320000"},
+            {"01a1ff12-0000-4000-8000-000000000001", "1795321000"},
+            {"0b479dfc-0000-4000-8000-000000000001", "1795323000"},
+            {"0c9870b9-fc22-402c-a39c-ef1670c7078e", "1795330690"},
+        };
+        for (String[] row : rows) AgentViews.save(new JSONObject().put("id", row[0]).put("preview", row[0])
+                .put("createdAt", 1795300000L).put("updatedAt", Long.parseLong(row[1])).put("turns", new JSONArray()));
+        AgentViews.index();
+        JSONArray data = new JSONObject(TaskBroker.read(new File(AgentViews.ROOT, "threads.json"))).getJSONArray("data");
+        check(data.getJSONObject(0).getString("id").equals("0c9870b9-fc22-402c-a39c-ef1670c7078e"),
+                "threads.json puts the latest updatedAt first: " + data);
+        for (int i = 1; i < data.length(); i++)
+            check(ThreadListOrder.seconds(data.getJSONObject(i - 1), "updatedAt") >= ThreadListOrder.seconds(data.getJSONObject(i), "updatedAt"),
+                    "threads.json is non-increasing by updatedAt at " + i);
+    }
+
     public static void main(String[] args) throws Exception {
         CodexAppServer.shared = new CodexAppServer();
         nativeReadKeepsChildIdentity();
@@ -140,6 +159,7 @@ public final class AgentViewRoutingHostTest {
         routingFieldsAreNotDisplayText();
         ordinarySourcesAndExplicitReplacement();
         sourceIsCopiedAndTotalLimitStillApplies();
-        System.out.println("PASS AgentViewRoutingHostTest: " + checks + " checks, 5 cases");
+        threadsIndexIsNewestUpdatedFirst();
+        System.out.println("PASS AgentViewRoutingHostTest: " + checks + " checks, 6 cases");
     }
 }

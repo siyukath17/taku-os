@@ -15,6 +15,19 @@ final class AcpConversations {
         return new AssertionError("ACP " + what + " is outside this Codex-path host test");
     }
 
+    /** An always-empty store: SessionRemovalRuntime asks it, and it owns no conversation here. */
+    static final AcpConversationStore STORE = new AcpConversationStore(empty());
+
+    private static File empty() {
+        try {
+            File dir = java.nio.file.Files.createTempDirectory("acp-double-store").toFile();
+            dir.deleteOnExit();
+            return dir;
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
     static boolean servesRead(JSONObject request) { return false; }
     static boolean servesRename(JSONObject request) { return false; }
     static boolean servesNativeRead(String method, JSONObject params) { return false; }

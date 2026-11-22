@@ -383,7 +383,8 @@ internal class AgentViews {
                     }
                     rows.put(row)
                 }
-                TaskBroker.write(File(ROOT, "threads.json"), JSONObject().put("data", rows).put("source", "app-server").toString())
+                // Newest first by updatedAt: the map keeps first-insertion order, never recency.
+                TaskBroker.write(File(ROOT, "threads.json"), JSONObject().put("data", ThreadListOrder.sorted(rows)).put("source", "app-server").toString())
             }
         }
 

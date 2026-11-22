@@ -36,6 +36,7 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/MainReplyStream.kt \
  system/assistant/broker/org/agentos/lab/MainReplySession.kt \
  system/assistant/broker/org/agentos/lab/AgentViews.kt \
+ system/assistant/broker/org/agentos/lab/ThreadListOrder.java \
  system/assistant/broker/org/agentos/lab/AgentViewProjection.java \
  system/assistant/tests/main-reply/android/system/Os.java \
  system/assistant/tests/main-reply/org/agentos/lab/MainReplyHostAdapters.java \

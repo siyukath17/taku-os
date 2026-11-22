@@ -27,8 +27,12 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/MainReplyStream.kt \
  system/assistant/broker/org/agentos/lab/MainReplySession.kt \
  system/assistant/broker/org/agentos/lab/AgentViews.kt \
+ system/assistant/broker/org/agentos/lab/ThreadListOrder.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeTestDoubles.java \
  system/assistant/tests/acp-doubles/org/agentos/lab/AcpConversationsTestDouble.java \
+ system/assistant/broker/org/agentos/lab/AcpSessionRemovals.java \
+ system/assistant/broker/org/agentos/lab/AcpConversationStore.java \
+ system/assistant/broker/org/agentos/lab/TaskRecords.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeHostServer.java \
  system/assistant/tests/main-reply/org/agentos/lab/MainReplyHostAdapters.java \
  system/assistant/tests/main-reply/android/system/Os.java \
