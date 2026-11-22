@@ -96,7 +96,8 @@ public final class TaskBroker {
                 if (!RuntimeRouter.ACP.equals(route.runtime) || route.acpConfig == null) return;
                 new AcpRuntime(acpOptions(route.acpConfig), AcpProcessTransport.process(), null, null, null, ACP_POOL)
                         .prewarm(reason);
-            } catch (Exception | LinkageError unavailable) {
+            } catch (Throwable unavailable) {
+                // A background helper must never end the broker (an uncaught throwable kills app_process).
                 System.err.println("acp prewarm (" + reason + ") skipped: " + unavailable);
             }
         }, "acp-prewarm-trigger");
@@ -176,10 +177,15 @@ public final class TaskBroker {
 
     /** One {@code am broadcast}; its own process, never the cleanup-bounded {@link #command}. */
     private static void broadcastUpdate(String id) {
+        // No ProcessBuilder.Redirect.DISCARD: ART's core-oj lacks it (NoSuchFieldError on the Pixel 9).
         try {
             java.lang.Process p = new ProcessBuilder("/system/bin/am", "broadcast", "-a", "org.agentos.assistant.TASK_UPDATE",
                     "-n", "org.agentos.assistant/.TaskNotificationReceiver", "--es", "task_id", id)
-                    .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+                    .redirectErrorStream(true).start();
+            try (InputStream out = p.getInputStream()) {
+                byte[] sink = new byte[1024];
+                while (out.read(sink) > 0) { /* discarded */ }
+            }
             if (!p.waitFor(10, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
                 System.err.println("notification: am broadcast timed out");

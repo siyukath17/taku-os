@@ -33,7 +33,8 @@ final class CoalescingNotifier {
             pending.remove(taskId);
             try {
                 send.accept(taskId);
-            } catch (RuntimeException failure) {
+            } catch (Throwable failure) {
+                // An uncaught throwable on any thread kills the broker's app_process (seen on the Pixel 9).
                 System.err.println("notification: " + failure);
             }
         });

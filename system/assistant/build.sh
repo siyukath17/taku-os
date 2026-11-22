@@ -28,5 +28,7 @@ JAVA_HOME="$JDK" "$TOOLS/apksigner" sign --key "$SIGNING/platform.pk8" --cert "$
 compile_jvm out/broker-classes "$ANDROID_JAR" broker/org/agentos/lab/*.java broker/org/agentos/lab/*.kt \
  ../../tooling/app-kit/apk-shell/src/org/agentos/runtime/AppApiClient.java
 "$JDK/bin/jar" --create --file out/broker-classes.jar -C out/broker-classes .
+# javac resolves java.* from JDK 17: fail on platform members ART lacks (e.g. Redirect.DISCARD).
+python3 scripts/check-android-api.py "$ANDROID_JAR" out/broker-classes.jar
 JAVA_HOME="$JDK" "$TOOLS/d8" --min-api 36 --lib "$ANDROID_JAR" --output out/broker-dex out/broker-classes.jar "$KOTLIN_LIB/kotlin-stdlib.jar"
 "$JDK/bin/jar" --create --file out/task-broker.jar -C out/broker-dex classes.dex -C assets licenses/Kotlin-LICENSE.txt -C assets licenses/Kotlin-NOTICE.txt

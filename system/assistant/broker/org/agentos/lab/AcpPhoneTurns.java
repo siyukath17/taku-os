@@ -33,7 +33,7 @@ final class AcpPhoneTurns {
         Hooks h = hooks;
         if (h != null) try {
             h.started(thread, turn);
-        } catch (Exception failure) {
+        } catch (Exception | LinkageError failure) {
             System.err.println("acp phone turn start: " + failure.getMessage());
         }
     }
@@ -45,7 +45,7 @@ final class AcpPhoneTurns {
         Hooks h = hooks;
         if (h != null) try {
             h.ended(thread, turn);
-        } catch (Exception failure) {
+        } catch (Exception | LinkageError failure) {
             System.err.println("acp phone turn end: " + failure.getMessage());
         }
     }

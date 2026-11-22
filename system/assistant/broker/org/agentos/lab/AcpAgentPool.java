@@ -187,7 +187,7 @@ final class AcpAgentPool {
                         }
                     }
                     if (line.length() > 0) inbox.put(line.toString());
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                     // A broken pipe is the agent going away: report EOF below.
                 } finally {
                     eof = true;
@@ -205,7 +205,7 @@ final class AcpAgentPool {
                         stderrTail.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
                         if (stderrTail.length() > 8192) stderrTail.delete(0, stderrTail.length() - 8192);
                     }
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                     // Diagnostics only.
                 }
             }, "acp-stderr");
@@ -409,7 +409,14 @@ final class AcpAgentPool {
             warmingFingerprint = fingerprint;
         }
         if (stale != null) retire(stale, "replaced-by-prewarm");
-        Thread worker = new Thread(() -> warm(launch, fingerprint, stampNow, reason), "acp-prewarm");
+        Thread worker = new Thread(() -> {
+            try {
+                warm(launch, fingerprint, stampNow, reason);
+            } catch (Throwable unexpected) {
+                // Never fatal to the broker: an uncaught throwable kills its app_process.
+                System.err.println("acp prewarm: " + unexpected);
+            }
+        }, "acp-prewarm");
         worker.setDaemon(true);
         worker.start();
     }
@@ -431,7 +438,7 @@ final class AcpAgentPool {
             agent.warmedUp = true;
             warmed.incrementAndGet();
             System.err.println("acp prewarm (" + reason + ") ready in " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin) + "ms");
-        } catch (Exception failed) {
+        } catch (Exception | LinkageError failed) {
             System.err.println("acp prewarm (" + reason + ") failed: " + failed);
             if (agent != null) retire(agent, "prewarm-failed");
             agent = null;
@@ -515,7 +522,11 @@ final class AcpAgentPool {
                 } catch (InterruptedException interrupted) {
                     return;
                 }
-                reap();
+                try {
+                    reap();
+                } catch (Throwable unexpected) {
+                    System.err.println("acp pool reaper: " + unexpected);
+                }
                 synchronized (this) {
                     if (idle == null && !warming) {
                         reaper = null;
