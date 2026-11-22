@@ -130,12 +130,12 @@ public final class AcpWarmPoolTest {
         JSONObject hit = timings(t2, "warm_hit");
         check(hit.has("pingMs") && !hit.has("initializeMs"), "warm hit: the probe is timed, no handshake: " + hit);
         check(env.agent.methods("$/ping").size() == 1, "turn 2: the warm process was probed before reuse");
-        List<JSONObject> loads = env.agent.methods("session/load");
-        check(loads.size() == 1 && "s-1".equals(loads.get(0).getJSONObject("params").getString("sessionId")),
-                "turn 2: the conversation's session is loaded in the warm process");
-        String first = phoneServer(env.agent.methods("session/new").get(0)).toString();
-        String second = phoneServer(loads.get(0)).toString();
-        check(first.equals(second), "turn 2: the phone MCP declaration is identical (agy keeps one relay): " + first + " vs " + second);
+        check(env.agent.methods("session/load").isEmpty() && info(t2).getBoolean("sessionKept")
+                && info(t2).getBoolean("sessionResumed") && "s-1".equals(info(t2).getString("sessionId")),
+                "turn 2: the process still holds the conversation's session: kept, not loaded again");
+        List<JSONObject> prompts = env.agent.methods("session/prompt");
+        check(prompts.size() == 2 && "s-1".equals(prompts.get(1).getJSONObject("params").getString("sessionId")),
+                "turn 2: prompted in the kept session");
         // Explicit, per-turn release while the MCP connection (the process) lives on.
         String turn1 = env.host.store.turns(CONV).getJSONObject(0).getString("id");
         String turn2 = env.host.store.turns(CONV).getJSONObject(1).getString("id");
@@ -493,9 +493,63 @@ public final class AcpWarmPoolTest {
         }
     }
 
+    private static JSONObject backgroundTask(String id) {
+        return new JSONObject().put("id", id).put("prompt", "background").put("permissionMode", "full")
+                .put("screenshot", "").put("includeScreenshot", false);
+    }
+
+    /**
+     * A warm process keeps the session it prepared: the conversation's next turn skips session/load
+     * and the repeated set_config_option. Another session in between, or another MCP declaration,
+     * loads it again (with the same phone relay declaration).
+     */
+    static void keptSessionOnWarmProcess() throws Exception {
+        PhoneTurnLog.clear();
+        Env env = new Env(new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL), TimeUnit.MINUTES.toMillis(5));
+        env.agent.configOptions = AcpModelCatalogTest.agyConfigOptions();
+        File t1 = env.run("801", "first");
+        check(env.agent.methods("session/new").size() == 1 && env.agent.methods("session/set_config_option").size() == 1
+                && "medium".equals(info(t1).getString("effort")), "turn 1: new session, effort set to medium once");
+        File t2 = env.run("802", "second");
+        check(env.agent.methods("session/load").isEmpty() && env.agent.methods("session/set_config_option").size() == 1,
+                "turn 2: kept session: no load, no repeated set_config_option");
+        check(info(t2).getBoolean("sessionKept") && "medium".equals(info(t2).getString("effort"))
+                && "gemini-4-neon".equals(info(t2).getString("model")), "turn 2: the kept session's own values: " + info(t2));
+        check(timings(t2, "warm_hit").getLong("sessionPrepareMs") <= timings(t1, "cold_start").getLong("sessionPrepareMs") + 5,
+                "turn 2: nothing to prepare");
+        // A background task's session in between: the conversation is loaded again.
+        env.agent.newSessionIds.add("s-9");
+        File bg = taskDir("803");
+        Files.write(new File(bg, "ready").toPath(), new byte[0]);
+        env.runtime().run(bg, backgroundTask("803"));
+        check("completed".equals(read(bg, "done")) && env.agent.launches.size() == 1, "background task: same warm process");
+        File t3 = env.run("804", "third");
+        List<JSONObject> loads = env.agent.methods("session/load");
+        check(loads.size() == 1 && "s-1".equals(loads.get(0).getJSONObject("params").getString("sessionId"))
+                && !info(t3).has("sessionKept"), "turn 3: another session in between: loaded again");
+        String created = phoneServer(env.agent.methods("session/new").get(0)).toString();
+        check(created.equals(phoneServer(loads.get(0)).toString()), "turn 3: the same phone MCP declaration as session/new");
+        check("completed".equals(read(t3, "done")) && read(t3, "result.txt").contains("Done"), "turn 3: completes after the load: " + read(t3, "result.txt"));
+        // runtime.json adds an MCP server: the kept session lacks it, so it is loaded with the new list.
+        File t4 = env.run("805", "fourth");
+        check(env.agent.methods("session/load").size() == 1 && info(t4).getBoolean("sessionKept"), "turn 4: kept again after turn 3's load");
+        AcpRuntime.Options more = options(env.binary);
+        more.mcpServers = new JSONArray().put(new JSONObject().put("name", "extra").put("command", "/bin/true")
+                .put("args", new JSONArray()).put("env", new JSONArray()));
+        File t5 = taskDir("806");
+        Files.write(new File(t5, "ready").toPath(), new byte[0]);
+        new AcpRuntime(more, env.agent, null, null, env.host, env.pool).run(t5, chat("806", "fifth"));
+        loads = env.agent.methods("session/load");
+        check(loads.size() == 2 && loads.get(1).getJSONObject("params").getJSONArray("mcpServers").length() == 2
+                && !info(t5).has("sessionKept"), "turn 5: another MCP declaration: loaded again with it");
+        check(env.agent.launches.size() == 1, "one warm process throughout: launches=" + env.agent.launches.size());
+        env.pool.invalidate("test");
+    }
+
     public static void main(String[] args) throws Exception {
         PhoneTurnLog.install();
         firstChunkIsModelOutput();
+        keptSessionOnWarmProcess();
         reuseAcrossTurns();
         prewarmThenFirstTurn();
         takeWaitsForWarming();

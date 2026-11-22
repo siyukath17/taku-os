@@ -328,6 +328,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 }
                 case "session/prompt":
                     if (scenario.name().startsWith("STEER") && promptId != null) return steer(message);
+                    // Like agy: a session the process holds is prompted (and answered) by its own id,
+                    // whether or not it was the last one created or loaded.
+                    currentSession = message.getJSONObject("params").optString("sessionId", currentSession);
                     promptId = id;
                     if (scenario.name().startsWith("SUBAGENTS") && prompts++ > 0) {
                         // The follow-up prompt: the parent reads the reports and answers.

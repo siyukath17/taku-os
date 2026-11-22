@@ -1,5 +1,6 @@
 package org.agentos.lab;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -83,6 +84,15 @@ final class AcpAgentPool {
          */
         volatile boolean waitedForWarm;
         volatile long takeMillis = -1, pingMillis = -1;
+        /**
+         * The session this process last prepared for a turn ({@code sessionId + "\n" + mcpServers}) and its
+         * configOptions after the model / effort selection. A follow-up turn of the same conversation
+         * with the same MCP declaration keeps that session instead of loading it again: agy keeps a
+         * session in memory after its prompt ends, and {@code session/load} costs ~150ms plus a history
+         * replay on the Pixel 9. Cleared while a turn prepares; set once the session is ready.
+         */
+        volatile String preparedSession;
+        volatile JSONArray preparedConfig;
 
         Agent(AcpProcessTransport.Connection connection, String fingerprint, String stamp) {
             this(connection, fingerprint, stamp, "");

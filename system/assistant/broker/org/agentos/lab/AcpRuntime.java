@@ -902,9 +902,21 @@ final class AcpRuntime implements TaskRuntime {
                 boolean resumed = false;
                 String loadFailure = "";
                 long sessionBegin = System.nanoTime();
+                // The same declaration session/load or session/new gets (and what a kept session had).
+                JSONArray servers = mcpServers();
+                String prepared = agent.preparedSession;
+                JSONArray preparedConfig = agent.preparedConfig;
+                agent.preparedSession = null;
+                agent.preparedConfig = null;
+                boolean kept = false;
                 // A chat (or an automatic continuation) resumes its previous agent session when the
                 // agent can load it.
-                if (!resumeSession.isEmpty()) {
+                if (!resumeSession.isEmpty() && (resumeSession + "\n" + servers).equals(prepared)) {
+                    // This process prepared the very session (same MCP declaration) for an earlier turn
+                    // and still holds it: no session/load, no history replay.
+                    sessionId = resumeSession;
+                    resumed = kept = true;
+                } else if (!resumeSession.isEmpty()) {
                     if (capabilities != null && capabilities.optBoolean("loadSession")) {
                         try {
                             // History replayed by session/load arrives while sessionId is still empty,
@@ -912,7 +924,7 @@ final class AcpRuntime implements TaskRuntime {
                             call("session/load", new JSONObject()
                                     .put("sessionId", resumeSession)
                                     .put("cwd", options.cwd)
-                                    .put("mcpServers", mcpServers()));
+                                    .put("mcpServers", servers));
                             sessionId = resumeSession;
                             resumed = true;
                         } catch (AcpError error) {
@@ -925,13 +937,15 @@ final class AcpRuntime implements TaskRuntime {
                     } else loadFailure = "loadSession unsupported";
                 }
                 JSONArray configOptions = null;
-                if (resumed) configOptions = AcpModelCatalog.stored(options.modelCatalog, options.binary);
+                // A kept session's own values (what set_config_option left); a loaded one starts from the catalog.
+                if (kept) configOptions = preparedConfig == null ? null : new JSONArray(preparedConfig.toString());
+                else if (resumed) configOptions = AcpModelCatalog.stored(options.modelCatalog, options.binary);
                 if (!resumed) {
                     JSONObject session;
                     try {
                         session = call("session/new", new JSONObject()
                                 .put("cwd", options.cwd)
-                                .put("mcpServers", mcpServers()));
+                                .put("mcpServers", servers));
                     } catch (AcpError error) {
                         if (error.code == AUTH_REQUIRED) {
                             needsUser(authMethods);
@@ -947,6 +961,8 @@ final class AcpRuntime implements TaskRuntime {
                 long configBegin = System.nanoTime();
                 configOptions = applyModelSelection(configOptions);
                 if (timings.configOptionMs < 0) timings.configOptionMs = Timings.millisSince(configBegin);
+                agent.preparedConfig = configOptions == null ? null : new JSONArray(configOptions.toString());
+                agent.preparedSession = sessionId + "\n" + servers;
                 info = new JSONObject()
                         .put("taskId", id)
                         .put("runtime", "acp")
@@ -977,6 +993,7 @@ final class AcpRuntime implements TaskRuntime {
                     // The chat page reads threadId/turnId like a Codex chat turn's runtime-info.
                     info.put("threadId", chat.conversationId).put("conversationId", chat.conversationId)
                             .put("turnId", chat.turnId).put("sessionResumed", resumed);
+                    if (kept) info.put("sessionKept", true);
                     if (!loadFailure.isEmpty()) info.put("sessionLoadFailure", loadFailure);
                     if (!resumed && !chat.transcript.isEmpty())
                         text = "Earlier messages in this conversation, for context (the previous agent session could not be resumed):\n"

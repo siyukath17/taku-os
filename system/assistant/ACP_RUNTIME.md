@@ -174,6 +174,16 @@ keeps **one** warm process (~240MB) between turns:
 - **Reuse.** A turn takes the warm process after a probe (agy answers an unknown
   method with -32601 at once); a dead or silent one is destroyed and the turn starts
   cold. `runtime-info.json` records `agentProcess: warm|cold`.
+- **Kept session.** The process remembers the session it last prepared (session id + MCP
+  declaration) and the configOptions after the model / effort selection. The next turn of the same
+  conversation on that process prompts it directly: no `session/load` (~150ms and a history replay
+  on the Pixel 9) and no repeated `session/set_config_option` (agy's default effort is `high`, ours
+  `medium`). Another session in between, another MCP declaration or a new process loads as before.
+  `runtime-info.json` then has `sessionKept: true`.
+- **Claim.** The broker loop pauses 150ms between passes over `tasks/`; a FileObserver on
+  `tasks/` (CREATE / MOVED_TO) reports a new task directory and the pause ends within 5ms of its
+  `ready` mark (`TaskWake`). Closed task directories (`done`) are remembered and not stat'ed again,
+  so a pass over ~800 records is one listing (~1ms) instead of ~10ms of stats.
 - **Timings.** `runtime-info.json` carries `timings` (milliseconds; unset keys are left out,
   `promptToFirstToolMs` is `null` when no tool was called), rewritten when the prompt is sent, on
   the first model output / text / tool and at the end:

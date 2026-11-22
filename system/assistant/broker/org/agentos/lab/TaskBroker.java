@@ -15,6 +15,15 @@ public final class TaskBroker {
     static java.nio.channels.FileLock guardLock;
     static final File ROOT = new File("/data/user/0/org.agentos.assistant/files/runtime"),
             TASKS = new File(ROOT, "tasks");
+    /** Cuts the loop's pause short when a task is published (see {@link TaskWake}). */
+    static final TaskWake TASK_WAKE = new TaskWake(TASKS);
+    /** Kept referenced: a collected FileObserver stops watching. */
+    static android.os.FileObserver taskObserver;
+    /**
+     * Task directories already closed with {@code done} (a mark never removed): skipped without a stat,
+     * so a pass over ~800 records costs one listing instead of ~10ms of stats every 150ms.
+     */
+    static final Set<String> CLOSED = ConcurrentHashMap.newKeySet();
 
     static void retirePanelCapabilities() {
         File markers = new File(ROOT, "panel-tools");
@@ -281,6 +290,14 @@ public final class TaskBroker {
         }, "acp-prewarm-start");
         warmup.setDaemon(true);
         warmup.start();
+        try {
+            taskObserver = new android.os.FileObserver(TASKS, android.os.FileObserver.CREATE | android.os.FileObserver.MOVED_TO) {
+                @Override public void onEvent(int event, String path) { TASK_WAKE.created(path); }
+            };
+            taskObserver.startWatching();
+        } catch (Exception | LinkageError unavailable) {
+            System.err.println("task watch unavailable: " + unavailable);
+        }
         for (; ; ) {
             // Nothing a task, a damaged record or a runtime does may end this loop: it is the broker.
             try {
@@ -290,8 +307,19 @@ public final class TaskBroker {
             }
             // tick() never throws: a Codex app server exit is logged and retired, not fatal here.
             CodexAppServer.tick();
-            Thread.sleep(150);
+            TASK_WAKE.await(150);
         }
+    }
+
+    /** A published task not closed yet; a closed one is remembered in {@link #CLOSED} and never stat'ed again. */
+    static boolean open(File dir) {
+        String name = dir.getName();
+        if (CLOSED.contains(name)) return false;
+        if (new File(dir, "done").exists()) {
+            CLOSED.add(name);
+            return false;
+        }
+        return dir.isDirectory() && new File(dir, "ready").exists();
     }
 
     /** One pass over ready tasks; each task's failure is recorded on that task alone. */
@@ -299,10 +327,11 @@ public final class TaskBroker {
             File[] dirs = TASKS.listFiles();
             if (dirs != null) {
                 Arrays.sort(dirs, Comparator.comparing(File::getName));
+                Set<String> present = new HashSet<>();
+                for (File dir : dirs) present.add(dir.getName());
+                CLOSED.retainAll(present);
                 for (File dir : dirs) {
-                    if (!dir.isDirectory()
-                            || !new File(dir, "ready").exists()
-                            || new File(dir, "done").exists()) continue;
+                    if (!open(dir)) continue;
                     try {
                         run(dir);
                     } catch (Exception | LinkageError e) {
@@ -354,9 +383,7 @@ public final class TaskBroker {
             File[] directories = TASKS.listFiles();
             if (directories == null) return;
             for (File directory : directories) {
-                if (!directory.isDirectory()
-                        || !new File(directory, "ready").exists()
-                        || new File(directory, "done").exists()) continue;
+                if (!open(directory)) continue;
                 JSONObject request;
                 try {
                     request = new JSONObject(read(new File(directory, "request.json")));
