@@ -707,6 +707,9 @@ public final class CodexAppServer implements AutoCloseable {
                 TaskBroker.write(new File(directory, "done"), "control");
                 return;
             }
+            // A removed ACP conversation (or, on ACP with Codex idle, a thread nobody knows) is
+            // answered here: asking would cold-start the Codex app server for a thread it never had.
+            AcpConversations.requireThreadAvailable(request.optJSONObject("params"), shared != null);
             CodexAppServer server;
             try {
                 server = AcpConversations.listsWithoutCodex(method, shared != null)
@@ -825,6 +828,7 @@ public final class CodexAppServer implements AutoCloseable {
             answer.put("ok", true).put("result", result);
         } catch (Exception error) {
             answer.put("ok", false).put("message", NativeBridge.publicError(error));
+            if ("THREAD_UNAVAILABLE".equals(error.getMessage())) answer.put("code", "THREAD_UNAVAILABLE");
         }
         TaskBroker.write(new File(directory, "response.json"), answer.toString());
         TaskBroker.write(new File(directory, "done"), "control");

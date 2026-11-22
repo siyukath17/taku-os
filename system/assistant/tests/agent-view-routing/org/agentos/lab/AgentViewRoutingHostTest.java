@@ -190,8 +190,52 @@ public final class AgentViewRoutingHostTest {
                 .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", text)));
     }
 
+    /**
+     * The chat page keeps polling thread/read for a conversation the user just deleted: the real
+     * bridge answers THREAD_UNAVAILABLE without a Codex start or request and the projection stays gone.
+     */
+    private static void removedAcpConversationReadNeverStartsCodex() throws Exception {
+        CodexAppServer server = CodexAppServer.shared;
+        JSONObject thread = thread("acp");
+        String id = thread.getString("id");
+        AgentViews.save(thread);
+        AgentViews.remove(id);
+        AcpConversations.REMOVED.add(id);
+        try {
+            for (CodexAppServer current : new CodexAppServer[]{null, server}) {
+                CodexAppServer.shared = current;
+                CodexAppServer.coldStarts.clear();
+                int sent = server.nextRequest;
+                CompletableFuture<JSONObject> pending = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return NativeBridge.askCodex("thread/read", new JSONObject().put("threadId", id).put("includeTurns", true));
+                    } catch (Exception failure) {
+                        throw new CompletionException(failure);
+                    }
+                });
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                while (!pending.isDone() && System.nanoTime() < end) { NativeBridge.tick(); Thread.sleep(2); }
+                String code = "";
+                try { pending.get(1, TimeUnit.SECONDS); }
+                catch (java.util.concurrent.ExecutionException failure) {
+                    Throwable cause = failure.getCause();
+                    while (cause.getCause() != null) cause = cause.getCause();
+                    code = String.valueOf(cause.getMessage());
+                }
+                check("THREAD_UNAVAILABLE".equals(code), "removed conversation thread/read: THREAD_UNAVAILABLE, got " + code);
+                check(CodexAppServer.coldStarts.isEmpty() && server.nextRequest == sent && NativeBridge.calls.isEmpty(),
+                        "removed conversation thread/read: zero Codex starts and requests");
+                check(AgentViews.snapshot(id) == null, "removed conversation projection stays gone");
+            }
+        } finally {
+            AcpConversations.REMOVED.clear();
+            CodexAppServer.shared = server;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         CodexAppServer.shared = new CodexAppServer();
+        removedAcpConversationReadNeverStartsCodex();
         steeredTurnKeepsEveryUserMessageInOrder();
         nativeReadKeepsChildIdentity();
         refreshAndReloadKeepChildIdentity();
@@ -199,6 +243,6 @@ public final class AgentViewRoutingHostTest {
         ordinarySourcesAndExplicitReplacement();
         sourceIsCopiedAndTotalLimitStillApplies();
         threadsIndexIsNewestUpdatedFirst();
-        System.out.println("PASS AgentViewRoutingHostTest: " + checks + " checks, 6 cases");
+        System.out.println("PASS AgentViewRoutingHostTest: " + checks + " checks, 7 cases");
     }
 }

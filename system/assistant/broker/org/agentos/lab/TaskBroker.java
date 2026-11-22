@@ -316,6 +316,14 @@ public final class TaskBroker {
             notifyUser(r.getString("id"));
             return;
         }
+        if (AcpConversations.removed(r.optString("conversationId", ""))) {
+            // A removed ACP conversation never runs again (Continue, a queued turn): no display, no
+            // runtime, and above all no Codex app server start for a thread it never had.
+            state(dir, r, "failed", "THREAD_UNAVAILABLE");
+            write(new File(dir, "done"), "failed");
+            notifyUser(r.getString("id"));
+            return;
+        }
         state(dir, r, "running", "Preparing the independent execution screen…");
         notifyUser(r.getString("id"));
         Thread.sleep(700);

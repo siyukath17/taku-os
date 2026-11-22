@@ -7,7 +7,7 @@ import {onComposerAttachment, pickComposerAttachment, type ComposerPickerKind} f
 import {continuedSessionRoot, projectSession, projectThreads, projectWorkspaces, record, string, type Json, type SessionView, type ThreadSummary, type WorkspaceView} from '../model/session';
 import {isAcceptedReceipt, isNotSentReceipt, pendingKey, preserveAndReleaseUnconfirmed, unconfirmedArchivePrefix, type PendingSubmission} from './submission';
 import {ComposerDraft, isDraftRevisionConflict, parseComposerSnapshot, type ComposerSnapshot, type ComposerSubmission} from './composerDraft';
-import {readCurrent, restoreConversation} from './readLifecycle';
+import {isThreadUnavailable, onConversationRemoved, readCurrent, restoreConversation, selectionAfterRemoval} from './readLifecycle';
 import {sessionReadOptions} from './sessionRead';
 import {emptySessionStream, reduceSessionBatch, retainSessionBlocks, streamCursor, streamSessionRoot, sessionRootForDisplay, reconcileStreamHistory} from '../model/sessionStream';
 import {acceptOptimisticReceipt, beginOptimisticSubmission, reconcileOptimisticSubmission, recoverQueuedSubmission, FIRST_RESPONSE_TIMEOUT_MS, type OptimisticSubmission} from '../model/optimisticChat';
@@ -297,6 +297,27 @@ export function useAgentController() {
     }
   }, []);
 
+  // A removed conversation (deleted here or elsewhere) is left at once: the newest remaining one,
+  // else a new conversation. Unconfirmed THREAD_UNAVAILABLE asks the index first.
+  const leaveRemoved = useCallback(async (removed: string, confirmed: boolean) => {
+    if (!mounted.current || !removed || selectedRef.current !== removed) return;
+    const ticket = generation.current;
+    let threads: ThreadSummary[] = [];
+    try { threads = await loadThreads(); } catch { if (!confirmed) return; }
+    if (!mounted.current || generation.current !== ticket || selectedRef.current !== removed) return;
+    const next = selectionAfterRemoval(removed, threads, confirmed);
+    if (next === null) return;
+    if (actionRunning.current) { if (next) pendingOpen.current = next; return; }
+    await select(next);
+  }, [loadThreads, select]);
+
+  useEffect(() => {
+    const subscription = onConversationRemoved(id => {
+      void leaveRemoved(id, true).catch(e => { if (mounted.current) setError(messageRef.current(e)); });
+    });
+    return () => subscription.remove();
+  }, [leaveRemoved]);
+
   const hide = useCallback(() => {
     const saved = draftReady.current ? composer(selectedRef.current).flush() : Promise.resolve();
     void saved.catch(() => {}).then(() => closeAgent()).catch(e => {
@@ -446,7 +467,10 @@ export function useAgentController() {
           if (next.ready) setSelectionError('');
           setReadError(next.ready && !stream.failed ? '' : messageRef.current(new AgentGatewayError('Runtime unavailable', 'RUNTIME_UNAVAILABLE')));
         },
-        reject: problem => { ++failures; setReadError(messageRef.current(problem)); },
+        reject: problem => {
+          ++failures; setReadError(messageRef.current(problem));
+          if (isThreadUnavailable(problem)) void leaveRemoved(selected, false).catch(() => {});
+        },
         settled: () => setLoading(false),
       });
       if (isCurrent()) timer = setTimeout(poll, failures ? Math.min(15000, 2500 * failures)
@@ -454,7 +478,7 @@ export function useAgentController() {
     };
     void poll();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [selected, visible, refreshRevision, reconcileOptimistic]);
+  }, [selected, visible, refreshRevision, reconcileOptimistic, leaveRemoved]);
 
   useEffect(() => {
     if (!selected || !visible) return;

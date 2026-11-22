@@ -14,6 +14,8 @@ mkdir -p "$task_out/classes"
  system/assistant/broker/org/agentos/lab/TaskRecords.java \
  system/assistant/broker/org/agentos/lab/AcpConversationStore.java \
  system/assistant/broker/org/agentos/lab/AcpSessionRemovals.java \
+ system/assistant/broker/org/agentos/lab/AcpCodexGate.java \
+ system/assistant/tests/session-removals/org/agentos/lab/RuntimeRouter.java \
  system/assistant/tests/session-removals/org/agentos/lab/AcpSessionRemovalsTest.java \
  system/assistant/tests/session-removals/org/agentos/lab/SessionRemovalsTest.java \
  system/assistant/tests/session-removals/org/agentos/lab/SessionRemovalsRoundRobinTest.java

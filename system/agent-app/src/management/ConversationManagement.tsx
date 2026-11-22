@@ -1,5 +1,6 @@
 import {useCallback, useState} from 'react';
 import {newRequestId} from '../native/agent';
+import {notifyConversationRemoved} from '../hooks/readLifecycle';
 import {Button, Card, confirm, Copy, Details, Field, manage, Status, useManagementData} from './controls';
 
 type ConversationTitle = {threadId: string; name: string | null; title: string};
@@ -253,6 +254,8 @@ export function ConversationCleanupPanel({threadId}: {threadId?: string}) {
     () => void run(async () => {
       const receipt = await manage<CleanupReceipt>('sessions/removals', {action: 'submit', threadId: id, target});
       setData(previous => ({data: [receipt, ...(previous?.data ?? []).filter(row => row.threadId !== id)]}));
+      // The chat leaves the deleted conversation now instead of polling it until the next launch.
+      if (target === 'delete' && receipt.accepted) notifyConversationRemoved(id);
     }), target === 'delete');
   return <>
     <Status busy={busy} error={error}/>

@@ -445,3 +445,60 @@ for (const [code, english] of [
     assert.equal(runtime.storage.has(pendingKey('thread-a')), false);
   });
 }
+
+test('deleting the open conversation leaves it at once and stops reading it', async t => {
+  reset(t);
+  runtime.target = null;
+  const {notifyConversationRemoved} = await import('./readLifecycle.ts');
+  const host = mount(); await flush(host);
+  assert.equal(host.result.draftSessionId, 'thread-a');
+  const reads = [];
+  const base = runtime.callAgent;
+  runtime.callAgent = async (action, params = {}) => {
+    if (action === 'readSession') reads.push(params.threadId);
+    if (action === 'listThreads') return {threads: [{id: 'thread-b'}]};
+    if (action === 'readSession' && params.threadId === 'thread-a') {
+      const {AgentGatewayError} = await import('../native/agent');
+      throw new AgentGatewayError('THREAD_UNAVAILABLE', 'THREAD_UNAVAILABLE');
+    }
+    return base(action, params);
+  };
+  notifyConversationRemoved('thread-a');
+  await flush(host);
+  assert.equal(host.result.draftSessionId, 'thread-b');
+  assert.equal(runtime.storage.get('taku.agent.selected.v1'), 'thread-b', 'relaunch no longer restores the deleted conversation');
+  const before = reads.filter(id => id === 'thread-a').length;
+  await flush(host);
+  assert.equal(reads.filter(id => id === 'thread-a').length, before, 'no further reads of the deleted conversation');
+});
+
+test('a THREAD_UNAVAILABLE read of a conversation missing from the index switches away', async t => {
+  reset(t);
+  runtime.target = null;
+  const base = runtime.callAgent;
+  runtime.callAgent = async (action, params = {}) => {
+    if (action === 'listThreads') return {threads: [{id: 'thread-b'}]};
+    if (action === 'readSession' && params.threadId === 'thread-a') {
+      const {AgentGatewayError} = await import('../native/agent');
+      throw new AgentGatewayError('THREAD_UNAVAILABLE', 'THREAD_UNAVAILABLE');
+    }
+    return base(action, params);
+  };
+  const host = mount(); await flush(host);
+  assert.equal(host.result.draftSessionId, 'thread-b');
+});
+
+test('a transient THREAD_UNAVAILABLE for a listed conversation keeps the selection', async t => {
+  reset(t);
+  runtime.target = null;
+  const base = runtime.callAgent;
+  runtime.callAgent = async (action, params = {}) => {
+    if (action === 'readSession' && params.threadId === 'thread-a') {
+      const {AgentGatewayError} = await import('../native/agent');
+      throw new AgentGatewayError('THREAD_UNAVAILABLE', 'THREAD_UNAVAILABLE');
+    }
+    return base(action, params);
+  };
+  const host = mount(); await flush(host);
+  assert.equal(host.result.draftSessionId, 'thread-a');
+});

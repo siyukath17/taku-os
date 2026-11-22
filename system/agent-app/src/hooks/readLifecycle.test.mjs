@@ -80,3 +80,20 @@ test('late success and failure from a previous thread are both ignored', async (
     assert.deepEqual(calls, []);
   }
 });
+
+test('a removed conversation is left for the newest remaining one, else a new conversation', async () => {
+  const {selectionAfterRemoval, isThreadUnavailable, notifyConversationRemoved, onConversationRemoved} = await import('./readLifecycle.ts');
+  assert.equal(selectionAfterRemoval('gone', [{id: 'newest'}, {id: 'older'}], false), 'newest');
+  assert.equal(selectionAfterRemoval('gone', [{id: 'gone'}, {id: 'kept'}], true), 'kept');
+  assert.equal(selectionAfterRemoval('gone', [], false), '');
+  // An unconfirmed THREAD_UNAVAILABLE for a thread the fresh index still lists is transient.
+  assert.equal(selectionAfterRemoval('listed', [{id: 'listed'}, {id: 'other'}], false), null);
+  assert.equal(selectionAfterRemoval('', [{id: 'other'}], true), null);
+  assert.equal(isThreadUnavailable({code: 'THREAD_UNAVAILABLE'}), true);
+  assert.equal(isThreadUnavailable({code: 'RUNTIME_UNAVAILABLE'}), false);
+  assert.equal(isThreadUnavailable(null), false);
+  const seen = [], subscription = onConversationRemoved(id => seen.push(id));
+  notifyConversationRemoved('gone'); notifyConversationRemoved('');
+  subscription.remove(); notifyConversationRemoved('later');
+  assert.deepEqual(seen, ['gone']);
+});

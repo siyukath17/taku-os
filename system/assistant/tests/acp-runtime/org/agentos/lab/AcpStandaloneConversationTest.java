@@ -311,8 +311,51 @@ public final class AcpStandaloneConversationTest {
         check("Weekend trip".equals(host.store.name(id)), "a rejected rename keeps the title");
     }
 
+    /**
+     * A removed (tombstoned) ACP conversation, and on ACP with Codex idle a thread nobody knows, is
+     * refused before the Codex app server is reached; every thread-scoped entry (thread/read,
+     * thread/name/set, thread/resume, steer, interrupt) shares this one gate.
+     */
+    static void removedConversationNeverReachesCodex() throws Exception {
+        File root = temp("removed-gate");
+        Host host = new Host(new File(root, "acp-conversations"));
+        String id = host.store.startNew();
+        RuntimeRouter.Route acp = new RuntimeRouter.Route(RuntimeRouter.ACP, "acp", "selected-by-config", new JSONObject());
+        RuntimeRouter.Route codex = new RuntimeRouter.Route(RuntimeRouter.CODEX, "codex", "selected-by-config", null);
+        int[] routeAsks = {0};
+        AcpCodexGate.RouteSource acpRoute = () -> { routeAsks[0]++; return acp; };
+        AcpCodexGate.RouteSource codexRoute = () -> { routeAsks[0]++; return codex; };
+
+        check(!AcpCodexGate.unavailableWithoutCodex(id, host.store, false, false, acpRoute), "live standalone: its own path");
+        host.store.remove(id);
+        check(host.store.removed(id) && !host.store.owns(id), "removal tombstones the conversation");
+        for (boolean running : new boolean[]{false, true}) for (boolean known : new boolean[]{false, true})
+            for (AcpCodexGate.RouteSource route : new AcpCodexGate.RouteSource[]{acpRoute, codexRoute})
+                check(AcpCodexGate.unavailableWithoutCodex(id, host.store, known, running, route),
+                        "removed: THREAD_UNAVAILABLE (codexRunning=" + running + ", known=" + known + ")");
+        check(routeAsks[0] == 0, "removed: decided without reading runtime.json");
+        check(AcpCodexGate.unavailableWithoutCodex(id, new AcpConversationStore(new File(root, "acp-conversations")), false, false, codexRoute),
+                "removed survives a broker restart");
+        check("THREAD_UNAVAILABLE".equals(failure(() -> AcpConversationStore.readAnswer(id, null))), "no ACP read answer either");
+        check("THREAD_UNAVAILABLE".equals(failure(() -> host.store.rename(id, "x"))), "rename refused");
+        check("THREAD_UNAVAILABLE".equals(failure(() -> AcpTurnControl.interrupt(host.store, new File(root, "tasks"), id, "acp-1"))),
+                "interrupt refused");
+
+        String unknown = "33333333-2222-4333-8444-555555555555";
+        check(AcpCodexGate.unavailableWithoutCodex(unknown, host.store, false, false, acpRoute), "ACP, Codex idle, unknown: refused");
+        check(!AcpCodexGate.unavailableWithoutCodex(unknown, host.store, true, false, acpRoute), "known Codex conversation: Codex path");
+        check(!AcpCodexGate.unavailableWithoutCodex(unknown, host.store, false, true, acpRoute), "running Codex: asked (no start)");
+        check(!AcpCodexGate.unavailableWithoutCodex(unknown, host.store, false, false, codexRoute), "Codex default: Codex path");
+        check(!AcpCodexGate.unavailableWithoutCodex(unknown, host.store, false, false, () -> null), "no route: Codex path");
+        check(!AcpCodexGate.unavailableWithoutCodex("", host.store, false, false, acpRoute), "no threadId: not thread-scoped");
+        String codexBorn = "44444444-2222-4333-8444-555555555555";
+        host.store.bindSession(codexBorn, "session-2", null);
+        check(!AcpCodexGate.unavailableWithoutCodex(codexBorn, host.store, false, false, acpRoute), "ACP-owned conversation: its path");
+    }
+
     public static void main(String[] args) throws Exception {
         standaloneStartReadListAndFirstTurn();
+        removedConversationNeverReachesCodex();
         renameStandaloneWithoutCodex();
         codexDefaultKeepsCodex();
         chatPageStop();

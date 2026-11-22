@@ -332,8 +332,27 @@ public final class CodexTaskOwnershipTest {
             NativeBridge.inbox.clear(); NativeBridge.requests.clear(); NativeBridge.state.clear(); NativeBridge.phonePermissions.clear();
         }
     }
+    /** agent_control calls naming a removed ACP conversation answer THREAD_UNAVAILABLE without starting Codex. */
+    private static void removedAcpConversationControl() throws Exception {
+        TaskBroker.ROOT=Files.createTempDirectory("removed-acp-control-").toFile();
+        String removed="66666666-2222-4333-8444-555555555555";
+        CodexAppServer previous=CodexAppServer.shared;CodexAppServer.shared=null;AcpConversations.REMOVED.add(removed);
+        try{
+            for(String method:new String[]{"thread/read","thread/name/set","harness/read","harness/refresh","skills/read"}){
+                File directory=new File(new File(TaskBroker.ROOT,"tasks"),"control-"+method.replace('/','-'));directory.mkdirs();
+                CodexAppServer.control(directory,new JSONObject().put("kind","agent_control").put("method",method)
+                    .put("params",new JSONObject().put("threadId",removed).put("name","x")));
+                JSONObject answer=new JSONObject(TaskBroker.read(new File(directory,"response.json")));
+                check(!answer.getBoolean("ok")&&"THREAD_UNAVAILABLE".equals(answer.optString("code"))
+                    &&"THREAD_UNAVAILABLE".equals(answer.optString("message")),"removed "+method+": THREAD_UNAVAILABLE "+answer);
+                check(CodexAppServer.shared==null,"removed "+method+": Codex app server not started");
+            }
+        }finally{AcpConversations.REMOVED.clear();CodexAppServer.shared=previous;}
+    }
+
     public static void main(String[] args) throws Exception {
         if(args.length>0&&args[0].equals("runtime")){runtime();return;}
+        removedAcpConversationControl();
         ownership("success");ownership("conflict");ownership("reject");
         liveTaskControl("replace");
         liveTaskControl("cancel");

@@ -40,6 +40,13 @@ final class AcpConversations {
     static JSONObject nativeModels(String method) { return null; }
     static void publishAll() {}
 
+    /** Conversations a test marks as removed ACP conversations (tombstoned in production). */
+    static final java.util.Set<String> REMOVED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    static boolean removed(String id) { return REMOVED.contains(id); }
+    static void requireThreadAvailable(JSONObject params, boolean codexRunning) throws java.io.IOException {
+        if (params != null && REMOVED.contains(params.optString("threadId"))) throw new java.io.IOException("THREAD_UNAVAILABLE");
+    }
+
     static JSONObject read(String id) { throw outside("thread/read"); }
     static JSONObject rename(JSONObject params) { throw outside("thread/name/set"); }
     static JSONObject start() { throw outside("thread/start"); }

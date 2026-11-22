@@ -352,6 +352,14 @@ picker, list conversations or send:
   (`AcpCodexGate`); a Codex app server that is already running is still asked.
 - Every Codex app-server cold start is recorded with its cause in
   `files/runtime/agent-view/codex-starts.log`.
+- A thread-scoped call (`params.threadId`: native-RPC `thread/read`, `thread/resume`,
+  `thread/name/set`, `turn/*`, …; `agent_control thread/read|thread/name/set|harness/*|skills/*`)
+  naming an ACP conversation that session removal deleted (`acp-conversations/<id>.removed`) fails
+  with `THREAD_UNAVAILABLE` (native error `code`, control `code`) before the Codex app server is
+  reached, whether or not it runs. With ACP selected and Codex idle, the same holds for a thread that
+  neither the ACP store nor the projection index (`agent-view/`) knows. A task (`Continue`, a queued
+  turn) for a removed conversation fails `THREAD_UNAVAILABLE` before any display or runtime starts.
+  `AcpCodexGate.unavailableWithoutCodex` is the single rule.
 
 With Codex selected (the default) all of these keep the Codex path unchanged.
 

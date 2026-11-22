@@ -159,6 +159,28 @@ final class AcpConversations {
         return null;
     }
 
+    /**
+     * Refuses a thread-scoped call ({@code params.threadId}) with {@code THREAD_UNAVAILABLE} before
+     * it can start the Codex app server ({@link AcpCodexGate#unavailableWithoutCodex}): a removed ACP
+     * conversation, or, with chat turns on ACP and Codex not running, a thread that neither the ACP
+     * store nor the projection index (in memory or saved) knows. Durable removal of a Codex
+     * conversation (cleanup calls) passes {@code codexRunning=true}: its projection may already be
+     * gone, and only the tombstone rule applies to it.
+     */
+    static void requireThreadAvailable(JSONObject params, boolean codexRunning) throws Exception {
+        String id = params == null ? "" : params.optString("threadId", "");
+        if (id.isEmpty()) return;
+        boolean known = AgentViews.threads.containsKey(id)
+                || AcpConversationStore.validId(id) && new File(AgentViews.ROOT, id + ".json").isFile();
+        if (AcpCodexGate.unavailableWithoutCodex(id, STORE, known, codexRunning, () -> TaskBroker.router().newConversation()))
+            throw new java.io.IOException("THREAD_UNAVAILABLE");
+    }
+
+    /** True for an ACP conversation that session removal deleted (tombstoned); it never comes back. */
+    static boolean removed(String id) {
+        return id != null && !id.isEmpty() && STORE.removed(id);
+    }
+
     /** True for a conversation the broker started on ACP (no Codex thread behind it). */
     static boolean standalone(String id) {
         return STORE.standalone(id);

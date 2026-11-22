@@ -58,6 +58,15 @@ public final class AcpSessionRemovalsTest {
         check(restarted.read(id) == null && restarted.ids().equals(List.of(kept)) && restarted.removed(id), "removal survives a broker restart");
         // Retrying the removal after it completed is still answered without Codex.
         check(backend.state(id) == SessionRemovals.State.ABSENT && codex.asked.isEmpty(), "a retried state check stays local");
+        // Every later thread-scoped call (thread/read, thread/name/set, resume, steer, Continue) is
+        // refused THREAD_UNAVAILABLE before the Codex app server is reached, running or not.
+        int[] routeAsks = {0};
+        AcpCodexGate.RouteSource acp = () -> { routeAsks[0]++;
+            return new RuntimeRouter.Route(RuntimeRouter.ACP, "acp", "selected-by-config", new JSONObject()); };
+        for (AcpConversationStore view : List.of(store, restarted)) for (boolean running : new boolean[]{false, true})
+            check(AcpCodexGate.unavailableWithoutCodex(id, view, false, running, acp), "removed: THREAD_UNAVAILABLE (codexRunning=" + running + ")");
+        check(routeAsks[0] == 0 && codex.asked.isEmpty(), "removed: decided locally, no route read and no Codex question");
+        check(!AcpCodexGate.unavailableWithoutCodex(kept, store, false, false, acp), "a kept conversation keeps its path");
     }
 
     static void codexDeleteKeepsItsPath() throws Exception {

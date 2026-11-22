@@ -76,6 +76,25 @@ public final class NativeBridgeRoutingTest {
             "Only the durable removal worker may perform family cleanup");
         AgentViews.threads.clear();
     }
+    /** A removed ACP conversation answers every thread-scoped native call THREAD_UNAVAILABLE, never starting Codex. */
+    private static void removedAcpConversationNeverStartsCodex(CodexAppServer server)throws Exception {
+        String removed="55555555-2222-4333-8444-555555555555";
+        AcpConversations.REMOVED.add(removed);
+        for(boolean running:new boolean[]{false,true}){
+            CodexAppServer.shared=running?server:null;CodexAppServer.coldStarts.clear();int sent=server.nextRequest;
+            for(String method:new String[]{"thread/read","thread/resume","thread/name/set","thread/turns/list","turn/start","turn/interrupt"}){
+                NativeBridge.Call call=new NativeBridge.Call(method,new JSONObject().put("threadId",removed).put("includeTurns",true));
+                check(NativeBridge.enqueue(call),"removed "+method+" is accepted for an answer");NativeBridge.tick();
+                try{call.result.get(1,TimeUnit.SECONDS);throw new AssertionError("removed "+method+" answered");}
+                catch(java.util.concurrent.ExecutionException error){
+                    check("THREAD_UNAVAILABLE".equals(error.getCause().getMessage()),"removed "+method+": THREAD_UNAVAILABLE, got "+error.getCause());
+                }
+            }
+            check(CodexAppServer.coldStarts.isEmpty(),"removed conversation: zero Codex starts "+CodexAppServer.coldStarts);
+            check(server.nextRequest==sent&&NativeBridge.calls.isEmpty(),"removed conversation: zero Codex requests (running="+running+")");
+        }
+        CodexAppServer.shared=server;AcpConversations.REMOVED.clear();NativeBridge.inbox.clear();
+    }
     private static void workspaceAdmissionRouting(CodexAppServer server)throws Exception {
         String thread="workspace-thread";DedicatedScreens registry=DedicatedScreensOnDevice.shared();
         NativeBridge.Call queued=new NativeBridge.Call("turn/start",new JSONObject().put("threadId",thread));
@@ -255,6 +274,7 @@ public final class NativeBridgeRoutingTest {
             memoryEventRouting();
             closedSubAgentWoken();
             workspaceAdmissionRouting(server);
+            removedAcpConversationNeverStartsCodex(server);
             archivedSessions();
             policyChangeNotices(server);
             pendingQuestionsAcrossSessions(server);
