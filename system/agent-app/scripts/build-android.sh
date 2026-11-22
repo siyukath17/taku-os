@@ -9,6 +9,7 @@ node scripts/export-reply-contract.ts
 node scripts/build-voice-effects.cjs
 
 node scripts/patch-enriched-markdown.cjs
+node scripts/patch-dev-menu.cjs
 CI=1 EXPO_NO_TELEMETRY=1 node node_modules/expo/bin/cli prebuild --platform android --no-install
 printf 'sdk.dir=%s\n' "$SDK" > android/local.properties
 (cd android && ./gradlew :app:assembleRelease -PreactNativeArchitectures="${TAKU_AGENT_ARCHITECTURES:-arm64-v8a}" --console=plain)

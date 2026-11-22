@@ -1,0 +1,11 @@
+{
+  "package": "expo-dev-menu",
+  "version": "58.0.13",
+  "files": [
+    {
+      "path": "android/src/debug/java/expo/modules/devmenu/AppInfo.kt",
+      "before": "6b2b89dc2f58b3b39e848d07bf8bf37dc8c4cd16fb9f8f9ca588125c34f00db9",
+      "after": "e75e74ae704e40a72212ddc0b9bdc6c541069c08860960637045b799febf061c"
+    }
+  ]
+}

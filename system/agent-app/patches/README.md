@@ -27,3 +27,20 @@ relax the checks. `npm run patch:markdown` applies it manually, and
 
 These changes are Android-specific. Keep screenshot and GPU-frame validation on
 real pending fences, wide/narrow tables, and both ends of a horizontal swipe.
+
+## Expo development menu and custom ReactHost
+
+`expo-dev-menu` **58.0.13** reads `ReactHostImpl.reactHostDelegate` by reflection
+even when the supplied host implements the `ReactHost` interface through a
+wrapper. Taku's `TakuReactHost` therefore crashes the development menu on start.
+
+`expo-dev-menu+58.0.13.patch` preserves the existing implementation for
+`ReactHostImpl` and omits the optional JavaScript engine label for other hosts.
+It retains their app metadata and source URL. It does not unwrap the host, alter
+runtime ownership, or affect release code: the patched file is in `src/debug`.
+
+`npm run patch:dev-menu` uses the same version and source-hash validation as the
+Markdown patch installer. Postinstall and the Android build entry points apply
+it idempotently; `node scripts/patch-dev-menu.cjs --check` only verifies it.
+Revisit the patch when upgrading Expo. It addresses this crash, not all possible
+development-launcher interactions with custom ReactHost implementations.

@@ -1,0 +1,38 @@
+--- a/android/src/debug/java/expo/modules/devmenu/AppInfo.kt
++++ b/android/src/debug/java/expo/modules/devmenu/AppInfo.kt
+@@ -49,18 +49,23 @@
+ 
+     val hostUrl = reactHost.currentReactContext?.sourceURL
+ 
+-    val reactHostDelegateField: Field =
+-      ReactHostImpl::class.java.getDeclaredField("reactHostDelegate")
+-    reactHostDelegateField.isAccessible = true
+-    val reactHostDelegate = reactHostDelegateField.get(reactHost) as ReactHostDelegate
+-    val className = reactHostDelegate.jsRuntimeFactory::class.simpleName.toString()
+-    val jsExecutorName = className.removeSuffix("Instance").removeSuffix("Runtime")
+-
+-    val engine = when {
+-      jsExecutorName.contains("Hermes") -> "Hermes"
+-      jsExecutorName.contains("V8") -> "V8"
+-      jsExecutorName.contains("QuickJS") -> "QuickJS"
+-      else -> "JSC"
++    // ReactHost is an interface; custom hosts need not expose ReactHostImpl internals.
++    val engine = if (reactHost is ReactHostImpl) {
++      val reactHostDelegateField: Field =
++        ReactHostImpl::class.java.getDeclaredField("reactHostDelegate")
++      reactHostDelegateField.isAccessible = true
++      val reactHostDelegate = reactHostDelegateField.get(reactHost) as ReactHostDelegate
++      val className = reactHostDelegate.jsRuntimeFactory::class.simpleName.toString()
++      val jsExecutorName = className.removeSuffix("Instance").removeSuffix("Runtime")
++
++      when {
++        jsExecutorName.contains("Hermes") -> "Hermes"
++        jsExecutorName.contains("V8") -> "V8"
++        jsExecutorName.contains("QuickJS") -> "QuickJS"
++        else -> "JSC"
++      }
++    } else {
++      null
+     }
+ 
+     return DevMenuState.AppInfo(

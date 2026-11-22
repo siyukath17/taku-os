@@ -47,7 +47,7 @@ function spec(root: PreviewNode): Spec {
 }
 
 export function checklistExamples(): GalleryExample[] {
-  const entries = [['passport', 'Passport'], ['room-card', 'Room key'], ['phone', 'Phone'], ['wallet', 'Wallet'], ['power-bank', 'Power bank and charging cable for the journey']];
+  const entries = [['passport', 'Passport'], ['room-card', 'Room key'], ['phone', 'Phone'], ['wallet', 'Wallet'], ['power-bank', 'Power bank and charging cable for the journey, including the adapter for the hotel']];
   const request: UiRequest = {version: 2, key: 'gallery-checklist', mode: 'card', title: 'Before you leave', summary: '', actions: [],
     blocks: entries.map(([id, title]) => ({id, title, kind: 'input', text: '', image: '', url: '', items: [], config: {editor: 'toggle'}, value: {type: 'boolean', value: id === 'room-card'}}))};
   const layout = spec(node('Card', {title: {$state: '/data/title'}}, entries.map(([id]) => node('Checkbox', {
