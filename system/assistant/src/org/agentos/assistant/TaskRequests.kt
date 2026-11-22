@@ -42,6 +42,56 @@ internal object TaskRequests {
         return JSONObject().put("threadId", thread).put("taskId", taskId).put("cancellationRequested", true)
     }
 
+    /**
+     * "Continue" after a failed task: a new task in the same conversation that resumes the failed
+     * one ({@code continuation.ofTaskId}). It carries no user text, so the user's request is never
+     * resent and no second user message appears; the broker's ACP runtime loads the interrupted
+     * agent session and asks it to continue (other runtimes get the continuation instruction).
+     */
+    @JvmStatic
+    @Throws(Exception::class)
+    fun continueTask(thread: String, taskId: String): JSONObject {
+        if (!conversationId.matches(thread)) throw IOException("Invalid conversation identifier")
+        if (!Regex("[0-9]{1,19}").matches(taskId)) throw IOException("INVALID_ARGUMENT")
+        val failed = File(TaskRuntime.TASKS, taskId)
+        val original = SourceAdapters.readObject(File(failed, "request.json"))
+        if (thread != original.optString("conversationId")) throw IOException("TASK_THREAD_MISMATCH")
+        val done = File(failed, "done")
+        if (!done.isFile) throw IOException("TASK_NOT_FINISHED")
+        val outcome = done.readText(Charsets.UTF_8).trim()
+        if (outcome != "failed") throw IOException("TASK_NOT_FAILED")
+        // One turn at a time per conversation: a second tap while a continuation is queued is refused.
+        TaskRuntime.TASKS.listFiles()?.forEach { other ->
+            if (!other.isDirectory || other.name == taskId || File(other, "done").exists() || !File(other, "ready").exists()) return@forEach
+            val request = runCatching { SourceAdapters.readObject(File(other, "request.json")) }.getOrNull() ?: return@forEach
+            if (request.optString("conversationId") == thread) throw IOException("TASK_ACTIVE")
+        }
+        return withNewTask("Task directory unavailable") { directory, id, createdAt ->
+            val request = JSONObject()
+                .put("id", id)
+                .put("prompt", "")
+                .put("foreground", original.opt("foreground") ?: JSONObject.NULL)
+                .put("screenshot", "")
+                .put("createdAt", createdAt)
+                .put("conversationId", thread)
+                .put("continuation", JSONObject().put("ofTaskId", taskId).put("reason", "user"))
+            for (key in optionalFields + arrayOf("responseStyle", "responseLocale")) {
+                if (original.has(key)) request.put(key, original.opt(key))
+            }
+            request.put("includeScreenshot", false)
+            write(File(directory, "request.json"), request.toString())
+            write(File(directory, "state.json"), JSONObject()
+                .put("id", id)
+                .put("state", "queued")
+                .put("prompt", "")
+                .put("message", "Queued for background execution")
+                .toString())
+            write(File(TaskRuntime.ROOT, "latest.id"), id)
+            write(File(directory, "ready"), "1")
+            JSONObject().put("threadId", thread).put("taskId", id).put("continuationOf", taskId)
+        }
+    }
+
     @JvmStatic
     @Throws(Exception::class)
     fun interrupt(thread: String, turnId: String): JSONObject {

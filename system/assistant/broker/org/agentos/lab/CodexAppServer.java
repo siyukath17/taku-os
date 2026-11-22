@@ -516,8 +516,20 @@ public final class CodexAppServer implements AutoCloseable {
         NativeBridge.tick();
         String line = output.poll(Math.min(millis, 1000), TimeUnit.MILLISECONDS);
         if (line == null) return;
-        if (EOF.equals(line)) throw new IOException(readerFailure.isEmpty() ? "The assistant service has exited" : readerFailure);
-        JSONObject event = new JSONObject(line);
+        if (EOF.equals(line)) {
+            // The app server is gone for good: retire it so the next Codex use starts a fresh one
+            // instead of every later caller talking to a dead process.
+            retire(this);
+            throw new IOException(readerFailure.isEmpty() ? "The assistant service has exited" : readerFailure);
+        }
+        JSONObject event;
+        try {
+            event = new JSONObject(line);
+        } catch (Exception malformed) {
+            // One unreadable line must not stop the broker or the turn; protocol lines are JSON.
+            System.err.println("codex app server: unreadable line skipped (" + line.length() + " chars)");
+            return;
+        }
         if (event.has("id") && !event.has("method")) {
             NativeBridge.admissions.response(event.getInt("id"), !event.has("error"));
             if (NativeBridge.complete(event)) return;
@@ -646,14 +658,16 @@ public final class CodexAppServer implements AutoCloseable {
                                         completion = ended.getString("status");
                                 }
                             });
+            CodexAppServer created = shared;
             try {
                 booting=true;
-                try { shared.initialize(); SkillUninstall.recover(shared); } finally { booting=false; }
+                try { created.initialize(); SkillUninstall.recover(created); } finally { booting=false; }
             } catch (Exception error) {
-                shared.close();
-                shared = null;
+                // pump() may already have retired it (the server exited while starting).
+                retire(created);
                 throw error;
             }
+            if (shared != created) throw new IOException("The assistant service has exited");
         }
         return shared;
     }
@@ -845,16 +859,43 @@ public final class CodexAppServer implements AutoCloseable {
         }
     }
 
-    static void tick() throws Exception {
-        NativeBridge.tick();
-        if (shared != null) {
-            shared.pump(1);
+    /**
+     * The broker main loop's idle service: native UI RPC and the shared app server's events. It never
+     * throws: the Codex app server exiting or restarting (common while chat runs on ACP, where Codex
+     * is idle) or one bad event is logged and the server retired, never the whole broker process
+     * (Pixel 9: {@code IOException: The assistant service has exited} at this call killed the loop).
+     */
+    static void tick() {
+        try {
+            NativeBridge.tick();
+        } catch (Exception failure) {
+            System.err.println("native bridge tick: " + failure);
+        }
+        CodexAppServer server = shared;
+        if (server == null) return;
+        try {
+            server.pump(1);
             // Drain already-arrived events even while idle, up to 2000 lines; processing one long-output event per 150ms would delay turn completion by minutes.
-            for (int i = 0; i < 2000 && shared != null && !shared.output.isEmpty(); i++) shared.pump(0);
-            if (AgentAccount.refreshRequested) {
+            for (int i = 0; i < 2000 && shared == server && !server.output.isEmpty(); i++) server.pump(0);
+            if (AgentAccount.refreshRequested && shared == server) {
                 AgentAccount.refreshRequested = false;
-                shared.signedIn();
+                server.signedIn();
             }
+        } catch (Exception failure) {
+            System.err.println("codex app server tick: " + failure);
+            if (server.closed || !server.process.isAlive()) retire(server);
+        }
+    }
+
+    /** Closes {@code server} and, when it is the shared one, forgets it (the next use starts a new one). */
+    static void retire(CodexAppServer server) {
+        synchronized (CodexAppServer.class) {
+            if (shared == server) shared = null;
+        }
+        try {
+            if (!server.closed) server.close();
+        } catch (Exception failure) {
+            System.err.println("codex app server close: " + failure);
         }
     }
 

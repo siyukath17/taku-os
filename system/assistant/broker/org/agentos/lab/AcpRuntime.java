@@ -104,6 +104,14 @@ final class AcpRuntime implements TaskRuntime {
         long subagentIdleMillis = TimeUnit.MINUTES.toMillis(5);
         long subagentPollMillis = 1000;
         /**
+         * Bounded automatic continuation after an external, transient failure (no response, the agent
+         * exiting on a network error, an agent 429/503/UNAVAILABLE/DEADLINE_EXCEEDED). agy retries model
+         * calls itself (its RetryPolicy); this only resumes a turn the agent process could not finish.
+         */
+        int autoContinueMax = 2;
+        /** Delay before each automatic continuation; the last value repeats. */
+        List<Long> autoContinueBackoffMillis = new ArrayList<>(List.of(2000L, 8000L));
+        /**
          * Where the agent's model list ({@code session/new} configOptions) is saved for the model
          * picker ({@link AcpModelCatalog}); null keeps it unsaved. Set by the broker, not runtime.json.
          */
@@ -144,6 +152,12 @@ final class AcpRuntime implements TaskRuntime {
             o.subagentNudgeMillis = c.optLong("subagentNudgeMillis", o.subagentNudgeMillis);
             o.subagentIdleMillis = c.optLong("subagentIdleMillis", o.subagentIdleMillis);
             o.subagentPollMillis = c.optLong("subagentPollMillis", o.subagentPollMillis);
+            o.autoContinueMax = Math.max(0, Math.min(5, c.optInt("autoContinueMax", o.autoContinueMax)));
+            JSONArray backoff = c.optJSONArray("autoContinueBackoffMillis");
+            if (backoff != null && backoff.length() > 0) {
+                o.autoContinueBackoffMillis = new ArrayList<>();
+                for (int i = 0; i < backoff.length(); i++) o.autoContinueBackoffMillis.add(Math.max(0, backoff.optLong(i, 0)));
+            }
             return o;
         }
 
@@ -211,6 +225,10 @@ final class AcpRuntime implements TaskRuntime {
         env.put("AGY_DISABLE_AUTO_UPDATE", "1");
         env.put("DISABLE_AUTO_UPDATE", "1");
         env.put("NO_UPDATE_NOTIFIER", "1");
+        // Nobody can answer a terminal prompt: git must fail fast instead of blocking the turn on
+        // a username/password read (seen with a broken credential helper on the Pixel).
+        env.put("GIT_TERMINAL_PROMPT", "0");
+        env.put("GCM_INTERACTIVE", "never");
         if (!options.httpsProxy.isEmpty()) {
             env.put("HTTPS_PROXY", options.httpsProxy);
             env.put("https_proxy", options.httpsProxy);
@@ -241,17 +259,123 @@ final class AcpRuntime implements TaskRuntime {
             finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);
             return;
         }
-        Turn turn = new Turn(directory, request, connection, chat);
+        long budgetEnd = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.turnLimitMillis);
+        JSONObject attemptRequest = request;
+        String resume = chat == null ? "" : chat.priorSession;
         activeChat = chat;
         try {
-            turn.execute();
+            for (int attempt = 0; ; attempt++) {
+                Turn turn = new Turn(directory, attemptRequest, connection, chat, attempt, resume, budgetEnd);
+                Retry retry;
+                try {
+                    retry = turn.execute();
+                } finally {
+                    connection.destroy(Math.min(2000, options.cancelGraceMillis));
+                }
+                if (retry == null) return;
+                // An external, transient failure with continuations left: wait, then resume the same
+                // turn in a fresh agent process (session/load of the interrupted session).
+                if (!turn.sessionId.isEmpty()) resume = turn.sessionId;
+                attemptRequest = retry.promptSent ? continuationRequest(request, "auto", attempt + 1) : request;
+                if (!backoff(directory, request, attempt, turn)) return;
+                // The continuation's text is a new message after whatever the interrupted attempt said.
+                if (chat != null) chat.breakMessage();
+                try {
+                    connection = transport.start(launch(attemptRequest));
+                } catch (IOException startFailed) {
+                    diagnostic(directory, "start-failed", startFailed.getMessage(), "");
+                    finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);
+                    return;
+                }
+            }
         } finally {
             activeChat = null;
-            connection.destroy(Math.min(2000, options.cancelGraceMillis));
             // A path that ended without finish() (an unexpected exception) still closes the turn.
-            if (chat != null && !chat.ended) chat.end("failed", null);
+            if (chat != null && !chat.ended) {
+                try { chat.end("failed", null); }
+                catch (Exception projection) { System.err.println("acp chat end ignored: " + projection); }
+            }
         }
     }
+
+    /** Sent by {@link Turn#execute} when an external, transient failure leaves continuations to try. */
+    static final class Retry {
+        final boolean promptSent;
+
+        Retry(boolean promptSent) {
+            this.promptSent = promptSent;
+        }
+    }
+
+    /**
+     * The wait before automatic continuation {@code attempt + 1}, shown on the island; a cancel during
+     * the wait stops the task. Returns false when the task was finished instead.
+     */
+    private boolean backoff(File directory, JSONObject request, int attempt, Turn turn) throws Exception {
+        List<Long> delays = options.autoContinueBackoffMillis;
+        long delay = delays.isEmpty() ? 0 : delays.get(Math.min(attempt, delays.size() - 1));
+        String text = continuingText(request, attempt + 1, options.autoContinueMax);
+        turn.phase = "continuing";
+        turn.progress(text, true);
+        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
+        while (System.nanoTime() < until) {
+            if (new File(directory, "cancel").exists()) {
+                finish(directory, request, "cancelled", "Stopped. Completed actions will not be automatically undone.", null);
+                return false;
+            }
+            try { idle.run(); } catch (RuntimeException failure) { System.err.println("acp idle hook: " + failure); }
+            Thread.sleep(Math.min(100, Math.max(1, TimeUnit.NANOSECONDS.toMillis(until - System.nanoTime()))));
+        }
+        if (new File(directory, "cancel").exists()) {
+            finish(directory, request, "cancelled", "Stopped. Completed actions will not be automatically undone.", null);
+            return false;
+        }
+        return true;
+    }
+
+    static String continuingText(JSONObject request, int attempt, int max) {
+        String locale = request.optString("responseLocale", java.util.Locale.getDefault().toLanguageTag());
+        return locale.toLowerCase(java.util.Locale.ROOT).startsWith("zh")
+                ? "网络波动，正在继续（" + attempt + "/" + max + "）…"
+                : "Network hiccup, continuing (" + attempt + "/" + max + ")…";
+    }
+
+    /** The system-level instruction that resumes an interrupted turn in its own session. */
+    static final String CONTINUE_PROMPT =
+            "上一轮在执行中被中断，请基于已有对话和工具执行结果从中断处继续完成原任务，不要重复已成功的步骤；对有副作用的操作先核对现状再执行。\n"
+                    + "(The previous turn was interrupted mid-run. Using the conversation and tool results so far, continue the original task from where it stopped; "
+                    + "do not repeat steps that already succeeded, and check the current state before any action with side effects.)";
+
+    /** A copy of {@code request} that continues task {@code ofTaskId} (same id; the user's text is not resent). */
+    static JSONObject continuationRequest(JSONObject request, String reason, int attempt) throws Exception {
+        JSONObject copy = new JSONObject(request.toString());
+        JSONObject continuation = new JSONObject().put("ofTaskId", request.optString("id")).put("reason", reason);
+        if (attempt > 0) continuation.put("attempt", attempt);
+        copy.put("continuation", continuation);
+        copy.remove("screenshot");
+        return copy;
+    }
+
+    /**
+     * Whether a failure is external and transient, so the turn may be resumed automatically. Never:
+     * a user cancel, sign-in, an unconfirmed stop, or anything raised inside the broker.
+     */
+    static boolean transientFailure(IOException failure, String stderr) {
+        if (failure instanceof NoResponse) return true;
+        if (failure instanceof AgentExited)
+            return NETWORK_STDERR.matcher(stderr == null ? "" : stderr).find();
+        if (failure instanceof AcpError) {
+            AcpError error = (AcpError) failure;
+            if (error.code == AUTH_REQUIRED) return false;
+            return TRANSIENT_AGENT_ERROR.matcher(String.valueOf(error.getMessage())).find();
+        }
+        return false;
+    }
+
+    private static final java.util.regex.Pattern NETWORK_STDERR = java.util.regex.Pattern.compile(
+            "UNAVAILABLE|(?i:connection reset|connection refused|broken pipe|\\bEOF\\b|proxy|tls handshake|i/o timeout|network is unreachable|no route to host)");
+    private static final java.util.regex.Pattern TRANSIENT_AGENT_ERROR = java.util.regex.Pattern.compile(
+            "\\b(?:429|503)\\b|UNAVAILABLE|DEADLINE_EXCEEDED");
 
     // ---- terminal records -------------------------------------------------------------------
 
@@ -262,7 +386,14 @@ final class AcpRuntime implements TaskRuntime {
         // Agent text can link or quote agent-internal paths; never shown or stored in results.
         if (reply != null) reply = AcpToolLabels.sanitize(reply);
         // The conversation shows the turn's end before the task record does.
-        if (activeChat != null && !activeChat.ended) activeChat.end(status, reply);
+        if (activeChat != null && !activeChat.ended) {
+            try {
+                activeChat.end(status, reply);
+            } catch (Exception projection) {
+                // The task's own records below still close it.
+                System.err.println("acp chat end ignored: " + projection);
+            }
+        }
         if (request.has("conversationId") && chatHost != null) {
             // Chat turns use the chat result contract (as CodexAppServer does): the readable reply as
             // plain text, written only for a completed turn; the state message carries everything else.
@@ -278,20 +409,71 @@ final class AcpRuntime implements TaskRuntime {
     }
 
     private static void diagnostic(File directory, String type, String detail, String stderrTail) throws Exception {
+        // Plain text, not JSON: the stderr tail keeps its newest end; JSONObject escapes both values.
         TaskRecords.write(new File(directory, "diagnostic.json"), new JSONObject()
                 .put("runtime", "acp").put("type", type)
-                .put("detail", redact(detail == null ? "" : detail))
-                .put("stderrTail", redact(stderrTail)).toString());
+                .put("detail", clip(redact(detail == null ? "" : detail), MAX_REDACTED_CHARS))
+                .put("stderrTail", tail(redact(stderrTail == null ? "" : stderrTail), MAX_REDACTED_CHARS)).toString());
     }
 
-    /** Diagnostics may hold agent stderr; never persist anything that looks like a credential. */
+    /** Longest single redacted value kept in records and the chat projection. */
+    static final int MAX_REDACTED_CHARS = 4000;
+
+    /**
+     * Hides anything that looks like a credential in one piece of plain text. It never truncates
+     * and must never be run over serialized JSON: replacing text can eat escapes and break the
+     * document (an {@code echo "… TOKEN ==="} command did, as JSONException, on the Pixel). For a
+     * structure, use {@link #redactJson}, which redacts each string value separately.
+     */
     static String redact(String s) {
-        String out = s.replaceAll("eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "[hidden]")
+        if (s == null || s.isEmpty()) return "";
+        return s.replaceAll("eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "[hidden]")
                 .replaceAll("ya29\\.[A-Za-z0-9_.-]+", "[hidden]")
                 .replaceAll("1//[A-Za-z0-9_-]{20,}", "[hidden]")
                 .replaceAll("AIza[A-Za-z0-9_-]{30,}", "[hidden]")
+                .replaceAll("gh[pousr]_[A-Za-z0-9]{20,}", "[hidden]")
                 .replaceAll("(?i)(Bearer\\s+|(?:access_token|refresh_token|id_token|token|secret|password|api_key|code)[\"']?\\s*[=:]\\s*[\"']?)[^\\s&\"',}]+", "$1[hidden]");
-        return out.length() > 4000 ? out.substring(out.length() - 4000) : out;
+    }
+
+    /** Object keys whose string values are credentials however they look. */
+    private static final java.util.regex.Pattern SECRET_KEY = java.util.regex.Pattern.compile(
+            "(?i).*(?:token|secret|password|passwd|api_?key|authorization|cookie|credential).*");
+
+    /**
+     * A redacted deep copy of a JSON value: every string value is {@link #redact}ed (values under
+     * credential-named keys are hidden whole), sanitized of agent-internal paths and clipped at its
+     * head to {@code maxValueChars}; structure, numbers and booleans are kept, so the result is
+     * always a valid JSON value.
+     */
+    static Object redactJson(Object value, int maxValueChars) {
+        if (value instanceof JSONObject) {
+            JSONObject in = (JSONObject) value, out = new JSONObject();
+            for (java.util.Iterator<String> it = in.keys(); it.hasNext(); ) {
+                String key = it.next();
+                Object child = in.opt(key);
+                try {
+                    out.put(key, child instanceof String && SECRET_KEY.matcher(key).matches() && !((String) child).isEmpty()
+                            ? "[hidden]" : redactJson(child, maxValueChars));
+                } catch (Exception impossible) {
+                    // A finite, non-null value always fits; skip anything that does not.
+                }
+            }
+            return out;
+        }
+        if (value instanceof JSONArray) {
+            JSONArray in = (JSONArray) value, out = new JSONArray();
+            for (int i = 0; i < in.length(); i++) out.put(redactJson(in.opt(i), maxValueChars));
+            return out;
+        }
+        if (value instanceof String) return clip(AcpToolLabels.sanitize(redact((String) value)), maxValueChars);
+        return value == null ? JSONObject.NULL : value;
+    }
+
+    static String tail(String text, int max) {
+        if (text.length() <= max) return text;
+        int start = text.length() - max + 1;
+        if (Character.isLowSurrogate(text.charAt(start))) start++;
+        return "…" + text.substring(start);
     }
 
     // ---- protocol errors ----------------------------------------------------------------------
@@ -322,6 +504,11 @@ final class AcpRuntime implements TaskRuntime {
     }
 
     // ---- one task's conversation with the agent -------------------------------------------------
+
+    /** One chat projection step (see {@code Turn#display}). */
+    interface DisplayStep {
+        void run() throws Exception;
+    }
 
     private static final Object EOF = new Object();
 
@@ -356,8 +543,20 @@ final class AcpRuntime implements TaskRuntime {
         /** Where the parent's latest wake-up text starts in {@link #reply} (its headline), and a pending start. */
         int lastSegment, pendingSegment = -1;
         String currentToolKey = "";
+        /** 0 for the task's first agent process, n for its n-th automatic continuation. */
+        final int attempt;
+        /** The agent session to load first (the conversation's, or the interrupted attempt's). */
+        final String resumeSession;
+        /** The task's whole turn budget ends here, across automatic continuations. */
+        final long budgetEnd;
+        /** Unexpected display-layer failures (chat projection), counted, never fatal to the turn. */
+        int ignored;
 
-        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat) {
+        Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat,
+             int attempt, String resumeSession, long budgetEnd) {
+            this.attempt = attempt;
+            this.resumeSession = resumeSession == null ? "" : resumeSession;
+            this.budgetEnd = budgetEnd;
             this.chat = chat;
             this.directory = directory;
             this.request = request;
@@ -416,7 +615,11 @@ final class AcpRuntime implements TaskRuntime {
             }
         }
 
-        void execute() throws Exception {
+        /**
+         * Runs one agent process's part of the task. Returns null once the task is finished, or a
+         * {@link Retry} when an external, transient failure leaves an automatic continuation to try.
+         */
+        Retry execute() throws Exception {
             String id = request.getString("id");
             try {
                 JSONObject init = call("initialize", new JSONObject()
@@ -428,28 +631,29 @@ final class AcpRuntime implements TaskRuntime {
                 if (init.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
                     diagnostic(directory, "protocol-version", init.optString("protocolVersion"), stderr());
                     finish(directory, request, "failed", "The on-device agent speaks an unsupported ACP version. Update the ROM's agent, then retry.", null);
-                    return;
+                    return null;
                 }
                 JSONArray authMethods = init.optJSONArray("authMethods");
                 JSONObject capabilities = init.optJSONObject("agentCapabilities");
                 boolean resumed = false;
                 String loadFailure = "";
-                // A chat continues its previous agent session when the agent can load it.
-                if (chat != null && !chat.priorSession.isEmpty()) {
+                // A chat (or an automatic continuation) resumes its previous agent session when the
+                // agent can load it.
+                if (!resumeSession.isEmpty()) {
                     if (capabilities != null && capabilities.optBoolean("loadSession")) {
                         try {
                             // History replayed by session/load arrives while sessionId is still empty,
                             // so notification() ignores it: the store already holds those turns.
                             call("session/load", new JSONObject()
-                                    .put("sessionId", chat.priorSession)
+                                    .put("sessionId", resumeSession)
                                     .put("cwd", options.cwd)
                                     .put("mcpServers", mcpServers()));
-                            sessionId = chat.priorSession;
+                            sessionId = resumeSession;
                             resumed = true;
                         } catch (AcpError error) {
                             if (error.code == AUTH_REQUIRED) {
                                 needsUser(authMethods);
-                                return;
+                                return null;
                             }
                             loadFailure = error.code + " " + clip(redact(error.getMessage() == null ? "" : error.getMessage()), 200);
                         }
@@ -466,7 +670,7 @@ final class AcpRuntime implements TaskRuntime {
                     } catch (AcpError error) {
                         if (error.code == AUTH_REQUIRED) {
                             needsUser(authMethods);
-                            return;
+                            return null;
                         }
                         throw error;
                     }
@@ -488,25 +692,36 @@ final class AcpRuntime implements TaskRuntime {
                 if (!effort.isEmpty()) info.put("effort", effort);
                 parentModel = model;
                 if (configRefusals.length() > 0) info.put("configRefusals", configRefusals);
-                String text = request.getString("prompt");
+                JSONObject continuation = request.optJSONObject("continuation");
+                String original = request.optString("prompt", "");
+                String text = original;
+                if (continuation != null) {
+                    info.put("continuation", continuation);
+                    // A resumed session already holds the interrupted turn; otherwise the instruction
+                    // follows the original request (an automatic continuation still carries it).
+                    text = resumed || original.isBlank() ? CONTINUE_PROMPT
+                            : "Original request:\n" + original + "\n\n" + CONTINUE_PROMPT;
+                }
                 if (chat != null) {
-                    chat.bind(sessionId, init.optJSONObject("agentInfo"));
+                    String bound = sessionId;
+                    display("bind", () -> chat.bind(bound, init.optJSONObject("agentInfo")));
                     // The chat page reads threadId/turnId like a Codex chat turn's runtime-info.
                     info.put("threadId", chat.conversationId).put("conversationId", chat.conversationId)
                             .put("turnId", chat.turnId).put("sessionResumed", resumed);
                     if (!loadFailure.isEmpty()) info.put("sessionLoadFailure", loadFailure);
                     if (!resumed && !chat.transcript.isEmpty())
                         text = "Earlier messages in this conversation, for context (the previous agent session could not be resumed):\n"
-                                + chat.transcript + "\n\nCurrent message:\n" + text;
+                                + chat.transcript + "\n\n" + (continuation != null ? "" : "Current message:\n") + text;
                 }
+                if (attempt > 0) info.put("autoContinuation", attempt);
                 TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
                 JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", text));
-                JSONObject image = screenshot(init);
+                JSONObject image = continuation != null ? null : screenshot(init);
                 if (image != null) prompt.put(image);
                 phase = "working";
                 progress("Taku is working. You can continue using your phone.", true);
                 inPrompt = true;
-                turnDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.turnLimitMillis);
+                turnDeadline = Math.min(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.turnLimitMillis), budgetEnd);
                 subagents = new AcpSubagents(AcpSubagents.sessionRoot(options.home, options.appDataDir, sessionId));
                 subagents.baseline();
                 JSONObject result;
@@ -515,7 +730,7 @@ final class AcpRuntime implements TaskRuntime {
                 } catch (AcpError error) {
                     if (error.code == AUTH_REQUIRED) {
                         needsUser(authMethods);
-                        return;
+                        return null;
                     }
                     throw error;
                 }
@@ -525,6 +740,7 @@ final class AcpRuntime implements TaskRuntime {
                 if ("end_turn".equals(stopReason) && !subagentCalls.isEmpty() && !cancelSent) stopReason = awaitSubagents();
                 refreshSubagentCards(true);
                 completed(stopReason);
+                return null;
             } catch (CancelledEarly cancelled) {
                 finish(directory, request, "cancelled", "Cancelled before execution.", null);
             } catch (StopUnconfirmed unconfirmed) {
@@ -533,14 +749,25 @@ final class AcpRuntime implements TaskRuntime {
             } catch (AgentExited exited) {
                 Integer code = waitExit();
                 diagnostic(directory, "agent-exited", exited.getMessage() + " exit=" + code, stderr());
+                if (continues(exited)) return new Retry(inPrompt);
                 finish(directory, request, "failed", "The on-device agent stopped unexpectedly. Check the results of any actions before retrying.", reply.length() == 0 ? null : reply.toString());
             } catch (NoResponse silent) {
                 diagnostic(directory, "no-response", silent.getMessage(), stderr());
+                if (continues(silent)) return new Retry(inPrompt);
                 finish(directory, request, "failed", "The on-device agent did not respond. Retry later.", null);
             } catch (AcpError error) {
                 diagnostic(directory, "agent-error", error.code + " " + error.getMessage(), stderr());
+                if (continues(error)) return new Retry(inPrompt);
                 finish(directory, request, "failed", "The on-device agent reported an error. Check the results before retrying.", null);
             }
+            return null;
+        }
+
+        /** An external, transient failure with an automatic continuation left, not cancelled or out of budget. */
+        boolean continues(IOException failure) {
+            if (attempt >= options.autoContinueMax || cancelSent || timedOut) return false;
+            if (new File(directory, "cancel").exists() || System.nanoTime() >= budgetEnd) return false;
+            return transientFailure(failure, stderr());
         }
 
         /**
@@ -553,7 +780,7 @@ final class AcpRuntime implements TaskRuntime {
         String awaitSubagents() throws Exception {
             followUp = true;
             pendingSegment = reply.length();
-            if (chat != null) chat.breakMessage();
+            display("break", () -> chat.breakMessage());
             long now = System.nanoTime(), lastPoll = now, allReportedAt = 0, nudgedAt = 0;
             lastUpdate = now;
             long settle = TimeUnit.MILLISECONDS.toNanos(options.subagentSettleMillis);
@@ -625,7 +852,7 @@ final class AcpRuntime implements TaskRuntime {
         /** One follow-up prompt in the same session when the parent did not pick up its subagents' reports. */
         String nudgeParent() throws Exception {
             pendingSegment = reply.length();
-            if (chat != null) chat.breakMessage();
+            display("break", () -> chat.breakMessage());
             JSONObject result = call("session/prompt", new JSONObject().put("sessionId", sessionId).put("prompt", new JSONArray()
                     .put(new JSONObject().put("type", "text").put("text",
                             "All sub-tasks you started have reported back. Read their results and give the user the complete combined answer now, in the user's language."))));
@@ -650,7 +877,33 @@ final class AcpRuntime implements TaskRuntime {
             }
             if (message.has("id") && !message.has("method")) return;
             if (message.has("id")) agentRequest(message);
-            else notification(message);
+            else safeNotification(message);
+        }
+
+        /**
+         * {@link #notification} isolated from the turn: a malformed update or a display-layer failure
+         * is counted and logged, never fatal. Agent I/O failures (the process going away) still end it.
+         */
+        void safeNotification(JSONObject message) throws Exception {
+            try {
+                notification(message);
+            } catch (AgentExited | StopUnconfirmed | CancelledEarly fatal) {
+                throw fatal;
+            } catch (Exception malformed) {
+                ignored++;
+                System.err.println("acp update ignored: " + malformed);
+            }
+        }
+
+        /** One chat projection step; its failure never stops the agent's turn. */
+        void display(String what, DisplayStep step) {
+            if (chat == null) return;
+            try {
+                step.run();
+            } catch (Exception failure) {
+                ignored++;
+                System.err.println("acp chat " + what + " ignored: " + failure);
+            }
         }
 
         /**
@@ -825,7 +1078,7 @@ final class AcpRuntime implements TaskRuntime {
                     return result == null ? new JSONObject() : result;
                 }
                 if (message.has("id")) agentRequest(message);
-                else notification(message);
+                else safeNotification(message);
             }
         }
 
@@ -902,7 +1155,7 @@ final class AcpRuntime implements TaskRuntime {
                 case "usage_update":
                     // agy ends each model step (and each wake-up of the parent) with one.
                     if (followUp) {
-                        if (chat != null) chat.breakMessage();
+                        display("break", () -> chat.breakMessage());
                         pendingSegment = reply.length();
                     }
                     break;
@@ -915,8 +1168,9 @@ final class AcpRuntime implements TaskRuntime {
                             lastSegment = pendingSegment;
                             pendingSegment = -1;
                         }
-                        reply.append(content.optString("text"));
-                        if (chat != null) chat.message(content.optString("text"));
+                        String chunk = content.optString("text");
+                        reply.append(chunk);
+                        display("message", () -> chat.message(chunk));
                     }
                     if (!"stopping".equals(phase)) phase = "replying";
                     progress("Writing the result…", false);
@@ -933,7 +1187,7 @@ final class AcpRuntime implements TaskRuntime {
                             .put("key", tool.key).put("name", tool.name)
                             .put("kind", update.optString("kind", "other")).put("status", update.optString("status", "pending"));
                     toolCalls.put(toolId, call);
-                    if (chat != null) chat.tool(toolId, update);
+                    display("tool", () -> chat.tool(toolId, update));
                     subagentCall(toolId, call);
                     currentTool = call.getString("title");
                     currentToolKey = tool.key;
@@ -954,7 +1208,8 @@ final class AcpRuntime implements TaskRuntime {
                     currentTool = call.getString("title");
                     currentToolKey = call.optString("key");
                     if (update.has("status") && !update.isNull("status")) call.put("status", update.optString("status"));
-                    if (chat != null) chat.tool(update.optString("toolCallId"), update);
+                    String toolId = update.optString("toolCallId");
+                    display("tool", () -> chat.tool(toolId, update));
                     subagentCall(update.optString("toolCallId"), call);
                     progress("Working: " + clip(call.getString("title"), 80), false);
                     break;
@@ -962,8 +1217,10 @@ final class AcpRuntime implements TaskRuntime {
                 case "plan": {
                     JSONArray entries = update.optJSONArray("entries");
                     int total = entries == null ? 0 : entries.length(), done = 0;
-                    for (int i = 0; i < total; i++)
-                        if ("completed".equals(entries.getJSONObject(i).optString("status"))) done++;
+                    for (int i = 0; i < total; i++) {
+                        JSONObject entry = entries.optJSONObject(i);
+                        if (entry != null && "completed".equals(entry.optString("status"))) done++;
+                    }
                     plan = done + "/" + total;
                     progress("Plan " + plan + " steps done", false);
                     break;
@@ -1061,6 +1318,8 @@ final class AcpRuntime implements TaskRuntime {
         int messages;
         long lastFlush;
         boolean ended;
+        /** A tool call's redacted arguments kept whole up to this size; larger ones become a summary. */
+        static final int MAX_ARGUMENT_CHARS = 16_000;
         /** Subagent card item id → agy child id, once bound (see {@link #subagents}). */
         final Map<String, String> boundChildren = new LinkedHashMap<>();
 
@@ -1137,8 +1396,11 @@ final class AcpRuntime implements TaskRuntime {
             if (!"inProgress".equals(item.optString("status")) && !item.has("completedAt")) item.put("completedAt", System.currentTimeMillis());
             Object input = update.opt("rawInput");
             if (input instanceof JSONObject) {
-                String raw = AcpToolLabels.sanitize(redact(input.toString()));
-                item.put("arguments", raw.length() <= 4000 ? new JSONObject(raw) : new JSONObject().put("summary", clip(raw, 4000)));
+                // Each string value is redacted on its own; the serialized document is never edited.
+                JSONObject arguments = (JSONObject) redactJson(input, MAX_REDACTED_CHARS);
+                String serialized = arguments.toString();
+                item.put("arguments", serialized.length() <= MAX_ARGUMENT_CHARS ? arguments
+                        : new JSONObject().put("summary", clip(serialized, MAX_REDACTED_CHARS)));
             }
             if ("invoke_subagent".equals(item.optString("toolName"))) {
                 // A task card for the child: the page shows it instead of a generic activity row.
@@ -1160,7 +1422,7 @@ final class AcpRuntime implements TaskRuntime {
                     }
                 }
                 if (out.length() > 0) item.put("result", new JSONObject().put("content",
-                        new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(AcpToolLabels.sanitize(redact(out.toString())), 4000)))));
+                        new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(AcpToolLabels.sanitize(redact(out.toString())), MAX_REDACTED_CHARS)))));
             }
             if ("failed".equals(item.optString("status")) && !item.has("error")) item.put("error", toolError(item, update));
             flush(true);

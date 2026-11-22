@@ -393,26 +393,19 @@ public final class ComposerReliabilityTest extends UiAutomatorTestCase {
                 new Entry(CHAT, "description", "(Remove attachment |移除附件 )" + java.util.regex.Pattern.quote(filename), true)
                         .waitForExists(8000));
     }
+    /**
+     * A delivered request that failed is never put back into the draft (nor resent): the failure
+     * card offers "Continue" in the same conversation instead.
+     */
     void restoreFailedTask(String text, JSONArray selected) throws Exception {
+        Node proceed = new Node("continue-failed-task");
+        assertTrue("Failed task must offer Continue", proceed.waitForExists(25000));
+        capture("failure");
+        assertTrue("The draft-restore action is gone", !new Node("restore-failed-task").waitForExists(500));
         expectDraft("");
         expectAttachments(0);
-        Node restore = new Node("restore-failed-task");
-        assertTrue("Failed task must offer draft recovery", restore.waitForExists(25000));
-        capture("failure");
-        assertTrue(restore.act());
-        expectDraft(text);
-        expectAttachments(selected.length());
-        JSONArray restored = attachments();
-        for (int i = 0; i < selected.length(); i++) {
-            JSONObject expected = selected.getJSONObject(i);
-            JSONObject actual = restored.getJSONObject(i);
-            for (String key : new String[]{"id", "name", "mime", "size"})
-                assertEquals("Restored attachment " + key, expected.get(key), actual.get(key));
-            expectAttachment(expected.getString("name"));
-        }
-        assertEquals("Restoring a draft must not publish another task", evidence.getString("taskId"), ownTask());
-        evidence.put("draftRestored", true).put("attachmentsRestored", true);
-        capture("restored");
+        assertEquals("Showing the failure must not publish another task", evidence.getString("taskId"), ownTask());
+        evidence.put("draftRestored", false).put("continueOffered", true).put("failedText", text).put("failedAttachments", selected.length());
     }
     void failureMissing() throws Exception {
         String text = "未发送草稿：附件失效时请保留这段文字。";

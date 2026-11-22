@@ -79,7 +79,8 @@ export interface AgentChatScreenProps {
   pendingSubmission?: {threadId: string; text: string; requestId: string; action: 'sendMessage' | 'steer' | 'continue'} | null;
   onRetrySubmission: () => void;
   onContinueWithoutResending: () => void;
-  onRestoreFailedTask: (taskId: string) => void;
+  /** Continue a failed task in the same conversation (the original request is never resent). */
+  onContinueFailedTask: (taskId: string) => void;
   onDraftChange: (value: string) => void;
   onDictationDraftChange: (value: string, expected: {threadId: string; revision: string; text: string}) => Promise<boolean>;
   onSend: () => void;
@@ -135,17 +136,21 @@ function PendingSubmissionCard({text, language, onRetry, onContinue}: {text: str
   </View>;
 }
 
-function FailedTaskCard({failure, language, busy, onRestore}: {failure: {taskId: string; message: string; prompt: string}; language: Language; busy: boolean; onRestore: (taskId: string) => void}) {
-  const t = textFor(language);
+/** A failed task: its error summary and "Continue" in the same conversation; the request is never put back or resent. */
+function FailedTaskCard({failure, language, busy, onContinue}: {failure: {taskId: string; message: string}; language: Language; busy: boolean; onContinue: (taskId: string) => void}) {
+  const [expanded, setExpanded] = useState(false), t = textFor(language);
   return <View testID="failed-task-card" style={styles.pendingSubmission}>
     <Label role="meta" style={{color: colors.error}}>{t('taskFailed')}</Label>
-    {!!failure.message && <Label selectable role="meta">{failure.message}</Label>}
-    {!!failure.prompt && <OriginalRequestPreview text={failure.prompt} language={language}/>}
-    <Label role="caption" style={styles.secondary}>{t('restoreDraftExplanation')}</Label>
-    <Pressable testID="restore-failed-task" accessibilityRole="button" accessibilityLabel={t('restoreFailedRequest')}
-      accessibilityState={{disabled: busy}} disabled={busy} onPress={() => onRestore(failure.taskId)}
+    {!!failure.message && <Pressable testID="failed-task-details" accessibilityRole="button" accessibilityState={{expanded}}
+      accessibilityLabel={t(expanded ? 'hideDetails' : 'showDetails')} onPress={() => setExpanded(!expanded)} style={styles.pendingPreviewToggle}>
+      <Label selectable role="caption" numberOfLines={expanded ? undefined : 2} style={styles.flex}>{failure.message}</Label>
+      <Icon name={expanded ? 'chevron_down' : 'chevron_right'} size={16} color={colors.secondary}/>
+    </Pressable>}
+    <Label role="caption" style={styles.secondary}>{t('continueTaskExplanation')}</Label>
+    <Pressable testID="continue-failed-task" accessibilityRole="button" accessibilityLabel={t('continueTask')}
+      accessibilityState={{disabled: busy}} disabled={busy} onPress={() => onContinue(failure.taskId)}
       style={[styles.pendingRetry, busy && styles.sendDisabled]}>
-      <Icon name="arrow_left" size={16} color={chatColors.icon}/><Label role="meta">{t('restoreFailedRequest')}</Label>
+      <Icon name="refresh" size={16} color={chatColors.icon}/><Label role="meta">{t('continueTask')}</Label>
     </Pressable>
   </View>;
 }
@@ -598,7 +603,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       {workspaces.map(workspace => <WorkspaceCard key={`${workspace.screenKey}/${workspace.generation}`} workspace={workspace} language={language} onPress={() => props.onOpenWorkspace(workspace)}/>)}
       {props.session?.questions.map(question => <PendingCard key={question.key} question={question} language={language} busy={props.busy} onAnswer={props.onAnswer} onOpenRequest={() => openRequests(question.key)}/>)}
       {!!props.session?.nativeOnlyRequests && <View style={styles.question}><Label role="label">{t('needsYou')}</Label><Pressable accessibilityRole="button" onPress={() => openRequests()} style={styles.answerButton}><Label role="meta">{language === 'zh' ? '查看待处理请求' : 'Review pending requests'}</Label></Pressable></View>}
-      {taskFailure && <FailedTaskCard key={taskFailure.taskId} failure={taskFailure} language={language} busy={props.busy || props.loading} onRestore={props.onRestoreFailedTask}/>}
+      {taskFailure && <FailedTaskCard key={taskFailure.taskId} failure={taskFailure} language={language} busy={props.busy || props.loading} onContinue={props.onContinueFailedTask}/>}
       {props.recovery.map(entry => <View key={entry.id} style={styles.pendingSubmission}>
         {!!entry.text && <OriginalRequestPreview text={entry.text} language={language}/>}
         {entry.attachments.map(item => <Label key={item.id} role="caption">{item.name}</Label>)}

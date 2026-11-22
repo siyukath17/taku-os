@@ -6,37 +6,58 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** Issue #25 F3: a failed request comes back for edit / retry without overwriting a newer draft. */
+/** Issue #25 F3: an undelivered request comes back for edit / retry; a failed task is continued instead. */
 class AssistantFailureTest {
   @Test fun microphonePermissionIsDistinctFromDisabledVoicePolicy() {
     assertEquals("VOICE_PERMISSION_REQUIRED", org.agentos.agent.home.assistant.AssistantSession.voiceError("PERMISSION_DENIED"))
     assertEquals("VOICE_DISABLED", org.agentos.agent.home.assistant.AssistantSession.voiceError("POLICY_DISABLED"))
     assertEquals("VOICE_BUSY", org.agentos.agent.home.assistant.AssistantSession.voiceError("RESOURCE_BUSY"))
   }
-  @Test fun asyncTaskFailureRestoresTheRequestAsDraft() {
-    val s = AssistantState(pending = "Find a flight to Kyoto", task = "running").failedWith("TASK_FAILED", "Find a flight to Kyoto")
+  // A delivered request that fails as a task or turn is continued, never put back or resent.
+  @Test fun asyncTaskFailureKeepsTheDraftAndOffersContinue() {
+    val s = AssistantState(threadId = "t", pending = "Find a flight to Kyoto", task = "failed", taskId = "42")
+      .failedWith("TASK_FAILED", "Find a flight to Kyoto", "42")
     assertEquals("TASK_FAILED", s.error)
-    assertEquals("Find a flight to Kyoto", s.draft)
-    assertEquals("Find a flight to Kyoto", s.failedText)
+    assertEquals("", s.draft)
+    assertNull(s.failedText)
+    assertNull(s.retryText)
+    assertEquals("42", s.failedTaskId)
     assertNull(s.pending)
     assertFalse(s.sending)
-    assertEquals("Find a flight to Kyoto", s.retryText)
+    check(s.canContinue && s.canRetry)
   }
 
-  @Test fun aNewerDraftIsNeverOverwritten() {
-    val s = AssistantState(pending = "first", draft = "second thought").failedWith("TASK_FAILED", "first")
+  @Test fun aTaskFailureNeverTouchesANewerDraft() {
+    val s = AssistantState(pending = "first", draft = "second thought").failedWith("TASK_FAILED", "first", "7")
     assertEquals("second thought", s.draft)
-    assertEquals("first", s.failedText)
-    assertEquals("second thought", s.retryText)
+    assertNull(s.failedText)
+    assertEquals("7", s.failedTaskId)
   }
 
-  @Test fun clearedDraftFallsBackToTheFailedRequest() {
-    val s = AssistantState().failedWith("TURN_FAILED", "  hello  ").copy(draft = "")
+  @Test fun turnFailureWaitsForItsTaskBeforeContinue() {
+    val s = AssistantState(task = "failed").failedWith("TURN_FAILED", "  hello  ")
+    assertEquals("", s.draft)
+    assertNull(s.retryText)
+    assertFalse(s.canContinue)
+    assertFalse(s.canRetry)
+    val known = s.failedWith("TASK_FAILED", null, "9")
+    check(known.canContinue)
+  }
+
+  @Test fun continueIsNotOfferedWhileWorking() {
+    val s = AssistantState(failedTaskId = "9", error = "TASK_FAILED", task = "queued")
+    assertFalse(s.canContinue)
+  }
+
+  @Test fun aRejectedSendStillComesBackAsDraft() {
+    val s = AssistantState().failedWith("DRAFT_REVISION_CONFLICT", "  hello  ")
+    assertEquals("hello", s.draft)
     assertEquals("hello", s.retryText)
+    assertNull(s.failedTaskId)
   }
 
   @Test fun unknownTextKeepsEarlierFailure() {
-    val s = AssistantState(failedText = "earlier").failedWith("TASK_FAILED", null)
+    val s = AssistantState(failedText = "earlier").failedWith("NETWORK_UNAVAILABLE", null)
     assertEquals("earlier", s.failedText)
     assertEquals("", s.draft)
   }

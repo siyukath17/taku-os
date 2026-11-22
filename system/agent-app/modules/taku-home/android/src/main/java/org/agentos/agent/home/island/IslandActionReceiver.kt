@@ -29,7 +29,7 @@ class IslandActionReceiver : BroadcastReceiver() {
           session.state.first { state -> (state.threadId ?: "entry") != thread || (state.activityId ?: "entry") != activity || when (intent.action) {
             "stop" -> state.taskId != null || state.turn?.active == true
             "reply" -> state.turn?.suggestions?.any { it.id == intent.getStringExtra("suggestion") } == true
-            "retry" -> state.retryText != null
+            "retry" -> state.canRetry
             else -> true
           } }
         }

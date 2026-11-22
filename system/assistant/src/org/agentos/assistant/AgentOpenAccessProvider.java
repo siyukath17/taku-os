@@ -33,7 +33,7 @@ public final class AgentOpenAccessProvider extends ContentProvider {
         "config/value/write", "config/mcpServer/reload", "mcpServerStatus/list", "account/usage/read", "account/rateLimits/read"));
     private static final Set<String> SYSTEM_AI = Set.of("readSystemAi", "manageSystemAi", "setSystemAi",
             "bindSystemAi", "bindSystemAiModel", "reorderSystemAi", "restoreSystemAi", "deleteSystemAiGroup");
-    private static final Set<String> TURN_CONTROL = Set.of("interrupt", "cancelQueued");
+    private static final Set<String> TURN_CONTROL = Set.of("interrupt", "cancelQueued", "continueTask");
     private static final int INLINE_BYTES = 256 * 1024, MAX_RESULT_BYTES = 8 * 1024 * 1024, TOTAL_BYTES = 16 * 1024 * 1024;
     private final LinkedHashMap<String, Payload> payloads = new LinkedHashMap<>();
     private final ScheduledExecutorService expiry = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -195,6 +195,8 @@ public final class AgentOpenAccessProvider extends ContentProvider {
                 String thread = validated.getString("threadId");
                 result = method.equals("interrupt")
                         ? TaskRequests.interrupt(thread, validated.getString("turnId"))
+                        : method.equals("continueTask")
+                        ? TaskRequests.continueTask(thread, validated.getString("taskId"))
                         : TaskRequests.cancelQueued(thread, validated.getString("taskId"));
             } else if (SYSTEM_AI.contains(method)) {
                 result = SystemAiUiBridge.execute(context, method, AgentGatewayProtocol.request(method, arg));

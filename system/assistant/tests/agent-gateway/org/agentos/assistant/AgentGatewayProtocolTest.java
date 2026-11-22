@@ -158,6 +158,12 @@ public final class AgentGatewayProtocolTest {
                 .put("taskId", "../ready").toString()));
         check(AgentGatewayProtocol.request("cancelQueued", new JSONObject().put("threadId", THREAD)
                 .put("taskId", "12345").toString()).getString("taskId").equals("12345"));
+        rejects(() -> AgentGatewayProtocol.request("continueTask", new JSONObject().put("threadId", THREAD)
+                .put("taskId", "../ready").toString()));
+        rejects(() -> AgentGatewayProtocol.request("continueTask", new JSONObject().put("threadId", THREAD)
+                .put("taskId", "12345").put("text", "resend me").toString()));
+        check(AgentGatewayProtocol.request("continueTask", new JSONObject().put("threadId", THREAD)
+                .put("taskId", "12345").toString()).getString("taskId").equals("12345"));
         JSONObject threadWorkspaces = new JSONObject().put("threadId", THREAD);
         JSONObject homeWorkspaces = new JSONObject().put("scope", "home");
         check(AgentGatewayProtocol.request("getWorkspaces", threadWorkspaces.toString()).similar(threadWorkspaces));

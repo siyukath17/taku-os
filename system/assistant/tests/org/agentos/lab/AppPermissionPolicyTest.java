@@ -22,7 +22,7 @@ public final class AppPermissionPolicyTest {
                 "jev/status", "jev/connect", "jev/enable", "jev/futureOperation",
                 "account/login/start", "account/login/cancel", "account/login/futureOperation",
                 "capture/read", "capture/request", "capture/accept", "capture/dismiss",
-                "capture/openConversation", "capture/futureOperation", "interrupt", "cancelQueued", "readTaskDetail",
+                "capture/openConversation", "capture/futureOperation", "interrupt", "cancelQueued", "continueTask", "readTaskDetail",
                 "requests/futureMutation", "accounts/futureMutation", "composer/futureMutation"}) {
             check("PERMISSION_DENIED".equals(AgentOpenAccessPolicy.denial(method, scope -> {
                 try { return store.check(app, scope).getBoolean("allowed"); }

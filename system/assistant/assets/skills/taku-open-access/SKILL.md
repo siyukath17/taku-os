@@ -33,7 +33,7 @@ On `$D`, third-party callers need an explicit `taku.root` grant for `manageAssis
 configuration writes/reloads, System AI mutations, and writes under `requests/`,
 `accounts/`, `composer/` and `skills/`. This includes approval responses, account
 login/cancel/refresh/key changes, draft/option changes and message submission.
-All `capture/*`, `jev/*`, `account/login/*` operations (including reads), `interrupt`, `cancelQueued` and
+All `capture/*`, `jev/*`, `account/login/*` operations (including reads), `interrupt`, `cancelQueued`, `continueTask` and
 `readTaskDetail` also require root: capture can analyze screenshots and start tasks,
 and task control/detail must not be available through a control-only grant.
 `taku.control` alone returns `PERMISSION_DENIED` before argument parsing or execution,
@@ -281,11 +281,13 @@ taku_call "$D" composer/receipt '{"threadId":"THREAD_UUID","requestId":"REQUEST_
 taku_call "$D" composer/settle '{"threadId":"THREAD_UUID","requestId":"REQUEST_UUID"}'
 taku_call "$D" composer/release '{"threadId":"THREAD_UUID","requestId":"REQUEST_UUID"}'
 taku_call "$D" composer/restore '{"threadId":"THREAD_UUID","expectedRevision":"REVISION","recoveryId":"RECOVERY_UUID"}'
+# Deprecated: a failed task is continued with continueTask, not restored into the draft.
 taku_call "$D" composer/restoreTask '{"threadId":"THREAD_UUID","expectedRevision":"REVISION","taskId":"TASK_ID"}'
 taku_call "$D" composer/preserveDraft '{"threadId":"THREAD_UUID","recoveryId":"RECOVERY_UUID","text":"An edit to keep"}'
 taku_call "$D" composer/handoff '{"threadId":"THREAD_UUID","handoffId":"HANDOFF_UUID","text":"A draft to review"}'
 taku_call "$D" interrupt '{"threadId":"THREAD_UUID","turnId":"ACTIVE_TURN_ID"}'
 taku_call "$D" cancelQueued '{"threadId":"THREAD_UUID","taskId":"QUEUED_TASK_ID"}'
+taku_call "$D" continueTask '{"threadId":"THREAD_UUID","taskId":"FAILED_TASK_ID"}'
 ```
 
 ```sh
@@ -301,7 +303,7 @@ Submit attachment IDs in order; attachment-only messages are valid. For follow-u
 
 Options accept `model,effort,serviceTier,multiAgentMode,permissionMode,responseStyle`; null clears the override. Read `options,effective,models` for available values. Errors: `MODEL_UNAVAILABLE`, `EFFORT_UNSUPPORTED`, `SERVICE_TIER_UNSUPPORTED`. The composer screenshot switch is distinct from Android privacy. Its read/write return `{enabled}`; setter needs boolean `enabled`, errors `INVALID_ARGUMENT/SETTINGS_WRITE_FAILED`. Authorized invocation images last two minutes; `SCREENSHOT_UNAVAILABLE` returns notSent and retains the draft. Reinvoke or turn the preference off. Receipt reads perform no capture or send.
 
-Interrupt targets the exact active turn, pauses its goal, and returns `TURN_CHANGED` if stale. `cancelQueued` returns `cancellationRequested:true`; re-read task state. Errors: `TASK_THREAD_MISMATCH`, `TASK_FINISHED`, `TURN_STARTED`.
+Interrupt targets the exact active turn, pauses its goal, and returns `TURN_CHANGED` if stale. `cancelQueued` returns `cancellationRequested:true`; re-read task state. Errors: `TASK_THREAD_MISMATCH`, `TASK_FINISHED`, `TURN_STARTED`. `continueTask` (the GUI's "Continue") resumes a failed task in the same conversation without resending its text and returns the new `taskId`; errors `TASK_NOT_FAILED`, `TASK_NOT_FINISHED`, `TASK_ACTIVE`, `TASK_THREAD_MISMATCH`.
 
 ## Taku Audio settings
 

@@ -25,6 +25,12 @@ import java.util.concurrent.CountDownLatch;
 final class FakeAcpAgent implements AcpProcessTransport {
     enum Scenario {
         NORMAL, NEEDS_AUTH, PROMPT_AUTH, HANG_UNTIL_CANCEL, IGNORE_CANCEL, CRASH,
+        /** Partial answer, then exits with a network error on stderr (transient). */
+        CRASH_NETWORK,
+        /** session/prompt answers a 503 UNAVAILABLE agent error (transient). */
+        PROMPT_UNAVAILABLE,
+        /** session/prompt answers an internal agent error (not transient). */
+        PROMPT_INTERNAL,
         /** authenticate: URL on stderr, succeeds once the browser "visited" it. */
         AUTH_URL_STDERR,
         /** authenticate: URL JSON-escaped inside a protocol notification. */
@@ -454,7 +460,17 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     chunk("Working on it");
                     promptStarted.countDown();
                     return false;
+                case PROMPT_UNAVAILABLE:
+                    chunk("Started. ");
+                    send(new JSONObject().put("id", promptId).put("error", new JSONObject().put("code", -32603)
+                            .put("message", "googleapi: Error 503: The model is overloaded. UNAVAILABLE")));
+                    return false;
+                case PROMPT_INTERNAL:
+                    send(new JSONObject().put("id", promptId).put("error", new JSONObject().put("code", -32603)
+                            .put("message", "internal error: nil map")));
+                    return false;
                 case CRASH:
+                case CRASH_NETWORK:
                     chunk("Partial answer before the crash");
                     promptStarted.countDown();
                     Thread.sleep(50);
@@ -499,7 +515,13 @@ final class FakeAcpAgent implements AcpProcessTransport {
 
         @Override public InputStream stdout() { return clientReads; }
         @Override public OutputStream stdin() { return clientWrites; }
-        @Override public InputStream stderr() { return auth() ? errReads : new java.io.ByteArrayInputStream("token=abc123 secret stuff\n".getBytes(StandardCharsets.UTF_8)); }
+        @Override public InputStream stderr() {
+            if (auth()) return errReads;
+            String text = scenario == Scenario.CRASH_NETWORK
+                    ? "rpc error: code = UNAVAILABLE desc = read tcp: connection reset by peer token=abc123\n"
+                    : "token=abc123 secret stuff\n";
+            return new java.io.ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
+        }
         @Override public boolean alive() { return !destroyed && thread.isAlive(); }
         @Override public Integer exitCode() { return alive() ? null : (exit == null ? 0 : exit); }
 

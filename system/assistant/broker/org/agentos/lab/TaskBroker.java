@@ -166,7 +166,7 @@ public final class TaskBroker {
                     notifyUser(request.getString("id"));
                 }
             } catch (Exception invalidRecord) {
-                quarantine(directory);
+                safeQuarantine(directory);
             }
         }
     }
@@ -213,6 +213,20 @@ public final class TaskBroker {
         catch (Exception unavailable) { System.err.println("phone mcp host unavailable: " + unavailable.getMessage()); }
         MagpieSettings.start();
         for (; ; ) {
+            // Nothing a task, a damaged record or a runtime does may end this loop: it is the broker.
+            try {
+                serviceTasks();
+            } catch (Exception | LinkageError unexpected) {
+                System.err.println("broker loop: " + unexpected);
+            }
+            // tick() never throws: a Codex app server exit is logged and retired, not fatal here.
+            CodexAppServer.tick();
+            Thread.sleep(150);
+        }
+    }
+
+    /** One pass over ready tasks; each task's failure is recorded on that task alone. */
+    static void serviceTasks() {
             File[] dirs = TASKS.listFiles();
             if (dirs != null) {
                 Arrays.sort(dirs, Comparator.comparing(File::getName));
@@ -222,7 +236,7 @@ public final class TaskBroker {
                             || new File(dir, "done").exists()) continue;
                     try {
                         run(dir);
-                    } catch (Exception e) {
+                    } catch (Exception | LinkageError e) {
                         try {
                             JSONObject r = new JSONObject(read(new File(dir, "request.json")));
                             JSONObject diagnostic = new JSONObject().put("type", e.getClass().getName());
@@ -238,13 +252,27 @@ public final class TaskBroker {
                             notifyUser(r.getString("id"));
                             write(new File(dir, "done"), "failed");
                         } catch (Exception invalidRecord) {
-                            quarantine(dir);
+                            safeQuarantine(dir);
                         }
                     }
                 }
             }
-            CodexAppServer.tick();
-            Thread.sleep(150);
+    }
+
+    /**
+     * {@link #quarantine} that never throws: when even preserving the record fails, the task is
+     * still closed with a {@code done} marker so the loop does not retry it forever.
+     */
+    static void safeQuarantine(File directory) {
+        try {
+            quarantine(directory);
+        } catch (Exception failure) {
+            System.err.println("quarantine " + directory.getName() + ": " + failure);
+            try {
+                write(new File(directory, "done"), "failed");
+            } catch (Exception unwritable) {
+                System.err.println("quarantine " + directory.getName() + " unclosable: " + unwritable);
+            }
         }
     }
 
@@ -264,7 +292,7 @@ public final class TaskBroker {
                 try {
                     request = new JSONObject(read(new File(directory, "request.json")));
                 } catch (Exception invalidRecord) {
-                    quarantine(directory);
+                    safeQuarantine(directory);
                     continue;
                 }
                 if ("agent_control".equals(request.optString("kind")))
@@ -306,6 +334,10 @@ public final class TaskBroker {
         RuntimeRouter router = router();
         RuntimeRouter.Route route = router.route(r);
         write(new File(dir, "runtime-route.json"), route.json().toString());
+        // "Continue" after a failed turn carries no user text. ACP resumes its agent session; other
+        // runtimes get the continuation instruction as the turn's text.
+        if (r.optJSONObject("continuation") != null && r.optString("prompt").isBlank() && !RuntimeRouter.ACP.equals(route.runtime))
+            r.put("prompt", AcpRuntime.CONTINUE_PROMPT);
         router.select(route).run(dir, r);
         notifyUser(r.getString("id"));
     }

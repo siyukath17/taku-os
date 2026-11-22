@@ -28,12 +28,13 @@ Responses over 256 KiB return `{ok:true,resultUri:"content://org.agentos.assista
 | `composer/handoff` | `{threadId,handoffId,text}` | Draft snapshot after applying a handoff once and saving any displaced draft |
 | `composer/preserveDraft` | `{threadId,recoveryId,text}` | Draft snapshot after preserving an edit in recovery without changing the active text |
 | `composer/restore` | `{threadId,expectedRevision,recoveryId}` | Draft snapshot after restoring a saved draft into an empty editor |
-| `composer/restoreTask` | `{threadId,expectedRevision,taskId}` | Draft snapshot after restoring a failed task from that conversation |
+| `composer/restoreTask` | `{threadId,expectedRevision,taskId}` | Deprecated (kept for old callers): draft snapshot after restoring a failed task. The GUI no longer puts a failed request back into the draft; use `continueTask`. |
 | `composer/options/read`, `composer/options/write` | `{threadId}` or `{threadId,options}` | `{threadId,options,effective,models}`. `null` removes a thread override. |
 | `sendMessage` | `{threadId,text,requestId}` | `{threadId,requestId,taskId?,state,code?,replayed,createdAt}` |
 | `steer` | `{threadId,text,expectedTurnId,requestId}` | Durable `{requestId,threadId,state,code?,result?,replayed,createdAt}`; exact current turn required |
 | `interrupt` | `{threadId,turnId}` | Native `turn/interrupt` result; pauses an active goal before interruption |
 | `cancelQueued` | `{threadId,taskId}` | `{threadId,taskId,cancellationRequested:true}`; same-thread queued task only; a started turn requires `interrupt` |
+| `continueTask` | `{threadId,taskId}` | `{threadId,taskId,continuationOf}`: a new task in the same conversation that continues the failed task `taskId` (the GUI's "Continue"). No user text is resent and no user message is added; ACP loads the interrupted agent session (`session/load`) and asks it to continue without repeating completed steps, falling back to the conversation transcript. Errors: `TASK_THREAD_MISMATCH`, `TASK_NOT_FINISHED`, `TASK_NOT_FAILED`, `TASK_ACTIVE` (the conversation already has a queued/running task). |
 | `live/task-read` | `{threadId,taskId,requestId,text}` | `{taskId,state,terminal,needsUser,cancellationRequested,turnId?,goalActive?,reply?,replyTruncated?}` for the exact published `sendMessage` receipt |
 | `live/task-replace` | `{threadId,taskId,requestId,text}` | Same task snapshot after requesting cancellation of an owned read-only query. It never submits the replacement. |
 | `live/task-cancel` | `{threadId,taskId,requestId,text}` | Same task snapshot after explicit cancellation of an owned task, regardless of its permission mode. A finished task returns its actual terminal snapshot. |

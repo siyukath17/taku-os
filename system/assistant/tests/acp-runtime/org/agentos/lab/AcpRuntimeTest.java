@@ -95,6 +95,7 @@ public final class AcpRuntimeTest {
         check("http://127.0.0.1:7890".equals(launch.env.get("HTTPS_PROXY")), "launch: HTTPS_PROXY is forwarded");
         check("1".equals(launch.env.get("AGY_DISABLE_AUTO_UPDATE")) && "1".equals(launch.env.get("DISABLE_AUTO_UPDATE")),
                 "launch: auto-update is disabled");
+        check("0".equals(launch.env.get("GIT_TERMINAL_PROMPT")), "launch: git never blocks the turn on a terminal prompt");
 
         JSONObject init = agent.methods("initialize").get(0).getJSONObject("params");
         check(init.getInt("protocolVersion") == 1 && !init.getJSONObject("clientCapabilities").getBoolean("terminal"),
@@ -216,6 +217,7 @@ public final class AcpRuntimeTest {
         check(!run.isAlive() && failures.isEmpty(), "ignored cancel: run returns " + failures);
         check("failed".equals(read(dir, "done")) && "stop-unconfirmed".equals(json(dir, "diagnostic.json").getString("type")),
                 "ignored cancel: unconfirmed stop fails honestly");
+        check(agent.launches.size() == 1, "ignored cancel: an unconfirmed stop is never continued automatically");
         check(agent.processes.get(0).destroyed, "ignored cancel: process force-reclaimed");
     }
 
@@ -253,6 +255,7 @@ public final class AcpRuntimeTest {
         runtime.run(next, request("110", "full", null));
         check("completed".equals(read(next, "done")) && agent.launches.size() == 2,
                 "recovery: the next task starts a fresh agent and completes");
+        check(agent.methods("session/prompt").size() == 2, "crash without a network cause: not continued automatically");
     }
 
     static void startFailure() throws Exception {
@@ -272,6 +275,184 @@ public final class AcpRuntimeTest {
         check(!redacted.contains("ya29.a0") && !redacted.contains("1//0gAb") && !redacted.contains("zzz"), "redaction hides OAuth tokens: " + redacted);
     }
 
+    private static AcpRuntime.Options fastContinue() throws Exception {
+        AcpRuntime.Options o = options();
+        o.autoContinueBackoffMillis = new ArrayList<>(List.of(10L, 20L));
+        return o;
+    }
+
+    private static String promptText(FakeAcpAgent agent, int nth) {
+        return agent.methods("session/prompt").get(nth).getJSONObject("params").getJSONArray("prompt").getJSONObject(0).getString("text");
+    }
+
+    private static JSONObject chatRequest(String id, String prompt) {
+        return new JSONObject().put("id", id).put("prompt", prompt).put("permissionMode", "full").put("responseLocale", "en")
+                .put("conversationId", AcpChatRuntimeTest.CONV).put("screenshot", "");
+    }
+
+    private static JSONObject toolItem(JSONObject turn, String toolCallId) {
+        JSONArray items = turn.getJSONArray("items");
+        for (int i = 0; i < items.length(); i++)
+            if (items.getJSONObject(i).getString("id").endsWith("-tool-" + toolCallId)) return items.getJSONObject(i);
+        return null;
+    }
+
+    /**
+     * Regression (Pixel 9): redacting the serialized rawInput turned {@code TOKEN ===\"} into
+     * {@code TOKEN =[hidden]"}, ate the escape and failed the whole turn with JSONException; a value
+     * over 4000 chars kept only the document's tail. Values are now redacted one by one.
+     */
+    static void tokenCommandAndLongInput() throws Exception {
+        AcpChatRuntimeTest.Host host = new AcpChatRuntimeTest.Host(new File(taskDir("token-store"), "acp-conversations"));
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL);
+        String command = "echo \"=== 1. SETUP GIT_ASKPASS USING GH AUTH TOKEN ===\"";
+        StringBuilder longValue = new StringBuilder("HEAD-");
+        while (longValue.length() < 6000) longValue.append("abcdefghij");
+        longValue.append("-TAIL");
+        agent.beforeFinish = turn -> List.of(
+                new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", "tc-token").put("title", "Run command")
+                        .put("kind", "execute").put("status", "in_progress")
+                        .put("rawInput", new JSONObject().put("CommandLine", command)),
+                new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-token").put("status", "completed")
+                        .put("rawInput", new JSONObject().put("CommandLine", command).put("access_token", "ya29.zzz").put("Cwd", "/data")),
+                new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", "tc-long").put("title", "Write file")
+                        .put("kind", "edit").put("status", "in_progress")
+                        .put("rawInput", new JSONObject().put("Content", longValue.toString()).put("Lines", new JSONArray().put(1).put(2))),
+                new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", "tc-long").put("status", "completed"));
+        File dir = taskDir("token");
+        new AcpRuntime(options(), agent, null, null, host).run(dir, chatRequest("150", "set up git"));
+        check("completed".equals(read(dir, "done")), "token command: the turn completes instead of failing on JSONException");
+        check(!new File(dir, "diagnostic.json").exists(), "token command: no failure diagnostic");
+        // The persisted conversation is valid JSON end to end.
+        JSONObject stored = new JSONObject(new String(Files.readAllBytes(host.store.file(AcpChatRuntimeTest.CONV).toPath()), StandardCharsets.UTF_8));
+        check(stored.getJSONArray("turns").length() == 1, "token command: one stored turn");
+        JSONObject turn = AcpChatRuntimeTest.lastTurn(host.view());
+        check("completed".equals(turn.getString("status")), "token command: turn completed in the projection");
+        JSONObject token = toolItem(turn, "tc-token");
+        JSONObject args = token == null ? null : token.optJSONObject("arguments");
+        check(args != null && args.getString("CommandLine").startsWith("echo \"=== 1. SETUP GIT_ASKPASS USING GH AUTH TOKEN =")
+                && args.getString("CommandLine").endsWith("\"") && "/data".equals(args.getString("Cwd")),
+                "token command: arguments stay a JSON object with the command string: " + args);
+        check("[hidden]".equals(args.getString("access_token")) && !args.toString().contains("ya29.zzz"),
+                "token command: a credential-named value is hidden: " + args);
+        JSONObject longArgs = toolItem(turn, "tc-long").optJSONObject("arguments");
+        String content = longArgs.getString("Content");
+        check(content.startsWith("HEAD-") && content.endsWith("…") && content.length() <= AcpRuntime.MAX_REDACTED_CHARS
+                && !content.contains("-TAIL") && longArgs.getJSONArray("Lines").length() == 2,
+                "long input: one value keeps its head and is clipped, the rest is intact");
+        check("completed".equals(toolItem(turn, "tc-long").getString("status")), "long input: tool completed");
+    }
+
+    static void redactJsonKeepsStructure() throws Exception {
+        JSONObject in = new JSONObject().put("cmd", "curl -H \"Authorization: Bearer ya29.SECRET\" x")
+                .put("nested", new JSONObject().put("password", "hunter2").put("list", new JSONArray().put("token=abc123").put(7).put(true)))
+                .put("quote", "say \"=== TOKEN ===\" \\ done");
+        JSONObject out = (JSONObject) AcpRuntime.redactJson(in, 4000);
+        JSONObject reparsed = new JSONObject(out.toString());
+        check(!reparsed.toString().contains("ya29.SECRET") && !reparsed.toString().contains("hunter2") && !reparsed.toString().contains("abc123"),
+                "redactJson: credentials hidden: " + reparsed);
+        check(reparsed.getJSONObject("nested").getJSONArray("list").getInt(1) == 7 && reparsed.getJSONObject("nested").getJSONArray("list").getBoolean(2),
+                "redactJson: numbers and booleans kept");
+        check(reparsed.getString("quote").startsWith("say \"=== TOKEN =") && reparsed.getString("quote").contains("\\"),
+                "redactJson: quotes and backslashes survive as a valid string: " + reparsed.getString("quote"));
+        String plain = AcpRuntime.redact("x".repeat(5000));
+        check(plain.length() == 5000, "redact: plain text is never truncated (or tail-cut)");
+    }
+
+    /** A network crash mid-turn is continued in the same session; the user's text is not resent. */
+    static void autoContinuesTransientCrash() throws Exception {
+        AcpChatRuntimeTest.Host host = new AcpChatRuntimeTest.Host(new File(taskDir("auto-store"), "acp-conversations"));
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.CRASH_NETWORK, FakeAcpAgent.Scenario.NORMAL);
+        agent.loadSession = true;
+        File dir = taskDir("auto");
+        Recorder recorder = new Recorder(dir);
+        new AcpRuntime(fastContinue(), agent, recorder, null, host).run(dir, chatRequest("160", "Turn on Wi-Fi"));
+        check("completed".equals(read(dir, "done")), "auto continue: the task completes after a network crash");
+        check(agent.launches.size() == 2, "auto continue: one fresh agent process");
+        check(agent.methods("session/load").size() == 1
+                && "s-1".equals(agent.methods("session/load").get(0).getJSONObject("params").getString("sessionId")),
+                "auto continue: the interrupted session is loaded");
+        check("Turn on Wi-Fi".equals(promptText(agent, 0)) && AcpRuntime.CONTINUE_PROMPT.equals(promptText(agent, 1)),
+                "auto continue: the second prompt is the continuation instruction, not the user's text");
+        check(recorder.messages.contains("Network hiccup, continuing (1/2)…"), "auto continue: progress names the attempt " + recorder.messages);
+        JSONArray turns = host.view().getJSONArray("turns");
+        JSONObject turn = turns.getJSONObject(turns.length() - 1);
+        check(turns.length() == 1 && "completed".equals(turn.getString("status")), "auto continue: one conversation turn, completed");
+        check("Partial answer before the crash".equals(AcpChatRuntimeTest.item(turn, "agentMessage", 0).getString("text"))
+                && AcpChatRuntimeTest.item(turn, "agentMessage", 1).getString("text").startsWith("Done"),
+                "auto continue: the continuation's reply is its own message after the partial one");
+        check(json(dir, "runtime-info.json").getInt("autoContinuation") == 1, "auto continue: runtime-info records the continuation");
+    }
+
+    /** A 503 UNAVAILABLE agent error is continued; without a loadable session the original request is carried. */
+    static void autoContinuesTransientAgentError() throws Exception {
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.PROMPT_UNAVAILABLE, FakeAcpAgent.Scenario.NORMAL);
+        File dir = taskDir("auto-503");
+        new AcpRuntime(fastContinue(), agent, null, null).run(dir, request("161", "full", null));
+        check("completed".equals(read(dir, "done")) && agent.launches.size() == 2, "503: continued once and completed");
+        check(promptText(agent, 1).startsWith("Original request:\nTurn on Wi-Fi") && promptText(agent, 1).endsWith(AcpRuntime.CONTINUE_PROMPT),
+                "503: a fresh session gets the original request plus the continuation instruction");
+    }
+
+    static void nonTransientFailsWithoutContinuing() throws Exception {
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.PROMPT_INTERNAL, FakeAcpAgent.Scenario.NORMAL);
+        File dir = taskDir("internal");
+        new AcpRuntime(fastContinue(), agent, null, null).run(dir, request("162", "full", null));
+        check("failed".equals(read(dir, "done")) && agent.launches.size() == 1, "internal agent error: failed, not continued");
+        check("agent-error".equals(json(dir, "diagnostic.json").getString("type")), "internal agent error: diagnostic kept");
+    }
+
+    static void continuationLimitStopsInFailure() throws Exception {
+        FakeAcpAgent agent = new FakeAcpAgent(FakeAcpAgent.Scenario.PROMPT_UNAVAILABLE, FakeAcpAgent.Scenario.PROMPT_UNAVAILABLE,
+                FakeAcpAgent.Scenario.PROMPT_UNAVAILABLE, FakeAcpAgent.Scenario.NORMAL);
+        File dir = taskDir("limit");
+        new AcpRuntime(fastContinue(), agent, null, null).run(dir, request("163", "full", null));
+        check("failed".equals(read(dir, "done")) && agent.launches.size() == 3, "limit: two continuations, then the failure stands");
+        check(json(dir, "state.json").getString("message").contains("reported an error"), "limit: the failure message is the agent error");
+        check(!AcpRuntime.transientFailure(new AcpRuntime.AcpError(AcpRuntime.AUTH_REQUIRED, "UNAVAILABLE"), "")
+                && AcpRuntime.transientFailure(new AcpRuntime.AcpError(-32603, "429 Too Many Requests"), "")
+                && AcpRuntime.transientFailure(new AcpRuntime.AcpError(-32603, "rpc: DEADLINE_EXCEEDED"), "")
+                && !AcpRuntime.transientFailure(new AcpRuntime.AcpError(-32603, "bad request 400"), "")
+                && !AcpRuntime.transientFailure(new IOException("broker internal"), "UNAVAILABLE"),
+                "transient classification: auth, internal and broker errors never continue");
+    }
+
+    /** The user's "Continue": an empty prompt, the interrupted session loaded, no user bubble stored. */
+    static void userContinuation() throws Exception {
+        AcpChatRuntimeTest.Host host = new AcpChatRuntimeTest.Host(new File(taskDir("cont-store"), "acp-conversations"));
+        FakeAcpAgent first = new FakeAcpAgent(FakeAcpAgent.Scenario.PROMPT_INTERNAL);
+        first.loadSession = true;
+        File failed = taskDir("cont-failed");
+        new AcpRuntime(fastContinue(), first, null, null, host).run(failed, chatRequest("170", "Book the table"));
+        check("failed".equals(read(failed, "done")), "continue: the first task failed");
+
+        FakeAcpAgent second = new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL);
+        second.loadSession = true;
+        File dir = taskDir("cont");
+        JSONObject request = chatRequest("171", "").put("continuation", new JSONObject().put("ofTaskId", "170").put("reason", "user"));
+        new AcpRuntime(fastContinue(), second, null, null, host).run(dir, request);
+        check("completed".equals(read(dir, "done")), "continue: completes");
+        check(second.methods("session/load").size() == 1 && AcpRuntime.CONTINUE_PROMPT.equals(promptText(second, 0)),
+                "continue: session/load then the continuation instruction alone");
+        JSONArray turns = host.view().getJSONArray("turns");
+        JSONObject last = turns.getJSONObject(turns.length() - 1);
+        JSONObject user = AcpChatRuntimeTest.item(last, "userMessage", 0);
+        check(turns.length() == 2 && user.getJSONArray("content").getJSONObject(0).getString("text").isEmpty(),
+                "continue: the continuation turn stores no user text (no duplicate bubble)");
+        check("170".equals(json(dir, "runtime-info.json").getJSONObject("continuation").getString("ofTaskId")), "continue: runtime-info names the task");
+
+        // session/load fails: the transcript fallback carries the interrupted request.
+        FakeAcpAgent third = new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL);
+        third.loadSession = true;
+        third.loadFails = true;
+        File fallback = taskDir("cont-fallback");
+        new AcpRuntime(fastContinue(), third, null, null, host).run(fallback,
+                chatRequest("172", "").put("continuation", new JSONObject().put("ofTaskId", "170").put("reason", "user")));
+        check("completed".equals(read(fallback, "done")) && promptText(third, 0).contains("User: Book the table")
+                && promptText(third, 0).endsWith(AcpRuntime.CONTINUE_PROMPT) && !promptText(third, 0).contains("Current message:"),
+                "continue: transcript fallback ends with the continuation instruction: " + promptText(third, 0));
+    }
+
     public static void main(String[] args) throws Exception {
         List<String> ran = new ArrayList<>();
         normalCompletionAndStreaming(); ran.add("normal+streaming");
@@ -284,6 +465,13 @@ public final class AcpRuntimeTest {
         crashThenRecovery(); ran.add("crash+recovery");
         startFailure(); ran.add("start-failure");
         optionsAndRedaction(); ran.add("options");
+        tokenCommandAndLongInput(); ran.add("token-command+long-input");
+        redactJsonKeepsStructure(); ran.add("redact-json");
+        autoContinuesTransientCrash(); ran.add("auto-continue-crash");
+        autoContinuesTransientAgentError(); ran.add("auto-continue-503");
+        nonTransientFailsWithoutContinuing(); ran.add("no-continue-internal");
+        continuationLimitStopsInFailure(); ran.add("continue-limit");
+        userContinuation(); ran.add("user-continuation");
         System.out.println("AcpRuntimeTest passed " + checks + " checks " + ran);
     }
 }

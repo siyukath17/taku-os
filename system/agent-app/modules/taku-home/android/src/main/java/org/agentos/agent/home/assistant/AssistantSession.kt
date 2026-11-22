@@ -60,11 +60,16 @@ data class AssistantState(
   /** Explicit app-development workflow, scoped to one authoritative active turn. */
   val appBuildTurnId: String? = null,
   val error: String? = null,
-  /** Unsent text in the field (restored after a rejected send or a failed task). */
+  /** Unsent text in the field (restored only after a send the gateway rejected; a failed task never touches it). */
   val draft: String = "",
   val draftAttachmentNames: List<String> = emptyList(),
-  /** The request that last failed (rejected send, failed task or turn), kept for edit / retry. */
+  /** A request the gateway did not accept (rejected send, voice, offline), kept for edit / retry. */
   val failedText: String? = null,
+  /**
+   * The broker task that failed after it was accepted (TASK_FAILED / TURN_FAILED). "Continue"
+   * resumes it in the same conversation; the user's text is never put back or resent.
+   */
+  val failedTaskId: String? = null,
   /** The device has a default network with internet capability. */
   val online: Boolean = true,
   /**
@@ -95,11 +100,21 @@ data class AssistantState(
   /** What "Try again" sends: the draft (restored or edited), else the failed request. */
   val retryText: String? get() = draft.ifBlank { failedText }?.takeIf { it.isNotBlank() }
 
+  /** "Continue" applies: an accepted task failed and can be resumed in its conversation. */
+  val canContinue: Boolean get() = failedTaskId != null && error in AssistantSession.TASK_FAILURES && !working
+
+  /** The retry action exists: continue a failed task, or resend a request that was never accepted. */
+  val canRetry: Boolean get() = error != null && (canContinue || retryText != null)
+
   /**
-   * Marks [text] as failed with [code]: it becomes the draft unless the user already typed a
-   * new one, which is never overwritten; [failedText] keeps all of it either way.
+   * Marks a failure with [code]. A request that was never accepted ([text]) becomes the draft
+   * unless the user already typed a new one, which is never overwritten. A failed task or turn
+   * (TASK_FAILED / TURN_FAILED) only records the error and [taskId]: its text was delivered, so
+   * it is neither put back into the draft nor resent; "Continue" resumes the task instead.
    */
-  fun failedWith(code: String, text: String?): AssistantState {
+  fun failedWith(code: String, text: String?, taskId: String? = null): AssistantState {
+    if (code in AssistantSession.TASK_FAILURES)
+      return copy(sending = false, pending = null, error = code, failedTaskId = taskId ?: failedTaskId)
     val lost = text?.trim()?.takeIf { it.isNotEmpty() }
     return copy(sending = false, pending = null, error = code, failedText = lost ?: failedText,
       draft = if (draft.isBlank() && lost != null && lost.length <= AssistantSession.MAX_TEXT) lost else draft)
@@ -869,7 +884,7 @@ class AssistantSession private constructor(private val context: Context, private
     val generation = threadCreation.generation
     // Never steer into a turn the home already gave up on (it may still read active until the interrupt lands).
     val steerTurn = now.turn?.takeIf { it.active && !now.abandoned }?.turnId
-    flow.update { it.copy(expansionRequest = if (keepVoiceEntry || it.voiceContinuous) it.expansionRequest else ++expansionSequence, sending = true, pending = message, error = null, failedText = null, abandoned = false, entry = if (it.entry == EntryMode.Voice && !keepVoiceEntry) EntryMode.None else it.entry,
+    flow.update { it.copy(expansionRequest = if (keepVoiceEntry || it.voiceContinuous) it.expansionRequest else ++expansionSequence, sending = true, pending = message, error = null, failedText = null, failedTaskId = null, abandoned = false, entry = if (it.entry == EntryMode.Voice && !keepVoiceEntry) EntryMode.None else it.entry,
       // The visible voice card keeps its notification identity through capture → reply.
       activityId = if (steerTurn == null && !(keepVoiceEntry && it.entry == EntryMode.Voice)) UUID.randomUUID().toString() else it.activityId,
       island = if (it.voiceContinuous) IslandMode.Hidden else if (it.island == IslandMode.Full) IslandMode.Full else IslandMode.Expanded,
@@ -983,25 +998,26 @@ class AssistantSession private constructor(private val context: Context, private
 
   private fun recoverFailure(current: Editor, code: String, text: String?, taskId: String? = null) {
     if (editor !== current) return
+    // A task or turn that failed after delivery: record the error (and the task to continue) only.
+    // The draft is the user's; the delivered request is never written back into it.
+    if (code in TASK_FAILURES) {
+      // A turn failure names no task; the status poll's TASK_FAILED that follows supplies it.
+      flow.update { it.copy(error = code, failedTaskId = taskId ?: it.failedTaskId) }
+      return
+    }
     val lost = text?.trim()?.takeIf { it.isNotEmpty() && it.length <= MAX_TEXT }
     flow.update { it.copy(error = code, failedText = lost ?: it.failedText) }
-    if ((lost == null && taskId == null) || current.edit != null) return
+    if (lost == null || current.edit != null) return
     scope.launch {
       try {
         composerLock.withLock {
           if (editor !== current || current.edit != null || flow.value.error != code) return@withLock
           val saved = composer.read(current.threadId)
           if (editor !== current || current.edit != null || flow.value.error != code) return@withLock
-          val recovered = when {
-            saved.text.isNotEmpty() || pendingRequest(saved) != null -> saved
-            taskId != null -> composer.restoreTask(saved, taskId)
-            lost != null -> composer.write(saved, lost)
-            else -> saved
-          }
+          // Only a message the gateway refused before delivery comes back into an empty draft.
+          val recovered = if (saved.text.isNotEmpty() || pendingRequest(saved) != null) saved else composer.write(saved, lost)
           if (current.edit?.baseText == saved.text) current.edit?.baseText = recovered.text
           acceptDraft(current, recovered)
-          if (taskId != null && editor === current && flow.value.error == code && flow.value.failedText == null)
-            flow.update { it.copy(failedText = recovered.text.takeIf(String::isNotBlank)) }
         }
       } catch (failure: GatewayException) {
         Log.w(TAG, "could not recover the shared draft: ${failure.code}")
@@ -1013,8 +1029,42 @@ class AssistantSession private constructor(private val context: Context, private
     val current = editor
     val request = composer.savedRequest(current.threadId) ?: current.saved?.pending
     if (request != null) return checkDelivery(current, request)
+    // A delivered task failed: continue it in the same conversation instead of resending its text.
+    if (flow.value.canContinue) return continueFailedTask()
     val text = flow.value.retryText ?: throw AssistantException("NOTHING_TO_RETRY", "there is no failed request or draft to send")
     send(text)
+  }
+
+  /**
+   * "Continue" for a failed task: the broker resumes the interrupted agent session in the same
+   * conversation (no user text is resent, no second user message appears).
+   */
+  fun continueFailedTask() {
+    val now = flow.value
+    val thread = now.threadId ?: throw AssistantException("NOTHING_TO_RETRY", "there is no conversation to continue")
+    val failed = now.failedTaskId?.takeIf { now.canContinue } ?: throw AssistantException("NOTHING_TO_RETRY", "there is no failed task to continue")
+    if (now.sending) throw AssistantException("BUSY", "a message is already being sent")
+    val current = editor
+    flow.update { it.copy(sending = true, error = null, abandoned = false) }
+    scope.launch {
+      try {
+        val result = withContext(worker) {
+          gateway.call("continueTask", JSONObject().put("threadId", thread).put("taskId", failed))
+        }
+        if (editor !== current) return@launch
+        val next = result.optString("taskId").ifEmpty { null }
+        flow.update { it.copy(sending = false, failedTaskId = null, error = null, pending = null,
+          turn = null, task = "queued", taskId = next ?: it.taskId) }
+        ensureStream(thread)
+        ensurePolling(thread)
+      } catch (failure: Exception) {
+        if (failure is kotlinx.coroutines.CancellationException) throw failure
+        val code = (failure as? GatewayException)?.code ?: "CONTINUE_FAILED"
+        Log.w(TAG, "continue failed task: $code")
+        // The failure stands as it was, so "Continue" can be tried again.
+        if (editor === current) flow.update { it.copy(sending = false, error = now.error, failedTaskId = failed) }
+      }
+    }
   }
 
   private fun checkDelivery(current: Editor, request: HomeComposer.Request) {
@@ -1343,6 +1393,7 @@ class AssistantSession private constructor(private val context: Context, private
       .put("working", s.working).put("needsUser", s.needsUser).put("online", s.online)
       .put("pending", s.pending ?: JSONObject.NULL).put("task", s.task ?: JSONObject.NULL).put("error", s.error ?: JSONObject.NULL)
       .put("draft", s.draft).put("failedText", s.failedText ?: JSONObject.NULL)
+      .put("failedTaskId", s.failedTaskId ?: JSONObject.NULL).put("canContinue", s.canContinue)
       .put("draftAttachmentNames", JSONArray(s.draftAttachmentNames))
       .put("turn", s.turn?.let { t ->
         JSONObject().put("turnId", t.turnId).put("active", t.active).put("failed", t.failed)
@@ -1358,6 +1409,8 @@ class AssistantSession private constructor(private val context: Context, private
   companion object {
     private const val CHAT_ACTIVITY = "org.agentos.agent.MainActivity"
     const val MAX_TEXT = 16_000
+    /** Failures of a request that was delivered: continued, never put back into the draft. */
+    val TASK_FAILURES = setOf("TASK_FAILED", "TURN_FAILED")
     /** Saved dictation settings the desktop entry and its field microphone share. */
     const val DESKTOP_SCOPE = "assistant-entry"
     /** Engine reason → the session error the island explains. */

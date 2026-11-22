@@ -32,6 +32,7 @@ internal class AgentGatewayProtocol private constructor() {
         const val COMPOSER_RELEASE = "composer/release"
         const val COMPOSER_HANDOFF = "composer/handoff"
         const val COMPOSER_RESTORE = "composer/restore"
+        /** Deprecated: a failed task is continued ({@code continueTask}), never put back into the draft. Kept for old callers. */
         const val COMPOSER_RESTORE_TASK = "composer/restoreTask"
         const val COMPOSER_CREATE_THREAD = "composer/createThread"
         const val COMPOSER_PRESERVE_DRAFT = "composer/preserveDraft"
@@ -42,7 +43,7 @@ internal class AgentGatewayProtocol private constructor() {
         private val UUID_PATTERN = Pattern.compile("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
         @JvmField val ACTIONS: Set<String> = java.util.Set.of("listThreads", "readSession", "createThread",
             "resumeThread", "sendMessage", "steer", "interrupt", "answer", "getWorkspaces",
-            "openWorkspace", "openSettings", "cancelQueued", "subscribeSession", "unsubscribeSession",
+            "openWorkspace", "openSettings", "cancelQueued", "continueTask", "subscribeSession", "unsubscribeSession",
             "readTaskDetail", "workspaces/list", "workspaces/apps", "workspaces/configure", "workspaces/release", "workspaces/preview", "workspaces/open", "manageSystemAi",
             "workspaces/pause", "workspaces/takeControl", "workspaces/input", "workspaces/returnAndResume", "workspaces/addRequirement", "workspaces/executionStatus",
             "capture/read", "capture/accept", "capture/dismiss", "capture/request", "capture/openConversation", "manageAssistant",
@@ -217,6 +218,7 @@ internal class AgentGatewayProtocol private constructor() {
                 "steer" -> java.util.Set.of("threadId", "text", "expectedTurnId", "requestId")
                 "interrupt" -> java.util.Set.of("threadId", "turnId")
                 "cancelQueued" -> java.util.Set.of("threadId", "taskId")
+                "continueTask" -> java.util.Set.of("threadId", "taskId")
                 "readTaskDetail" -> setOf("taskId")
                 "answer" -> java.util.Set.of("threadId", "key", "response")
                 "openWorkspace" -> java.util.Set.of("threadId", "screenKey", "generation", "source")

@@ -115,7 +115,7 @@ class IslandPublisherService : Service() {
       .putExtra("threadId", state.threadId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     add("open", "Open conversation", action("open", thread, state.activityId))
-    if (state.error != null && state.retryText != null) add("retry", "Try again", action("retry", thread, state.activityId))
+    if (state.canRetry) add("retry", if (state.canContinue) "Continue" else "Try again", action("retry", thread, state.activityId))
     if ((state.error != null && state.retryText != null) || state.retainedVoice != null) {
       val input = PendingIntent.getActivity(this, ID + 1,
         Intent(this, org.agentos.agent.home.assistant.AssistantOverlayActivity::class.java)

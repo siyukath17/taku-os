@@ -10,7 +10,7 @@ public final class AgentOpenAccessPolicy {
             // Gate the entire multiplexed endpoint, including future inner operations.
             "manageAssistant", "manageSystemAi", "setSystemAi", "bindSystemAi",
             "bindSystemAiModel", "reorderSystemAi", "restoreSystemAi", "deleteSystemAiGroup",
-            "interrupt", "cancelQueued", "readTaskDetail");
+            "interrupt", "cancelQueued", "continueTask", "readTaskDetail");
     private static final Set<String> CONTROL_READS = Set.of(
             "requests/list", "requests/read", "accounts/read", "accounts/keys",
             "composer/read", "composer/receipt", "composer/options/read",

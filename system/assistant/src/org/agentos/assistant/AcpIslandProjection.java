@@ -119,6 +119,12 @@ public final class AcpIslandProjection {
                     }
                     case "replying": title = "Taku is writing the result"; trailing = "Writing"; break;
                     case "stopping": title = "Taku is stopping"; trailing = "Stopping"; emphasis = "muted"; break;
+                    case "continuing":
+                        // Automatic continuation after a network hiccup: the summary names the attempt.
+                        title = summary.isEmpty() ? "Network hiccup, continuing" : summary;
+                        trailing = "Continuing";
+                        emphasis = "muted";
+                        break;
                     case "starting":
                         title = remote ? "Sending to remote T3" : "Starting the on-device agent";
                         trailing = "Starting";

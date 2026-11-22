@@ -727,11 +727,18 @@ export function useAgentController() {
     if (selectedRef.current === id) { setPendingSubmission(null); setError(''); }
   }), [composer, pendingSubmission, run, showDraft, updateOptimistic]);
 
-  const restoreFailedTask = useCallback((taskId: string) => changeAttachments(async ({threadId, revision}) => {
-    if (sessionRef.current?.id !== threadId || sessionRef.current.taskFailure?.taskId !== taskId)
+  /**
+   * "Continue" on a failed task: the broker resumes it in the same conversation (the agent session is
+   * loaded and told to continue from where it stopped). The original request is not resent and no
+   * user message is added; the draft is left alone.
+   */
+  const continueFailedTask = useCallback((taskId: string) => run(async () => {
+    const threadId = selectedRef.current;
+    if (!threadId || sessionRef.current?.id !== threadId || sessionRef.current.taskFailure?.taskId !== taskId)
       throw new AgentGatewayError('Task changed', 'TASK_FAILURE_CHANGED');
-    return parseComposerSnapshot(await callAgent('composer/restoreTask', {threadId, expectedRevision: revision, taskId}), threadId);
-  }), [changeAttachments]);
+    await callAgent('continueTask', {threadId, taskId});
+    setRefreshRevision(v => v + 1);
+  }), [run]);
 
   const restoreSavedDraft = useCallback((recoveryId: string) => changeAttachments(async ({threadId, revision}) =>
     parseComposerSnapshot(await callAgent('composer/restore', {threadId, expectedRevision: revision, recoveryId}), threadId)), [changeAttachments]);
@@ -773,7 +780,7 @@ export function useAgentController() {
     optimisticSubmissions: visibleOptimisticSubmissions,
     onRetrySubmission: () => { void retrySubmission(); },
     onContinueWithoutResending: () => { void continueWithoutResending(); },
-    onRestoreFailedTask: (taskId: string) => { void restoreFailedTask(taskId); },
+    onContinueFailedTask: (taskId: string) => { void continueFailedTask(taskId); },
     onDraftChange: updateDraft,
     draftRevision: draftSnapshot?.revision ?? null,
     attachments: draftSnapshot?.attachments ?? [],
