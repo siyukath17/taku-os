@@ -6,8 +6,8 @@
     <string name="chat_current_title">Current conversation</string>
     <string name="chat_more">More options</string>
     <string name="chat_close">Close conversation</string>
-    <string name="chat_input">Message Tako</string>
-    <string name="chat_input_hint">Message Tako</string>
+    <string name="chat_input">Message Taku</string>
+    <string name="chat_input_hint">Message Taku</string>
     <string name="chat_suggest_screen">Ask about this screen</string>
     <string name="chat_stop">Stop task</string>
     <string name="chat_send">Send message</string>

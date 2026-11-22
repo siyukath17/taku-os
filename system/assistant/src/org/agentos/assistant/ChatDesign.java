@@ -69,7 +69,7 @@ public final class ChatDesign {
         return context.getResources().getDimensionPixelSize(dimensionResource);
     }
 
-    /** A fresh tinted UI icon. Brand/app assets and the Tako mark must stay untinted. */
+    /** A fresh tinted UI icon. Brand/app assets and the assistant mark (ic_tako_mark) must stay untinted. */
     public static Drawable icon(Context context, int drawableResource, int tintColor) {
         Drawable drawable = context.getDrawable(drawableResource);
         if (drawable == null) return null;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="workspace_interaction_title">虚拟屏幕</string>
-    <string name="workspace_interaction_app">Tako · %1$s</string>
+    <string name="workspace_interaction_app">Taku · %1$s</string>
     <string name="workspace_interaction_minimize">缩小为悬浮预览</string>
     <string name="workspace_interaction_close">隐藏预览</string>
     <string name="workspace_interaction_edit">补充要求</string>

@@ -62,7 +62,7 @@ The current DS is a development baseline, not final design sign-off: an internal
 
 ## One Session, one conversation
 
-The PRD defines a Session as its conversation, without a separate task interface. A Session contains the user’s request, Tako’s replies, collapsible **Activity**, live workspace previews and results. Changing the presentation must preserve the same thread, task and screen lease; it must not create a second task store.
+The PRD defines a Session as its conversation, without a separate task interface. A Session contains the user’s request, Taku’s replies, collapsible **Activity**, live workspace previews and results. Changing the presentation must preserve the same thread, task and screen lease; it must not create a second task store.
 
 Activity explains how work is progressing. Keep detailed tool output inside it, then leave the conclusion, supporting evidence and useful next actions visible when work finishes. Do not present a tool receipt as proof of business success. Generated cards extend the conversation; they do not replace its history.
 

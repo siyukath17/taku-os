@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="workspace_interaction_title">Virtual screen</string>
-    <string name="workspace_interaction_app">Tako · %1$s</string>
+    <string name="workspace_interaction_app">Taku · %1$s</string>
     <string name="workspace_interaction_minimize">Minimize to floating preview</string>
     <string name="workspace_interaction_close">Hide preview</string>
     <string name="workspace_interaction_edit">Add requirement</string>
