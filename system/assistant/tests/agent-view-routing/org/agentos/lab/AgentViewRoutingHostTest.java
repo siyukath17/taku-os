@@ -152,8 +152,47 @@ public final class AgentViewRoutingHostTest {
                     "threads.json is non-increasing by updatedAt at " + i);
     }
 
+    /**
+     * An ACP turn steered while it ran holds several user messages (opening, then each one added
+     * mid-turn, each followed by the agent's answer): the display projection and its checkpoint keep
+     * them all, in order, inside the one turn.
+     */
+    private static void steeredTurnKeepsEveryUserMessageInOrder() throws Exception {
+        String id = "c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3", turn = "acp-11111111-2222-3333-4444-555555555555";
+        JSONArray items = new JSONArray()
+                .put(user(turn + "-user", "List fruits"))
+                .put(new JSONObject().put("type", "agentMessage").put("id", turn + "-msg-1").put("text", "Apple, Banana").put("phase", "commentary"))
+                .put(user(turn + "-steer-req-1", "Only red ones"))
+                .put(new JSONObject().put("type", "mcpToolCall").put("id", turn + "-tool-1").put("server", "agy").put("tool", "tool").put("status", "completed"))
+                .put(new JSONObject().put("type", "agentMessage").put("id", turn + "-msg-2").put("text", "Apple, Cherry").put("phase", "commentary"))
+                .put(user(turn + "-steer-req-2", "And sort them"))
+                .put(new JSONObject().put("type", "agentMessage").put("id", turn + "-msg-3").put("text", "Apple, Cherry (sorted)").put("phase", "final_answer"));
+        JSONObject thread = new JSONObject().put("id", id).put("preview", "List fruits").put("createdAt", 1795300000L).put("updatedAt", 1795300100L)
+                .put("turns", new JSONArray().put(new JSONObject().put("id", turn).put("status", "completed").put("runtime", "acp").put("items", items)));
+        JSONObject view = AgentViewProjection.project(thread);
+        JSONArray projected = view.getJSONArray("turns").getJSONObject(0).getJSONArray("items");
+        String[] order = {"-user", "-msg-1", "-steer-req-1", "-tool-1", "-msg-2", "-steer-req-2", "-msg-3"};
+        check(projected.length() == order.length, "every item of the steered turn is projected: " + projected);
+        for (int i = 0; i < order.length; i++)
+            check(projected.getJSONObject(i).getString("id").equals(turn + order[i]), "projected item " + i + " keeps its place: " + projected);
+        int users = 0;
+        for (int i = 0; i < projected.length(); i++) if ("userMessage".equals(projected.getJSONObject(i).getString("type"))) users++;
+        check(users == 3, "three user messages in one turn");
+        check("Only red ones".equals(projected.getJSONObject(2).getJSONArray("content").getJSONObject(0).getString("text")), "steer text kept");
+        AgentViews.save(view);
+        JSONObject persisted = new JSONObject(Files.readString(new File(AgentViews.ROOT, id + ".json").toPath()));
+        JSONArray saved = persisted.getJSONArray("turns").getJSONObject(0).getJSONArray("items");
+        check(saved.length() == order.length && saved.getJSONObject(5).getString("id").equals(turn + "-steer-req-2"), "checkpoint keeps the order");
+    }
+
+    private static JSONObject user(String id, String text) {
+        return new JSONObject().put("type", "userMessage").put("id", id)
+                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", text)));
+    }
+
     public static void main(String[] args) throws Exception {
         CodexAppServer.shared = new CodexAppServer();
+        steeredTurnKeepsEveryUserMessageInOrder();
         nativeReadKeepsChildIdentity();
         refreshAndReloadKeepChildIdentity();
         routingFieldsAreNotDisplayText();

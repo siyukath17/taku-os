@@ -28,6 +28,18 @@ internal class AgentGatewaySubmissions(private val root: File) {
     }
     /** Only an explicit native rejection proving steer was not submitted may use this. */
     class SteerNotSubmitted : IOException("TURN_CHANGED")
+    /**
+     * The runtime explicitly refused the steer (ACP: {@code STEER_WAITING_ANSWER}, {@code STEER_CANCELLING},
+     * {@code STEER_REJECTED}); it was not sent, and it is not queued as a new turn either.
+     */
+    class SteerRejected(code: String) : IOException(code)
+    /** Where a steer goes: a read-only check and the mutation (Codex {@code turn/steer} or ACP {@code acpSteer}). */
+    interface SteerRoute {
+        @Throws(Exception::class)
+        fun check()
+        @Throws(Exception::class)
+        fun steer(): JSONObject
+    }
     interface Fallback {
         @Throws(Exception::class)
         fun check()
@@ -65,6 +77,17 @@ internal class AgentGatewaySubmissions(private val root: File) {
     fun steer(requestId: String, threadId: String, turnId: String, text: String, preflight: Preflight, operation: Mutation): JSONObject =
         steer(requestId, threadId, turnId, text, preflight, operation, null)
 
+    /**
+     * Steers the turn on its own runtime: an ACP turn ({@code acp-…}) through the broker's
+     * {@code acpSteer}, any other through Codex. Receipts, replay and the {@code TURN_CHANGED} fallback
+     * are the same for both.
+     */
+    @Throws(Exception::class)
+    fun steer(requestId: String, threadId: String, turnId: String, text: String, codex: SteerRoute, acp: SteerRoute, fallback: Fallback?): JSONObject {
+        val route = route(turnId, codex, acp)
+        return steer(requestId, threadId, turnId, text, Preflight { route.check() }, Mutation { route.steer() }, fallback)
+    }
+
     @Throws(Exception::class)
     fun steer(requestId: String, threadId: String, turnId: String, text: String, preflight: Preflight, operation: Mutation, fallback: Fallback?): JSONObject {
         val gate = sequence(threadId)
@@ -97,6 +120,10 @@ internal class AgentGatewaySubmissions(private val root: File) {
                 state.put("state", "notSent").put("code", "TURN_CHANGED")
                 saveSteer(receipt, state)
                 if (fallback != null) return fallback(receipt, state, fallback, false)
+            } catch (refused: SteerRejected) {
+                val code = refused.message
+                state.put("state", "notSent").put("code", if (code != null && Pattern.matches("[A-Z][A-Z_]{2,80}", code)) code else "STEER_REJECTED")
+                saveSteer(receipt, state)
             } catch (unknown: Exception) {
                 state.put("state", "deliveryUnknown").remove("result")
                 try { saveSteer(receipt, state) } catch (ignored: Exception) { }
@@ -248,6 +275,14 @@ internal class AgentGatewaySubmissions(private val root: File) {
     }
 
     companion object {
+        /** Prefix of every ACP chat turn id (the broker's AcpTurnControl.TURN_PREFIX). */
+        const val ACP_TURN_PREFIX = "acp-"
+        /** Native error codes of a refused ACP steer. */
+        @JvmField val STEER_REFUSALS = setOf("STEER_WAITING_ANSWER", "STEER_CANCELLING", "STEER_REJECTED")
+
+        @JvmStatic
+        fun route(turnId: String, codex: SteerRoute, acp: SteerRoute): SteerRoute = if (turnId.startsWith(ACP_TURN_PREFIX)) acp else codex
+
         private val instances = HashMap<String, AgentGatewaySubmissions>()
         @JvmStatic
         fun get(filesDir: File): AgentGatewaySubmissions = synchronized(instances) {

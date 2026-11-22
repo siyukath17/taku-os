@@ -118,11 +118,80 @@ public final class AgentGatewaySubmissionTest {
         }, before -> { throw new AssertionError("Publication must not run"); });
         if (!privateFailure.getString("state").equals("notSent") || !privateFailure.getString("code").equals("RUNTIME_UNAVAILABLE"))
             throw new AssertionError("Preflight error leaked detail");
+        acpSteerRouting(root);
         sameThreadSequencing();
         fallbackSequencing();
         liveTaskReceipts();
         System.out.println("AgentGatewaySubmissionTest: durable send/steer receipt/restart/reuse/failure checks passed");
     }
+    /** A route that records calls, or fails the test when used. */
+    private static AgentGatewaySubmissions.SteerRoute route(String name, java.util.List<String> log, Checked check, java.util.concurrent.Callable<JSONObject> steer) {
+        return new AgentGatewaySubmissions.SteerRoute() {
+            public void check() throws Exception { log.add(name + ":check"); check.run(); }
+            public JSONObject steer() throws Exception { log.add(name + ":steer"); return steer.call(); }
+        };
+    }
+
+    /** An ACP turn ("acp-…") is steered through the broker route; its refusals are definitive notSent receipts. */
+    private static void acpSteerRouting(File root) throws Exception {
+        AgentGatewaySubmissions store = new AgentGatewaySubmissions(root);
+        java.util.List<String> log = new java.util.ArrayList<>();
+        int[] fallbacks = {0};
+        AgentGatewaySubmissions.Fallback fallback = new AgentGatewaySubmissions.Fallback() {
+            public void check() {}
+            public String publish(TaskRequests.BeforePublish before) throws Exception { fallbacks[0]++; before.persist("950"); return "950"; }
+            public boolean published(String task) { return task.equals("950"); }
+        };
+        AgentGatewaySubmissions.SteerRoute codex = route("codex", log, () -> {}, () -> { throw new AssertionError("Codex steered an ACP turn"); });
+        // Accepted by the broker.
+        JSONObject accepted = store.steer("acp-ok", "thread", "acp-1111", "Also red ones", codex,
+                route("acp", log, () -> {}, () -> new JSONObject().put("state", "accepted").put("runtime", "acp")), fallback);
+        if (!accepted.getString("state").equals("accepted") || !log.equals(java.util.List.of("acp:check", "acp:steer")) || fallbacks[0] != 0)
+            throw new AssertionError("ACP steer must use the broker route: " + log + " " + accepted);
+        JSONObject acceptedReplay = new AgentGatewaySubmissions(root).steer("acp-ok", "thread", "acp-1111", "Also red ones", codex,
+                route("acp", log, () -> {}, () -> { throw new AssertionError("Accepted ACP steer replayed"); }), fallback);
+        if (!acceptedReplay.getBoolean("replayed") || !acceptedReplay.getString("state").equals("accepted")) throw new AssertionError("ACP replay");
+        // Codex turns are untouched.
+        log.clear();
+        JSONObject codexAccepted = store.steer("codex-ok", "thread", "turn-9", "Extra",
+                route("codex", log, () -> {}, JSONObject::new), route("acp", log, () -> {}, () -> { throw new AssertionError("ACP steered a Codex turn"); }), fallback);
+        if (!codexAccepted.getString("state").equals("accepted") || !log.equals(java.util.List.of("codex:check", "codex:steer")))
+            throw new AssertionError("Codex steer route: " + log);
+        // agy refused: notSent with the exact code, never queued as a new turn, never replayed.
+        for (String code : new String[]{"STEER_WAITING_ANSWER", "STEER_CANCELLING"}) {
+            JSONObject refused = store.steer("acp-refused-" + code, "thread", "acp-2222", "Keep my draft", codex,
+                    route("acp", log, () -> {}, () -> { throw new AgentGatewaySubmissions.SteerRejected(code); }), fallback);
+            if (!refused.getString("state").equals("notSent") || !refused.getString("code").equals(code) || fallbacks[0] != 0)
+                throw new AssertionError("Refused ACP steer must be notSent " + code + ": " + refused);
+            JSONObject refusedReplay = new AgentGatewaySubmissions(root).steer("acp-refused-" + code, "thread", "acp-2222", "Keep my draft", codex,
+                    route("acp", log, () -> {}, () -> { throw new AssertionError("Refused ACP steer replayed"); }), fallback);
+            if (!refusedReplay.getString("state").equals("notSent") || !refusedReplay.getString("code").equals(code) || fallbacks[0] != 0)
+                throw new AssertionError("Refused ACP steer replay: " + refusedReplay);
+        }
+        // The broker's read-only check refuses a stopping turn: notSent before any mutation.
+        JSONObject stopping = store.steer("acp-stopping", "thread", "acp-3333", "Too late", codex,
+                route("acp", log, () -> { throw new AgentGatewaySubmissions.SteerRejected("STEER_CANCELLING"); },
+                        () -> { throw new AssertionError("Steer ran after a refused check"); }), fallback);
+        if (!stopping.getString("state").equals("notSent") || !stopping.getString("code").equals("STEER_CANCELLING") || fallbacks[0] != 0)
+            throw new AssertionError("Stopping ACP turn: " + stopping);
+        // The turn ended before the broker took it (withdrawn): queued once as the next turn.
+        JSONObject ended = store.steer("acp-ended", "thread", "acp-4444", "Next please", codex,
+                route("acp", log, () -> {}, () -> { throw new AgentGatewaySubmissions.SteerNotSubmitted(); }), fallback);
+        if (!ended.getString("state").equals("accepted") || !ended.getString("taskId").equals("950") || fallbacks[0] != 1
+                || !ended.getJSONObject("result").getBoolean("queuedAfterTurn")) throw new AssertionError("Ended ACP turn must queue once: " + ended);
+        JSONObject endedAtCheck = store.steer("acp-ended-check", "thread", "acp-5555", "Next", codex,
+                route("acp", log, () -> { throw new AgentGatewaySubmissions.SteerNotSubmitted(); },
+                        () -> { throw new AssertionError("Steer ran after the turn ended"); }), fallback);
+        if (!endedAtCheck.getString("state").equals("accepted") || fallbacks[0] != 2) throw new AssertionError("Ended at check: queued");
+        // A transport failure during the ACP steer stays unknown (it may have been delivered).
+        JSONObject lost = store.steer("acp-lost", "thread", "acp-6666", "Maybe", codex,
+                route("acp", log, () -> {}, () -> { throw new java.io.IOException("STEER_UNCONFIRMED"); }), fallback);
+        if (!lost.getString("state").equals("deliveryUnknown") || fallbacks[0] != 2) throw new AssertionError("Unconfirmed ACP steer: " + lost);
+        if (AgentGatewaySubmissions.route("acp-x", codex, codex) != codex) throw new AssertionError("route identity");
+        if (!AgentGatewaySubmissions.STEER_REFUSALS.contains("STEER_WAITING_ANSWER") || !AgentGatewaySubmissions.STEER_REFUSALS.contains("STEER_CANCELLING"))
+            throw new AssertionError("refusal codes");
+    }
+
     private interface Checked { void run() throws Exception; }
     private static void rejects(String code, Checked operation) throws Exception {
         try { operation.run(); }

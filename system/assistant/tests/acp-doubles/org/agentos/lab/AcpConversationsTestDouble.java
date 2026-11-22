@@ -45,6 +45,8 @@ final class AcpConversations {
     static JSONObject start() { throw outside("thread/start"); }
     static JSONObject nativeRead(JSONObject params) { throw outside("native thread/read"); }
     static JSONObject interrupt(String threadId, String turnId) { throw outside("interrupt"); }
+    static JSONObject steer(JSONObject input) { throw outside("steer"); }
+    static String steerErrorCode(Throwable failure) { return null; }
     static void cancelTask(String threadId, String taskId, String turnId) { throw outside("task cancel"); }
     static JSONObject runtimeControl(JSONObject input) { throw outside("runtime control"); }
 }

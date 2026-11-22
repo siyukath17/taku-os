@@ -138,7 +138,35 @@ public final class AcpConversationStoreTest {
         }
     }
 
+    /** Messages the user added while a turn ran (steering) stay in the turn, in order, around the agent's answers. */
+    static void steeredTurn() throws Exception {
+        AcpConversationStore store = new AcpConversationStore(dir());
+        String turn = store.beginTurn(CONV, "7", "List fruits");
+        JSONObject user = store.turns(CONV).getJSONObject(0).getJSONArray("items").getJSONObject(0);
+        JSONArray items = new JSONArray()
+                .put(new JSONObject().put("type", "agentMessage").put("id", turn + "-msg-1").put("text", "Apple, Banana"))
+                .put(new JSONObject().put("type", "userMessage").put("id", turn + "-steer-r1")
+                        .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", "Only red ones"))))
+                .put(new JSONObject().put("type", "agentMessage").put("id", turn + "-msg-2").put("text", "Apple, Cherry"))
+                // A snapshot that repeats the opening message never duplicates it.
+                .put(new JSONObject(user.toString()));
+        store.updateTurn(CONV, turn, items, "inProgress");
+        JSONArray stored = store.turns(CONV).getJSONObject(0).getJSONArray("items");
+        check(stored.length() == 4, "opening message + 3 items: " + stored);
+        String[] order = {turn + "-user", turn + "-msg-1", turn + "-steer-r1", turn + "-msg-2"};
+        for (int i = 0; i < order.length; i++) check(order[i].equals(stored.getJSONObject(i).getString("id")), "item " + i + " in order: " + stored);
+        store.updateTurn(CONV, turn, items, "completed");
+        check(store.turns(CONV).getJSONObject(0).getJSONArray("items").length() == 4, "terminal update keeps the steer");
+        check(turn.equals(store.turns(CONV).getJSONObject(0).getString("id")) && "7".equals(store.turnTask(CONV, turn)), "turnTask after the end");
+        check(store.activeTask(CONV, turn) == null && store.turnTask(CONV, "acp-missing") == null, "activeTask only while running");
+        String text = AcpConversationStore.transcript(store.turns(CONV), 10_000);
+        check(text.equals("User: List fruits\nAssistant: Apple, Banana\nUser: Only red ones\nAssistant: Apple, Cherry"), "transcript keeps both user messages: " + text);
+        JSONObject view = AcpConversationStore.overlay(AcpConversationStore.seed(CONV, store.read(CONV)), store.turns(CONV));
+        check("List fruits".equals(view.getString("preview")), "preview stays the opening message");
+    }
+
     public static void main(String[] args) throws Exception {
+        steeredTurn();
         recordsAndPersistence();
         overlayKeepsNativeHistory();
         transcriptAndReadAnswer();

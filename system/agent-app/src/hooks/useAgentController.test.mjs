@@ -421,3 +421,27 @@ test('a transport failure before reservation stays unconfirmed and retry resubmi
   assert.equal(runtime.completed.length, 1);
   assert.equal(runtime.storage.has(pendingKey('thread-a')), false);
 });
+
+for (const [code, english] of [
+  ['STEER_WAITING_ANSWER', 'The agent is waiting for an answer to its question or approval. Answer it first, then send this requirement again. Your draft is kept.'],
+  ['STEER_CANCELLING', 'This turn is stopping, so the requirement was not added. Your draft is kept; send it again once it has stopped.'],
+]) {
+  test(`an ACP steer refused with ${code} explains why and keeps the draft`, async t => {
+    reset(t); runtime.target = null;
+    const base = runtime.callAgent;
+    runtime.callAgent = async (action, params = {}) => action === 'readSession'
+      ? {native: {ready: true, activeTurnId: 'acp-turn-1'}, historyComplete: true, thread: {id: params.threadId, turns: [{
+        id: 'acp-turn-1', status: 'inProgress', items: [{id: 'acp-turn-1-user', type: 'userMessage', content: [{type: 'text', text: 'List fruits'}]}],
+      }]}}
+      : base(action, params);
+    runtime.receipt = async args => ({threadId: args.threadId, requestId: args.requestId, state: 'notSent', code});
+    const host = mount(); await flush(host);
+    await send(host, 'Only red ones');
+    assert.equal(runtime.calls.length, 1);
+    assert.equal(runtime.calls[0].action, 'steer');
+    assert.equal(runtime.calls[0].expectedTurnId, 'acp-turn-1');
+    assert.equal(host.result.error, english);
+    assert.equal(host.result.draft, 'Only red ones');
+    assert.equal(runtime.storage.has(pendingKey('thread-a')), false);
+  });
+}

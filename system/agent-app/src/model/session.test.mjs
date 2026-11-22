@@ -264,3 +264,20 @@ test('restoring a failure prepares only a draft and preserves a newer draft', ()
   assert.equal(failedTaskDraft({...failure, prompt: ''}, ''), null);
   assert.deepEqual(failure, {taskId: '123', message: 'Failed', prompt: 'Original request', turnStarted: true});
 });
+
+test('an ACP turn steered mid-run shows each added message before its answer, in order', () => {
+  const turn = 'acp-11111111-2222-3333-4444-555555555555';
+  const result = projectSession({native: {ready: true, activeTurnId: turn}, thread: {id: 'thread-1', turns: [{id: turn, status: 'inProgress', items: [
+    {id: `${turn}-user`, type: 'userMessage', content: [{type: 'text', text: 'List fruits'}]},
+    {id: `${turn}-msg-1`, type: 'agentMessage', text: 'Apple, Banana'},
+    {id: `${turn}-steer-req-1`, type: 'userMessage', content: [{type: 'text', text: 'Only red ones'}]},
+    {id: `${turn}-tool-x`, type: 'mcpToolCall', server: 'agy', tool: 'tool', status: 'completed'},
+    {id: `${turn}-msg-2`, type: 'agentMessage', text: 'Apple, Cherry'},
+  ]}]}});
+  assert.deepEqual(result.blocks.map(block => [block.role, block.text]), [
+    ['user', 'List fruits'], ['assistant', 'Apple, Banana'], ['user', 'Only red ones'], ['assistant', 'Apple, Cherry'],
+  ]);
+  assert.ok(result.blocks.every(block => block.turnId === turn));
+  assert.equal(result.activeTurnId, turn);
+  assert.equal(result.blocks.at(-1).active, true);
+});

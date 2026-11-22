@@ -196,6 +196,49 @@ thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall
   `cancel` marker; `AcpRuntime` then sends `session/cancel`, reclaims the agent after
   `cancelGraceMillis` and closes the turn `interrupted`, the task `cancelled`.
 
+## Steering a running turn
+
+The composer's "add a requirement" while an ACP turn runs (`action:"steer"`, `expectedTurnId:"acp-…"`)
+reaches the running agent session instead of waiting for the next turn.
+
+**Measured protocol (Pixel 9, agy android_arm64 1.5.14, 2026-11-22, raw probes over `adb shell` stdio,
+throwaway sessions).** A second `session/prompt` for the same session while one runs:
+
+| Situation | agy's answers |
+| --- | --- |
+| prompt running (mid-text, 0.7 s in, or during a tool call) | the **running** prompt answers `end_turn` (no `usage`) ~40 ms later; the steer's prompt carries the rest of the merged turn (updates keep streaming) and answers `end_turn` + `usage` when it really ends |
+| prompt waiting for a `session/request_permission` answer | steer answers `-32603 "Can't add this prompt to session …: the running prompt is waiting for a permission or question answer; …"`; the running prompt is unaffected |
+| right after `session/cancel` | steer answers `-32603 "… the running prompt is being cancelled; …"`; the running prompt answers `cancelled` |
+
+**Files and ownership.** Native `acpSteer {threadId, turnId, requestId, text, attachments, checkOnly}`
+(root/system only, `NativeBridge` → `AcpTurnControl.steer`) checks that `turnId` is the conversation's
+running ACP turn, its task is not `done` and has no `cancel` marker (`STEER_CANCELLING`), validates the
+attachments like `ComposerInput` (≤8, in `composer-attachments`, ≤20 MB), then atomically writes
+`steer-<requestId>.json` into the task directory and waits (≤8 s) for the outcome. `AcpRuntime`,
+right after its cancel check, claims each request by atomic rename to `.claimed`, sends it as
+`session/prompt` (text block; images inline as `image` blocks when the agent offers them, other files by
+name and path), writes `.ack` and finally `.result` (`{state:"accepted"|"rejected", code}`). If the
+runtime never claimed the request (the turn ended first), the caller renames it to `.withdrawn`: exactly
+one side wins the rename, so `STEER_NOT_SUBMITTED` proves the agent never saw it and the gateway queues the
+text as the next turn. A retried `requestId` answers from `.result`.
+
+**Outcome.** Accepted when the earlier prompt answers (agy's handoff), when the steer's own prompt
+answers, or when agy has not refused it within 1.5 s (refusals come at once). Refusals map to
+`STEER_WAITING_ANSWER`, `STEER_CANCELLING` or `STEER_REJECTED`; the chat page explains them and keeps the
+draft. Once the turn's `cancel` marker exists or `session/cancel` was sent, new steers are refused
+without reaching agy.
+
+**End of the turn.** The prompt's answer no longer ends the turn while steers are pending: the runtime
+keeps reading (cancel and the fixed budget still apply) until every pending steer is answered, and the
+last answer's `stopReason` decides the turn. Both answer orders are handled. While waiting for
+subagents, a steer is a prompt of its own and the wait does not end before agy answers it. Steers never
+accepted when the turn ends are recorded `TURN_CHANGED` and leave the chat again.
+
+**Chat record.** Each accepted steer is a `userMessage` item (`<turnId>-steer-<requestId>`, its text plus
+one `User-selected attachment: <name>` part per attachment, shown as a chip) inside the same `acp-…` turn, at the point it was sent; the agent's text after
+it is a new `agentMessage`, and the last one is the turn's `final_answer`. The chat page shows them in
+order (user → reply → user → reply). Transcripts for a fresh session carry every user message.
+
 ## Asynchronous subagents (`invoke_subagent`)
 
 **Measured protocol (Pixel 9, agy android_arm64 1.5.14, 2026-11-22, raw probes over `adb shell` stdio).**

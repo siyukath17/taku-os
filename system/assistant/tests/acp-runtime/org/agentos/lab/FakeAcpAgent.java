@@ -61,8 +61,22 @@ final class FakeAcpAgent implements AcpProcessTransport {
         /** The children never report. */
         SUBAGENTS_HANG,
         /** As SUBAGENTS, but agy's store is missing (another layout): the runtime falls back to silence. */
-        SUBAGENTS_NO_STORE
+        SUBAGENTS_NO_STORE,
+        /**
+         * Steering like agy 1.5.14 (Pixel 9 probe): the prompt runs until a second session/prompt
+         * arrives; agy then answers the running prompt end_turn (no usage) at once and carries on in the
+         * new prompt, answering it when the merged turn ends. With {@link #steerRefusal} it refuses the
+         * second prompt with agy's -32603 message instead and finishes the first.
+         */
+        STEER,
+        /** As STEER, but the steer's answer arrives before the original prompt's. */
+        STEER_REVERSED
     }
+
+    /** agy's refusal text for a steer prompt, or null to accept it. */
+    volatile String steerRefusal;
+    /** Steer prompts after which the merged turn ends (1: the first steer ends it). */
+    volatile int steersBeforeEnd = 1;
 
     static final String AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fake.apps.googleusercontent.com"
             + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A4321%2Foauth2callback&response_type=code&state=st-1&code_challenge=cc";
@@ -303,6 +317,7 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     return false;
                 }
                 case "session/prompt":
+                    if (scenario.name().startsWith("STEER") && promptId != null) return steer(message);
                     promptId = id;
                     if (scenario.name().startsWith("SUBAGENTS") && prompts++ > 0) {
                         // The follow-up prompt: the parent reads the reports and answers.
@@ -327,6 +342,12 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     return false;
                 }
                 case "session/cancel":
+                    if (scenario.name().startsWith("STEER") && promptId != null) {
+                        cancelling = true;
+                        send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "cancelled")));
+                        promptId = null;
+                        return false;
+                    }
                     if (scenario == Scenario.HANG_UNTIL_CANCEL)
                         send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "cancelled")));
                     return false;
@@ -340,6 +361,41 @@ final class FakeAcpAgent implements AcpProcessTransport {
         }
 
         int prompts;
+        int steers;
+        boolean cancelling;
+
+        /** A second session/prompt while one runs (see {@link Scenario#STEER}). */
+        boolean steer(JSONObject message) throws Exception {
+            Object id = message.opt("id");
+            String refusal = cancelling ? "the running prompt is being cancelled; wait for it to finish, then send this prompt again" : steerRefusal;
+            if (refusal != null) {
+                send(new JSONObject().put("id", id).put("error", new JSONObject().put("code", -32603)
+                        .put("message", "Can't add this prompt to session " + currentSession + ": " + refusal)));
+                if (!cancelling) {
+                    chunk(" Main done.");
+                    usage();
+                    send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "end_turn")));
+                    promptId = null;
+                }
+                return false;
+            }
+            StringBuilder text = new StringBuilder();
+            JSONArray blocks = message.getJSONObject("params").getJSONArray("prompt");
+            for (int i = 0; i < blocks.length(); i++)
+                text.append(blocks.getJSONObject(i).optString("type")).append(':').append(blocks.getJSONObject(i).optString("text")).append(';');
+            Object previous = promptId;
+            promptId = id;
+            if (scenario == Scenario.STEER) send(new JSONObject().put("id", previous).put("result", new JSONObject().put("stopReason", "end_turn")));
+            chunk("Steered by " + text);
+            if (++steers < steersBeforeEnd) return false;
+            chunk(" Final answer.");
+            usage();
+            send(new JSONObject().put("id", id).put("result", new JSONObject().put("stopReason", "end_turn")));
+            if (scenario == Scenario.STEER_REVERSED) send(new JSONObject().put("id", previous).put("result", new JSONObject().put("stopReason", "end_turn")));
+            promptId = null;
+            return false;
+        }
+
         final java.util.List<String> reports = new java.util.ArrayList<>();
 
         java.io.File storeRoot() {
@@ -457,6 +513,8 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     return false;
                 case HANG_UNTIL_CANCEL:
                 case IGNORE_CANCEL:
+                case STEER:
+                case STEER_REVERSED:
                     chunk("Working on it");
                     promptStarted.countDown();
                     return false;

@@ -1,6 +1,7 @@
 package org.agentos.assistant
 
 import android.graphics.Bitmap
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -112,6 +113,28 @@ internal object TaskRequests {
         }
         return NativeClient.rpcSync("turn/interrupt", JSONObject().put("threadId", thread).put("turnId", turnId))
     }
+
+    /**
+     * The steer route of an ACP chat turn ("acp-…"): the broker's {@code acpSteer} validates the running
+     * turn and its task ({@code checkOnly} for the read-only preflight), hands the message to the agent
+     * as a further {@code session/prompt} of the same session and answers once the agent took it or
+     * refused it ({@code STEER_WAITING_ANSWER}, {@code STEER_CANCELLING}). A turn that already ended
+     * answers {@code STEER_NOT_SUBMITTED}, so the gateway queues the text as the next turn.
+     */
+    @JvmStatic
+    fun acpSteer(thread: String, turnId: String, requestId: String, text: String, attachments: JSONArray?): AgentGatewaySubmissions.SteerRoute =
+        object : AgentGatewaySubmissions.SteerRoute {
+            private fun request(checkOnly: Boolean): JSONObject {
+                val request = JSONObject().put("op", "acpSteer").put("threadId", thread).put("turnId", turnId)
+                    .put("requestId", requestId).put("text", text).put("checkOnly", checkOnly)
+                if (attachments != null && attachments.length() > 0) request.put("attachments", attachments)
+                return request
+            }
+            @Throws(Exception::class)
+            override fun check() { NativeClient.exchange(request(true)) }
+            @Throws(Exception::class)
+            override fun steer(): JSONObject = NativeClient.exchange(request(false))
+        }
 
     @JvmStatic
     @Throws(Exception::class)

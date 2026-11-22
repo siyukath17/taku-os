@@ -42,6 +42,7 @@ internal object NativeClient {
         val answer = JSONObject(output.toString("UTF-8"))
         if (!answer.optBoolean("ok")) {
             if (answer.optString("code") == "STEER_NOT_SUBMITTED") throw AgentGatewaySubmissions.SteerNotSubmitted()
+            if (answer.optString("code") in AgentGatewaySubmissions.STEER_REFUSALS) throw AgentGatewaySubmissions.SteerRejected(answer.optString("code"))
             throw IOException(answer.optString("message", "Native service returned no result"))
         }
         answer.getJSONObject("result")

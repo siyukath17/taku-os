@@ -150,6 +150,7 @@ final class NativeBridge {
    case "matterAudio":answer=AudioBridge.control(input);break;
    case "mainReply":answer=AgentViews.mainReplyRead(input);break;
    case "acpInterrupt":answer=AcpConversations.interrupt(input.getString("threadId"),input.getString("turnId"));break;
+   case "acpSteer":answer=AcpConversations.steer(input);break;
    case "liveTask":Call live=new Call("taku/liveTask",input);if(!enqueue(live))throw new IOException("BUSY");answer=live.result.get(40,TimeUnit.SECONDS);break;
    case "magpieSettingsChanged":MagpieSettings.schedule();answer=new JSONObject();break;
    case "rpc": {
@@ -166,7 +167,7 @@ final class NativeBridge {
     break;
    }
    default:throw new IOException("Unsupported native operation");
-  } } catch(Exception failure) { JSONObject error=new JSONObject().put("ok",false).put("message",publicError(failure));Throwable cause=failure;while(cause.getCause()!=null)cause=cause.getCause();if(cause instanceof SteerNotSubmitted)error.put("code","STEER_NOT_SUBMITTED");s.getOutputStream().write(error.toString().getBytes(StandardCharsets.UTF_8)); return; }
+  } } catch(Exception failure) { JSONObject error=new JSONObject().put("ok",false).put("message",publicError(failure));Throwable cause=failure;while(cause.getCause()!=null)cause=cause.getCause();String steerCode=cause instanceof SteerNotSubmitted?"STEER_NOT_SUBMITTED":AcpConversations.steerErrorCode(cause);if(steerCode!=null)error.put("code",steerCode);s.getOutputStream().write(error.toString().getBytes(StandardCharsets.UTF_8)); return; }
   s.getOutputStream().write(new JSONObject().put("ok",true).put("result",answer).toString().getBytes(StandardCharsets.UTF_8));
  }catch(Exception failure){try{socket.getOutputStream().write(new JSONObject().put("ok",false).put("message",publicError(failure)).toString().getBytes(StandardCharsets.UTF_8));socket.close();}catch(Exception ignored){}}}
  /**

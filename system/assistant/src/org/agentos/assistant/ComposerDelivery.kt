@@ -101,12 +101,18 @@ internal object ComposerDelivery {
         val text = request.getString("text")
         val input = ComposerInput.text(text)
         ComposerInput.appendAttachments(input, request.getJSONObject("options").getJSONArray("attachments"))
-        return services.submissions.steer(request.getString("requestId"), thread, turn, text, {
-            if (turn != NativeClient.state(thread).optString("activeTurnId")) throw IOException("TURN_CHANGED")
-            services.appendScreenshot(request, input)
-        }, {
-            NativeClient.rpcSync("turn/steer", JSONObject().put("threadId", thread).put("expectedTurnId", turn).put("input", input))
-        }, object : AgentGatewaySubmissions.Fallback {
+        val codex = object : AgentGatewaySubmissions.SteerRoute {
+            override fun check() {
+                if (turn != NativeClient.state(thread).optString("activeTurnId")) throw IOException("TURN_CHANGED")
+                services.appendScreenshot(request, input)
+            }
+            override fun steer(): JSONObject =
+                NativeClient.rpcSync("turn/steer", JSONObject().put("threadId", thread).put("expectedTurnId", turn).put("input", input))
+        }
+        // An ACP turn ("acp-…") is steered by the broker with the same text and attachments.
+        val acp = TaskRequests.acpSteer(thread, turn, request.getString("requestId"), text,
+            request.getJSONObject("options").optJSONArray("attachments"))
+        return services.submissions.steer(request.getString("requestId"), thread, turn, text, codex, acp, object : AgentGatewaySubmissions.Fallback {
             override fun check() {
                 services.checkScreenshot(request)
                 repeat(20) { attempt ->

@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -266,6 +267,7 @@ final class AcpRuntime implements TaskRuntime {
         try {
             for (int attempt = 0; ; attempt++) {
                 Turn turn = new Turn(directory, attemptRequest, connection, chat, attempt, resume, budgetEnd);
+                activeTurn = turn;
                 Retry retry;
                 try {
                     retry = turn.execute();
@@ -290,6 +292,7 @@ final class AcpRuntime implements TaskRuntime {
             }
         } finally {
             activeChat = null;
+            activeTurn = null;
             // A path that ended without finish() (an unexpected exception) still closes the turn.
             if (chat != null && !chat.ended) {
                 try { chat.end("failed", null); }
@@ -381,8 +384,12 @@ final class AcpRuntime implements TaskRuntime {
 
     /** The chat turn of the task currently running on this runtime instance, if any. */
     private Chat activeChat;
+    /** The agent process conversation currently running on this runtime instance, if any. */
+    private Turn activeTurn;
 
     private void finish(File directory, JSONObject request, String status, String message, String reply) throws Exception {
+        // Steers still waiting for agy are settled before the turn and the task close ("done").
+        if (activeTurn != null) activeTurn.closeSteers();
         // Agent text can link or quote agent-internal paths; never shown or stored in results.
         if (reply != null) reply = AcpToolLabels.sanitize(reply);
         // The conversation shows the turn's end before the task record does.
@@ -503,6 +510,43 @@ final class AcpRuntime implements TaskRuntime {
         NoResponse(String method) { super("no response to " + method); }
     }
 
+    // ---- steering -----------------------------------------------------------------------------
+
+    /** A steer agy has not refused within this long was taken into the turn (refusals come at once). */
+    static final long STEER_ACCEPT_MILLIS = 1500;
+    /** Larger images are passed by path instead of inline. */
+    static final long MAX_ATTACHMENT_IMAGE_BYTES = 10_000_000L;
+
+    /** One steer's {@code session/prompt} awaiting agy's answer. */
+    static final class Steer {
+        final String requestId;
+        final long id;
+        final long sentAt = System.nanoTime();
+        boolean accepted;
+
+        Steer(String requestId, long id) {
+            this.requestId = requestId;
+            this.id = id;
+        }
+    }
+
+    /**
+     * agy's refusal of a steer prompt (agy 1.5.14, -32603 "Can't add this prompt to session …: the
+     * running prompt is waiting for a permission or question answer; …" / "… is being cancelled; …")
+     * as the error code the chat page explains.
+     */
+    static String steerRejection(String message) {
+        String m = message == null ? "" : message.toLowerCase(java.util.Locale.ROOT);
+        if (m.contains("waiting for a permission") || m.contains("question answer")) return AcpTurnControl.STEER_WAITING_ANSWER;
+        if (m.contains("being cancelled") || m.contains("being canceled")) return AcpTurnControl.STEER_CANCELLING;
+        return AcpTurnControl.STEER_REJECTED;
+    }
+
+    private static String readSmall(File f) throws IOException {
+        if (f.length() > 1_000_000) throw new IOException("INVALID_ARGUMENT");
+        return new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+    }
+
     // ---- one task's conversation with the agent -------------------------------------------------
 
     /** One chat projection step (see {@code Turn#display}). */
@@ -551,6 +595,13 @@ final class AcpRuntime implements TaskRuntime {
         final long budgetEnd;
         /** Unexpected display-layer failures (chat projection), counted, never fatal to the turn. */
         int ignored;
+        /**
+         * Steering: user messages sent into the running turn as further {@code session/prompt}s of the
+         * same session, by JSON-RPC id, until agy answers them (see {@link #pollSteers}).
+         */
+        final Map<Long, Steer> pendingSteers = new LinkedHashMap<>();
+        /** The agent accepts image prompt blocks ({@code promptCapabilities.image}). */
+        boolean promptImages;
 
         Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat,
              int attempt, String resumeSession, long budgetEnd) {
@@ -620,6 +671,14 @@ final class AcpRuntime implements TaskRuntime {
          * {@link Retry} when an external, transient failure leaves an automatic continuation to try.
          */
         Retry execute() throws Exception {
+            try {
+                return executeTurn();
+            } finally {
+                closeSteers();
+            }
+        }
+
+        Retry executeTurn() throws Exception {
             String id = request.getString("id");
             try {
                 JSONObject init = call("initialize", new JSONObject()
@@ -715,9 +774,20 @@ final class AcpRuntime implements TaskRuntime {
                 }
                 if (attempt > 0) info.put("autoContinuation", attempt);
                 TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+                JSONObject promptCaps = capabilities == null ? null : capabilities.optJSONObject("promptCapabilities");
+                promptImages = promptCaps != null && promptCaps.optBoolean("image");
                 JSONArray prompt = new JSONArray().put(new JSONObject().put("type", "text").put("text", text));
                 JSONObject image = continuation != null ? null : screenshot(init);
                 if (image != null) prompt.put(image);
+                // The composer's attachments: images as image blocks, other files by name and path.
+                if (continuation == null) {
+                    try {
+                        appendAttachments(prompt, AcpTurnControl.attachments(request.optJSONArray("attachments")));
+                    } catch (IOException unavailable) {
+                        info.put("attachmentsSkipped", clip(String.valueOf(unavailable.getMessage()), 80));
+                        TaskRecords.write(new File(directory, "runtime-info.json"), info.toString());
+                    }
+                }
                 phase = "working";
                 progress("Taku is working. You can continue using your phone.", true);
                 inPrompt = true;
@@ -734,6 +804,9 @@ final class AcpRuntime implements TaskRuntime {
                     }
                     throw error;
                 }
+                // A steer makes agy answer the running prompt at once (end_turn) and carry on in the
+                // steer's prompt: the turn ends with the last of the chain (see ACP_RUNTIME.md, Steering).
+                result = settleSteers(result);
                 String stopReason = result.optString("stopReason", "");
                 // The parent's turn ends while its subagents still run; keep the agent alive for their
                 // reports and the parent's own follow-up reply (see AcpSubagents).
@@ -806,6 +879,9 @@ final class AcpRuntime implements TaskRuntime {
                     }
                     return "cancelled";
                 }
+                pollSteers();
+                acceptOverdueSteers();
+                if (lastSteerError != null) throw lastSteerError;
                 Object next = inbox.poll(100, TimeUnit.MILLISECONDS);
                 runIdle();
                 if (next == EOF) throw new AgentExited("agent closed stdout while subagents were running");
@@ -824,6 +900,8 @@ final class AcpRuntime implements TaskRuntime {
                         progress(subagentSummary(), true);
                     }
                 }
+                // A steer sent while waiting is a prompt of its own: never end before agy answered it.
+                if (!pendingSteers.isEmpty()) continue;
                 long quiet = now - lastUpdate;
                 boolean known = subagentStatus.readable && subagentStatus.started() >= subagentCalls.size();
                 if (!known) {
@@ -875,7 +953,10 @@ final class AcpRuntime implements TaskRuntime {
                 ignoredLines++;
                 return;
             }
-            if (message.has("id") && !message.has("method")) return;
+            if (message.has("id") && !message.has("method")) {
+                steerResponse(message); // any other late answer is dropped
+                return;
+            }
             if (message.has("id")) agentRequest(message);
             else safeNotification(message);
         }
@@ -1068,12 +1149,18 @@ final class AcpRuntime implements TaskRuntime {
                 }
                 boolean response = message.has("id") && !message.has("method");
                 if (response) {
-                    if (message.optLong("id", -1) != id) continue; // A late answer to an abandoned request.
+                    if (message.optLong("id", -1) != id) {
+                        steerResponse(message); // otherwise a late answer to an abandoned request
+                        continue;
+                    }
                     if (message.has("error")) {
                         JSONObject error = message.optJSONObject("error");
                         throw new AcpError(error == null ? -32603 : error.optInt("code", -32603),
                                 error == null ? "error" : error.optString("message", "error"));
                     }
+                    // agy answers a running prompt as soon as a steer takes over: the steers sent
+                    // before this answer were accepted.
+                    acceptSteers(id);
                     JSONObject result = message.optJSONObject("result");
                     return result == null ? new JSONObject() : result;
                 }
@@ -1097,6 +1184,183 @@ final class AcpRuntime implements TaskRuntime {
                 }
             } else if (now > stopDeadline) {
                 throw new StopUnconfirmed();
+            }
+            pollSteers();
+            acceptOverdueSteers();
+        }
+
+        // ---- steering -----------------------------------------------------------------------------
+
+        /**
+         * Picks up {@code steer-<requestId>.json} requests written by {@link AcpTurnControl#steer}: each
+         * is claimed by an atomic rename to {@code .claimed} (a request the caller already withdrew
+         * stays withdrawn), then sent as a further {@code session/prompt} of this session and recorded
+         * in {@link #pendingSteers}; {@code .ack} marks it sent. Once the turn is stopping, a request is
+         * refused ({@code STEER_CANCELLING}) without reaching the agent.
+         */
+        void pollSteers() throws Exception {
+            if (sessionId.isEmpty()) return;
+            File[] files = directory.listFiles((dir, name) -> name.startsWith("steer-") && name.endsWith(".json"));
+            if (files == null || files.length == 0) return;
+            java.util.Arrays.sort(files, java.util.Comparator.comparingLong(File::lastModified).thenComparing(File::getName));
+            for (File file : files) {
+                String name = file.getName();
+                String requestId = name.substring("steer-".length(), name.length() - ".json".length());
+                if (!AcpTurnControl.validRequestId(requestId)) continue;
+                File claimed = AcpTurnControl.steerFile(directory, requestId, ".claimed");
+                if (!file.renameTo(claimed)) continue;
+                if (cancelSent || new File(directory, "cancel").exists()) {
+                    steerResult(requestId, false, AcpTurnControl.STEER_CANCELLING);
+                    continue;
+                }
+                JSONObject steer;
+                JSONArray prompt = new JSONArray();
+                try {
+                    steer = new JSONObject(readSmall(claimed));
+                    String text = steer.optString("text", "");
+                    if (!text.isBlank()) prompt.put(new JSONObject().put("type", "text").put("text", text));
+                    appendAttachments(prompt, AcpTurnControl.attachments(steer.optJSONArray("attachments")));
+                    if (prompt.length() == 0) throw new IOException("INVALID_ARGUMENT");
+                } catch (Exception unusable) {
+                    String code = unusable.getMessage() != null && unusable.getMessage().matches("[A-Z][A-Z_]{2,80}") ? unusable.getMessage() : "INVALID_ARGUMENT";
+                    steerResult(requestId, false, code);
+                    continue;
+                }
+                long id = nextId++;
+                pendingSteers.put(id, new Steer(requestId, id));
+                String text = steer.optString("text", "");
+                JSONArray attachments = steer.optJSONArray("attachments");
+                // The agent's answer to it is a new message after the user's.
+                pendingSegment = reply.length();
+                display("steer", () -> chat.steer(requestId, text, attachments));
+                send(new JSONObject().put("id", id).put("method", "session/prompt")
+                        .put("params", new JSONObject().put("sessionId", sessionId).put("prompt", prompt)));
+                TaskRecords.write(AcpTurnControl.steerFile(directory, requestId, ".ack"), new JSONObject()
+                        .put("requestId", requestId).put("state", "sent").put("sentAt", System.currentTimeMillis()).toString());
+            }
+        }
+
+        /**
+         * The answer to a steer's {@code session/prompt}. An error before the steer was accepted is agy
+         * refusing it (mapped to a {@code STEER_*} code, the chat message withdrawn); after that it is
+         * the turn's own failure. A result accepts it (and any steer sent before it). Returns false
+         * when the message answers no pending steer.
+         */
+        boolean steerResponse(JSONObject message) throws Exception {
+            Steer steer = pendingSteers.remove(message.optLong("id", -1));
+            if (steer == null) return false;
+            if (message.has("error")) {
+                JSONObject error = message.optJSONObject("error");
+                int code = error == null ? -32603 : error.optInt("code", -32603);
+                String text = error == null ? "error" : error.optString("message", "error");
+                if (steer.accepted) {
+                    lastSteerError = new AcpError(code, text);
+                    return true;
+                }
+                steerResult(steer.requestId, false, steerRejection(text));
+                display("steer", () -> chat.withdrawSteer(steer.requestId));
+                return true;
+            }
+            acceptSteers(steer.id);
+            if (!steer.accepted) steerResult(steer.requestId, true, null);
+            JSONObject result = message.optJSONObject("result");
+            lastSteerResult = result == null ? new JSONObject() : result;
+            return true;
+        }
+
+        /** The last answered steer of the chain (its stop reason ends the turn), or its failure. */
+        JSONObject lastSteerResult;
+        AcpError lastSteerError;
+
+        /**
+         * After the turn's prompt answered: waits, under the same cancel and budget supervision, until
+         * every pending steer is answered, and returns the answer that ends the turn: the last of the
+         * chain to arrive. agy answers the original prompt {@code end_turn} the moment a steer takes
+         * over and the steer's prompt when the merged turn really ends (measured on the Pixel 9,
+         * agy 1.5.14), but either order is handled.
+         */
+        JSONObject settleSteers(JSONObject result) throws Exception {
+            JSONObject last = result;
+            lastSteerResult = null; // answered before the prompt itself: the prompt's answer is later
+            if (lastSteerError != null) throw lastSteerError;
+            while (!pendingSteers.isEmpty()) {
+                supervise();
+                Object next = inbox.poll(100, TimeUnit.MILLISECONDS);
+                runIdle();
+                if (next == null) continue;
+                if (next == EOF) throw new AgentExited("agent closed stdout during a steered prompt");
+                if (next instanceof IOException) throw (IOException) next;
+                JSONObject message;
+                try {
+                    message = new JSONObject((String) next);
+                } catch (Exception notJson) {
+                    ignoredLines++;
+                    continue;
+                }
+                if (message.has("id") && !message.has("method")) {
+                    if (steerResponse(message)) {
+                        if (lastSteerError != null) throw lastSteerError;
+                        if (lastSteerResult != null) last = lastSteerResult;
+                        lastSteerResult = null;
+                    }
+                    continue;
+                }
+                if (message.has("id")) agentRequest(message);
+                else safeNotification(message);
+            }
+            return last;
+        }
+
+        /** Steers sent before request {@code beforeId} was answered: agy took them over. */
+        void acceptSteers(long beforeId) throws Exception {
+            for (Steer steer : pendingSteers.values())
+                if (steer.id > beforeId && !steer.accepted) steerResult(steer.requestId, true, null);
+        }
+
+        /** agy refuses a steer at once; one it has not refused within {@link #STEER_ACCEPT_MILLIS} runs. */
+        void acceptOverdueSteers() throws Exception {
+            long now = System.nanoTime();
+            for (Steer steer : pendingSteers.values())
+                if (!steer.accepted && now - steer.sentAt >= TimeUnit.MILLISECONDS.toNanos(STEER_ACCEPT_MILLIS))
+                    steerResult(steer.requestId, true, null);
+        }
+
+        /** The turn is over: steers never accepted were not taken up (the caller may queue them instead). */
+        void closeSteers() {
+            for (Steer steer : pendingSteers.values()) {
+                if (steer.accepted) continue;
+                try {
+                    steerResult(steer.requestId, false, "TURN_CHANGED");
+                } catch (Exception unwritable) {
+                    System.err.println("acp steer close: " + unwritable);
+                }
+                display("steer", () -> chat.withdrawSteer(steer.requestId));
+            }
+            pendingSteers.clear();
+        }
+
+        void steerResult(String requestId, boolean accepted, String code) throws Exception {
+            for (Steer steer : pendingSteers.values()) if (steer.requestId.equals(requestId)) steer.accepted |= accepted;
+            JSONObject result = new JSONObject().put("requestId", requestId).put("state", accepted ? "accepted" : "rejected")
+                    .put("at", System.currentTimeMillis());
+            if (!accepted) result.put("code", code == null ? AcpTurnControl.STEER_REJECTED : code);
+            TaskRecords.write(AcpTurnControl.steerFile(directory, requestId, ".result"), result.toString());
+            if (accepted) progress("Added your new instructions to this turn.", true);
+        }
+
+        /** Composer attachments as prompt blocks: images inline when the agent takes them, other files by path. */
+        void appendAttachments(JSONArray prompt, JSONArray attachments) throws Exception {
+            for (int i = 0; i < attachments.length(); i++) {
+                JSONObject item = attachments.getJSONObject(i);
+                File file = new File(item.getString("path"));
+                String mime = item.optString("mime", "");
+                if (promptImages && mime.startsWith("image/") && file.length() <= MAX_ATTACHMENT_IMAGE_BYTES) {
+                    prompt.put(new JSONObject().put("type", "image").put("mimeType", mime)
+                            .put("data", Base64.getEncoder().encodeToString(Files.readAllBytes(file.toPath()))));
+                } else {
+                    prompt.put(new JSONObject().put("type", "text").put("text",
+                            "User-selected attachment: " + item.optString("name", file.getName()) + "\nLocal path: " + file.getPath()));
+                }
             }
         }
 
@@ -1358,6 +1622,36 @@ final class AcpRuntime implements TaskRuntime {
         /** The next text starts a new message item (a wake-up of the parent is a new message). */
         void breakMessage() {
             message = null;
+        }
+
+        /**
+         * A message the user added while the turn runs: a {@code userMessage} item at this point of the
+         * turn ({@code <turnId>-steer-<requestId>}); the agent's next text starts a new message after it.
+         */
+        void steer(String requestId, String text, JSONArray attachments) throws Exception {
+            String id = turnId + "-steer-" + requestId;
+            if (items.containsKey(id)) return;
+            // The native userMessage shape (as ComposerInput): the text, then one part per attachment that
+            // the chat page shows as an attachment chip (never its path).
+            JSONArray content = new JSONArray();
+            if (text != null && !text.isBlank()) content.put(new JSONObject().put("type", "text").put("text", AcpConversationStore.clip(text)));
+            if (attachments != null) for (int i = 0; i < attachments.length(); i++) {
+                JSONObject attachment = attachments.optJSONObject(i);
+                if (attachment == null) continue;
+                content.put(new JSONObject().put("type", "text").put("text", "User-selected attachment: "
+                        + attachment.optString("name", "attachment") + "\nLocal path: " + attachment.optString("path", "")));
+            }
+            JSONObject user = new JSONObject().put("type", "userMessage").put("id", id).put("content", content);
+            items.put(id, user);
+            message = null;
+            flush(true);
+        }
+
+        /** A steer agy refused (or never took up) leaves the turn again. */
+        void withdrawSteer(String requestId) throws Exception {
+            if (items.remove(turnId + "-steer-" + requestId) == null) return;
+            message = null;
+            flush(true);
         }
 
         void message(String chunk) throws Exception {

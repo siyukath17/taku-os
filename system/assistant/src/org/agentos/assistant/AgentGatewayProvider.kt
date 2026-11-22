@@ -275,13 +275,20 @@ class AgentGatewayProvider : ContentProvider() {
             AgentGatewayProtocol.COMPOSER_PRESERVE_DRAFT -> return ComposerState.preserveDraft(preferences(), thread, input.getString("recoveryId"), input.getString("text"))
             AgentGatewayProtocol.COMPOSER_RESTORE_TASK -> return ComposerDelivery.restoreTask(context!!, input)
             "sendMessage" -> return submit(input)
-            "steer" -> return submissions.steer(input.getString("requestId"), thread, input.getString("expectedTurnId"), input.getString("text"), {
-                val state = NativeClient.state(thread)
-                if (input.getString("expectedTurnId") != state.optString("activeTurnId")) throw IOException("TURN_CHANGED")
-            }, {
-                NativeClient.rpcSync("turn/steer", JSONObject().put("threadId", thread)
-                    .put("expectedTurnId", input.getString("expectedTurnId")).put("input", textInput(input.getString("text"))))
-            }, object : AgentGatewaySubmissions.Fallback {
+            "steer" -> return submissions.steer(input.getString("requestId"), thread, input.getString("expectedTurnId"), input.getString("text"),
+                object : AgentGatewaySubmissions.SteerRoute {
+                    @Throws(Exception::class)
+                    override fun check() {
+                        val state = NativeClient.state(thread)
+                        if (input.getString("expectedTurnId") != state.optString("activeTurnId")) throw IOException("TURN_CHANGED")
+                    }
+                    @Throws(Exception::class)
+                    override fun steer(): JSONObject = NativeClient.rpcSync("turn/steer", JSONObject().put("threadId", thread)
+                        .put("expectedTurnId", input.getString("expectedTurnId")).put("input", textInput(input.getString("text"))))
+                },
+                // An ACP turn is not a Codex turn: the broker steers it (TaskRequests.acpSteer).
+                TaskRequests.acpSteer(thread, input.getString("expectedTurnId"), input.getString("requestId"), input.getString("text"), null),
+                object : AgentGatewaySubmissions.Fallback {
                 @Throws(Exception::class)
                 override fun check() { checkSubmitAfterTurn(thread) }
                 @Throws(Exception::class)

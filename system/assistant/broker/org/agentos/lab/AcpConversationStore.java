@@ -201,6 +201,21 @@ final class AcpConversationStore {
         return null;
     }
 
+    /** The task of ACP turn {@code turnId} whatever its status, or null when this conversation has no such turn. */
+    synchronized String turnTask(String id, String turnId) {
+        JSONObject record = record(id);
+        JSONArray turns = record == null ? null : record.optJSONArray("turns");
+        if (turns == null || turnId == null) return null;
+        for (int i = turns.length() - 1; i >= 0; i--) {
+            JSONObject turn = turns.optJSONObject(i);
+            if (turn != null && turnId.equals(turn.optString("id"))) {
+                String task = turn.optString("taskId", "");
+                return task.isEmpty() ? null : task;
+            }
+        }
+        return null;
+    }
+
     synchronized void bindSession(String id, String sessionId, JSONObject agentInfo) throws Exception {
         JSONObject record = mutable(id);
         if (!sessionId.equals(record.optString("sessionId"))) record.put("sessionStartedAt", System.currentTimeMillis());
@@ -234,8 +249,11 @@ final class AcpConversationStore {
     }
 
     /**
-     * Replaces everything after the user's message with {@code agentItems} and sets the turn status.
-     * A terminal status records {@code completedAt}.
+     * Replaces everything after the turn's opening user message with {@code items}, in order, and
+     * sets the turn status. {@code items} may hold further {@code userMessage}s: messages the user
+     * added while the turn ran (steering, {@code <turnId>-steer-<requestId>}), each followed by the
+     * agent's answer to it, so the chat shows them in the order they happened. A terminal status
+     * records {@code completedAt}.
      */
     synchronized void updateTurn(String id, String turnId, JSONArray agentItems, String status) throws Exception {
         JSONObject record = mutable(id);
@@ -245,9 +263,11 @@ final class AcpConversationStore {
             if (!turnId.equals(turn.optString("id"))) continue;
             JSONArray items = new JSONArray();
             JSONArray old = turn.optJSONArray("items");
-            if (old != null && old.length() > 0) items.put(old.getJSONObject(0));
+            JSONObject opening = old != null && old.length() > 0 ? old.getJSONObject(0) : null;
+            if (opening != null) items.put(opening);
             if (agentItems != null) for (int j = 0; j < agentItems.length(); j++) {
                 JSONObject item = new JSONObject(agentItems.getJSONObject(j).toString());
+                if (opening != null && opening.optString("id").equals(item.optString("id"))) continue;
                 if (item.has("text")) item.put("text", clip(item.optString("text")));
                 items.put(item);
             }
@@ -370,18 +390,22 @@ final class AcpConversationStore {
             JSONObject turn = turns.optJSONObject(i);
             JSONArray items = turn == null ? null : turn.optJSONArray("items");
             if (items == null) continue;
-            String user = "", reply = "";
+            // Each user message (the opening one and any added while the turn ran) with the agent's
+            // last reply before the next user message.
+            String reply = "";
             for (int j = 0; j < items.length(); j++) {
                 JSONObject item = items.optJSONObject(j);
                 if (item == null) continue;
                 if ("userMessage".equals(item.optString("type"))) {
                     String text = messageText(item);
-                    if (!text.isEmpty()) user = text;
+                    if (text.isEmpty()) continue;
+                    if (!reply.isEmpty()) lines.add("Assistant: " + clip(reply, 2000));
+                    reply = "";
+                    lines.add("User: " + clip(text, 2000));
                 } else if ("agentMessage".equals(item.optString("type")) && !item.optString("text").isBlank()) {
                     reply = item.optString("text");
                 }
             }
-            if (!user.isEmpty()) lines.add("User: " + clip(user, 2000));
             if (!reply.isEmpty()) lines.add("Assistant: " + clip(reply, 2000));
         }
         StringBuilder out = new StringBuilder();

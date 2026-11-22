@@ -102,6 +102,9 @@ export function useAgentController() {
     const messages: Record<string, [string, string]> = {
       THREAD_UNAVAILABLE: ['This conversation is unavailable. Choose another conversation or try refreshing.', '此会话暂不可用，请刷新或选择其他会话。'],
       TURN_CHANGED: ['The turn has changed. Refresh before sending this requirement.', '当前轮次已变化，请刷新后再发送补充要求。'],
+      STEER_WAITING_ANSWER: ['The agent is waiting for an answer to its question or approval. Answer it first, then send this requirement again. Your draft is kept.', 'Agent 正在等待你回答问题或确认操作，请先处理后再发送补充要求。草稿已保留。'],
+      STEER_CANCELLING: ['This turn is stopping, so the requirement was not added. Your draft is kept; send it again once it has stopped.', '当前轮次正在停止，补充要求未加入。草稿已保留，停止后可重新发送。'],
+      STEER_REJECTED: ['The agent could not add this requirement to the running turn. Your draft is kept; try again in a moment.', 'Agent 暂时无法把补充要求加入当前轮次。草稿已保留，请稍后重试。'],
       THREAD_QUEUED: ['This conversation already has a queued task. Wait for it to start.', '此会话已有排队中的任务，请稍候。'],
       THREAD_BUSY: ['This conversation is already working. Refresh to add a requirement to its active turn.', '此会话正在执行，请刷新后向当前轮次补充要求。'],
       TURN_STARTED: ['The queued task has started. Refresh to stop the active turn.', '排队任务已开始执行，请刷新后停止当前轮次。'],

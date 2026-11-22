@@ -26,7 +26,7 @@ import java.io.File;
  *       conversation stores the title here ({@link AcpConversationStore#rename}); Codex is not
  *       started or asked.</li>
  *   <li>{@link #interrupt} stops a running ACP chat turn (chat page stop button) through the
- *       task's cancel marker ({@link AcpTurnControl}).</li>
+ *       task's cancel marker ({@link AcpTurnControl}); {@link #steer} adds a user message to it.</li>
  * </ul>
  *
  * <p>This class is the only ACP seam of {@link CodexAppServer} and {@link NativeBridge}: they ask it,
@@ -136,6 +136,27 @@ final class AcpConversations {
     /** Chat page stop of a running ACP turn ({@code turnId} {@code acp-...}). */
     static JSONObject interrupt(String threadId, String turnId) throws Exception {
         return AcpTurnControl.interrupt(STORE, TaskBroker.TASKS, threadId, turnId);
+    }
+
+    /**
+     * Native {@code acpSteer}: adds a user message to the running ACP turn ({@link AcpTurnControl#steer});
+     * {@code checkOnly} validates without writing.
+     */
+    static JSONObject steer(JSONObject input) throws Exception {
+        return AcpTurnControl.steer(STORE, TaskBroker.TASKS, input.getString("threadId"), input.getString("turnId"),
+                input.getString("requestId"), input.optString("text", ""), input.optJSONArray("attachments"),
+                input.optBoolean("checkOnly", false), AcpTurnControl.STEER_WAIT_MILLIS);
+    }
+
+    /**
+     * The native error code of a failed {@link #steer}: {@code STEER_NOT_SUBMITTED} when it provably
+     * never reached the agent (the gateway may queue it as the next turn), the {@code STEER_*} code of
+     * a refusal; null for any other failure.
+     */
+    static String steerErrorCode(Throwable failure) {
+        if (failure instanceof AcpTurnControl.SteerNotSubmitted) return "STEER_NOT_SUBMITTED";
+        if (failure instanceof AcpTurnControl.SteerRejected) return failure.getMessage();
+        return null;
     }
 
     /** True for a conversation the broker started on ACP (no Codex thread behind it). */

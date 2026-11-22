@@ -51,6 +51,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpStandaloneConversationTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpModelCatalogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpSubagentRuntimeTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpSteerRuntimeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/ThreadListOrderTest.java \
  system/assistant/tests/acp-runtime/org/agentos/assistant/AcpChatProjectionTest.java \
  system/assistant/src/org/agentos/assistant/AgentConversation.java \
@@ -59,7 +60,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest ThreadListOrderTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest ThreadListOrderTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" "$main"
 done | tee "$task_out/result.txt"
