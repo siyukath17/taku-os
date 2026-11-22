@@ -867,7 +867,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
           openThread: id => { live.stop(); setLayer(null); props.onSelectThread(id); },
           newChat: () => { live.stop(); setLayer(null); props.onCreateThread(); },
           openSettings: () => { setLayer(null); router.push('/system-ai'); },
-          openRoute: () => { setLayer(null); router.push('/plugin-market'); },
+          openRoute: route => { setLayer(null); router.push(route === 'connect' ? '/connect' : '/plugin-market'); },
           openNativeControls: () => { setLayer(null); router.push({pathname: '/assistant-management', params: sessionId ? {threadId: sessionId} : {}}); },
           collapse: collapseChat,
           taskView: {on: taskView, toggle: () => { setLayer(null); setTaskView(!taskView); }},

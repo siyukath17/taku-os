@@ -24,7 +24,10 @@ public final class AgentOpenAccessPolicy {
         boolean sensitiveFamily = method.startsWith("requests/") || method.startsWith("accounts/")
                 || method.startsWith("composer/") || method.startsWith("skills/")
                 || method.startsWith("capture/") || method.startsWith("jev/")
-                || method.startsWith("account/login/");
+                || method.startsWith("account/login/")
+                // Taku Connect: listing and probing are reads; adding, switching, restyling and
+                // testing a token against an arbitrary URL change or leak what the agent can reach.
+                || method.startsWith("connect/") && !method.equals("connect/list") && !method.equals("connect/probe");
         return ROOT_METHODS.contains(method) || sensitiveFamily && !CONTROL_READS.contains(method)
                 ? "taku.root" : "taku.control";
     }

@@ -54,6 +54,9 @@ public final class TaskBroker {
     }
 
     static final File RUNTIME_CONFIG = new File(ROOT, "runtime.json");
+    /** Taku Connect (taku-runtime nodes): connect.json beside runtime.json, tokens root-only under acp/secrets. */
+    static final TakuConnect CONNECT = new TakuConnect(RUNTIME_CONFIG, new File(ROOT, "connect.json"),
+            new File("/data/local/agentos/acp/secrets"), TakuConnect.DEFAULT_CLIENT);
     /** The ACP agent's model list as last reported (see AcpModelCatalog): the picker's source while on ACP. */
     static final File ACP_MODELS = new File(ROOT, "acp-models.json");
 

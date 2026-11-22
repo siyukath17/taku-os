@@ -17,7 +17,7 @@ export type SecretFieldHandle = {
    * from the native field to the gateway as a file descriptor and never reaches JavaScript.
    * Rejects with `SECRET_EMPTY` when nothing was typed. The field is emptied once accepted.
    */
-  submit<T>(action: Extract<AgentAction, 'accounts/saveKey' | 'manageAssistant'>, params?: Record<string, unknown>): Promise<T>;
+  submit<T>(action: Extract<AgentAction, 'accounts/saveKey' | 'manageAssistant' | 'connect/add' | 'connect/test'>, params?: Record<string, unknown>): Promise<T>;
 };
 
 export type SecretFieldProps = ViewProps & {

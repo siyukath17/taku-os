@@ -156,6 +156,7 @@ class AgentGatewayProvider : ContentProvider() {
                 method.startsWith("accounts/") -> AssistantAccounts.command(context!!, method, request, extras, challenge = true)
                 method == "manageAssistant" -> AssistantManagement.execute(context!!, request, extras)
                 method.startsWith("requests/") -> AssistantRequests.execute(method, request, extras, trusted = true)
+                method in TakuConnectGateway.ACTIONS -> TakuConnectGateway.execute(method, request, extras)
                 else -> execute(method, request, callerUid)
             }
             val envelope = JSONObject().put("ok", true).put("result", result)

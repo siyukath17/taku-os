@@ -17,11 +17,11 @@ export function redirectSystemPath({path}: {path: string; initial: boolean}): st
   const nativeLink = path.startsWith(scheme);
   const local = nativeLink ? path.slice(scheme.length) : path;
   if (nativeLink && (local === '' || local === '/')) return '/';
-  const match = /^\/?(task-detail|system-ai|workspaces|plugin-market|assistant-suggestion|assistant-management)\/?(?:\?([^#]*))?$/.exec(local);
+  const match = /^\/?(task-detail|system-ai|workspaces|plugin-market|connect|assistant-suggestion|assistant-management)\/?(?:\?([^#]*))?$/.exec(local);
   if (!match) return path;
   const [, name, query] = match;
   const route = `/${name}`;
-  if (name === 'plugin-market') return route;
+  if (name === 'plugin-market' || name === 'connect') return route;
   if (name === 'task-detail') {
     const taskId = /^taskId=([0-9]{1,20})$/.exec(query ?? '')?.[1];
     return taskId ? `${route}?taskId=${taskId}` : route;

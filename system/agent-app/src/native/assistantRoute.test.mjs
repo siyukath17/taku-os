@@ -24,6 +24,8 @@ test('other assistant links keep their own destinations and validated parameters
   assert.equal(open('taku-agent:///system-ai?section=constructor'), '/system-ai');
   assert.equal(open(`taku-agent:///workspaces?${lease}`), `/workspaces?${lease}`);
   assert.equal(open('taku-agent://plugin-market'), '/plugin-market');
+  assert.equal(open('taku-agent://connect'), '/connect');
+  assert.equal(open('taku-agent://connect?token=x'), '/connect', 'connect takes no parameters');
   assert.equal(open(`taku-agent:///assistant-suggestion?captureId=${threadId}`), `/assistant-suggestion?captureId=${threadId}`);
   const management = `section=queue&threadId=${threadId}&taskId=42`;
   assert.equal(open(`taku-agent:///assistant-management?${management}`), `/assistant-management?${management}`);

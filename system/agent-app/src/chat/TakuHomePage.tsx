@@ -26,7 +26,7 @@ export type TakuHomeActions = {
   openThread: (threadId: string) => void;
   newChat: () => void;
   openSettings?: () => void;
-  openRoute?: (route: 'plugin-market') => void;
+  openRoute?: (route: 'plugin-market' | 'connect') => void;
   openNativeControls?: () => void;
   collapse?: () => void;
   /** The chat's chat/task view switch (was in the history sheet). */
@@ -75,6 +75,7 @@ export function TakuHomePage({language, threads, threadId, historyError = '', in
     <SectionHeader title={t('settingsAndTools')} language={language}/>
     <View style={styles.toolCard}>
       <ToolRow label={t('newChat')} onPress={actions.newChat}/>
+      <ToolRow label={t('takuConnect')} onPress={openRoute && (() => openRoute('connect'))}/>
       {actions.taskView && <ToolRow label={t(actions.taskView.on ? 'showChat' : 'showTasks')} onPress={actions.taskView.toggle}/>}
       <ToolRow label={t('settings')} onPress={openSettings}/>
       <ToolRow label={t('pluginMarket')} onPress={openRoute && (() => openRoute('plugin-market'))}/>

@@ -804,6 +804,7 @@ export default function SystemAiScreen() {
               <Row palette={palette} title="Memory settings" sub="Recording sources, analysis, and retention" onPress={() => void openFeature("memory")} />
               <Row palette={palette} title="Taku Audio" sub={data.audioAvailable ? "Voice, models, translation, and local reading" : "Install or enable Taku Audio first"} onPress={() => void openFeature("audio")} />
               <Row palette={palette} title="Background workspaces" sub="Preview, take over, pause, and release task screens" onPress={() => router.push("/workspaces")} />
+              <Row palette={palette} title="Taku Connect" sub="Mac mini, TV and other taku-runtime devices the Agent can use" onPress={() => router.push("/connect")} />
               <View style={styles.switchRow}>
                 <View style={{ flex: 1, gap: 4 }}>
                   <Label color={palette.ink} medium>Allow assistant screenshots</Label>

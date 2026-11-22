@@ -9,6 +9,7 @@ import {AgentMarkdown, type MarkdownSize} from '../native/Markdown';
 import {collapseToIsland, launchDraft, onDraft} from '../native/agent';
 import type {Language} from '../i18n';
 import {appendHomeDrafts} from '../chat/homeDraft';
+import {takeConnectDispatch} from '../model/connectHandoff';
 import type {CardDemand} from '../chat/cardDemand';
 import type {MessagePart} from '../model/session';
 
@@ -43,8 +44,30 @@ export default function AgentScreen() {
     receiveDraft();
     return () => subscription.remove();
   }, []);
+  // "Dispatch a task" from Taku Connect: open a new conversation once the chat is idle, then put
+  // the device prompt in its composer (never sent automatically). If creation fails the text
+  // lands in the current conversation rather than being lost.
+  const [dispatch] = useState(() => takeConnectDispatch());
+  const dispatchState = useRef<{phase: 'create' | 'await' | 'done'; from: string; sawBusy: boolean}>({phase: dispatch ? 'create' : 'done', from: '', sawBusy: false});
+  const {onCreateThread} = controller;
   useEffect(() => {
-    if (!pendingDrafts.current.length || loading || busy) return;
+    const state = dispatchState.current;
+    if (state.phase === 'done' || !dispatch) return;
+    if (state.phase === 'create') {
+      if (loading || busy) return;
+      dispatchState.current = {phase: 'await', from: threadId, sawBusy: false};
+      onCreateThread();
+      return;
+    }
+    if (busy) { state.sawBusy = true; return; }
+    if (threadId !== state.from || state.sawBusy) {
+      dispatchState.current = {...state, phase: 'done'};
+      pendingDrafts.current = [...pendingDrafts.current, dispatch];
+      setDraftArrivals(count => count + 1);
+    }
+  }, [dispatch, loading, busy, threadId, onCreateThread]);
+  useEffect(() => {
+    if (!pendingDrafts.current.length || loading || busy || dispatchState.current.phase !== 'done') return;
     const incoming = pendingDrafts.current;
     // Keep whatever the user had already typed; append rather than replace it.
     if (onDraftChange(appendHomeDrafts(draft, incoming))) pendingDrafts.current = [];

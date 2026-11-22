@@ -180,6 +180,7 @@ public final class AgentOpenAccessProvider extends ContentProvider {
             else if (method.equals("jev/enable")) { only(input); result = AiConnections.enableJev(getContext()); }
             else if (method.equals("jev/connect")) { only(input, "key"); result = AiConnections.connectJev(getContext(), input.getString("key")); }
             else if (method.equals("sessions/removals")) result = NativeClient.exchange(input.put("op", "sessionRemovals"));
+            else if (TakuConnectGateway.ACTIONS.contains(method)) result = TakuConnectGateway.execute(method, input, extras);
             else if (method.startsWith("workspaces/")) result = WorkspaceCommands.call(context, method, input, caller);
             else if (method.startsWith("capture/")) result = AssistantCaptureBackend.execute(context, method, input);
             else if (method.startsWith("accounts/")) {

@@ -250,6 +250,40 @@ A task request may set `"runtime":"remote_t3"` and `"remoteT3":{"projectId"|"env
 same island progress card; `needs_user` means the remote host rejected or lacks the token (no Sign in action). See
 `system/assistant/ACP_RUNTIME.md` for the wire contract and outcomes.
 
+## Taku Connect (taku-runtime devices)
+
+Mac mini, TV boxes and other machines running `taku-runtime` that the on-device agent can drive
+(GUI: Agent app → Taku Home → Taku Connect, or `taku-agent://connect`). The node list *is*
+`runtime.json` `acp.mcpServers` entries of the form `taku mcp-stdio --url <url> --token-file <file>`;
+phone-side names/icons live in `connect.json` beside it. Tokens never come back (only `hasToken`).
+
+```sh
+taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,enabled,hasToken,appearance}]}
+taku_call "$D" connect/probe '{"id":"taku_macmini"}'
+# {status:"online"|"unauthorized"|"offline",online,latencyMs,network,capabilities:{device,os,arch,mode,engine,
+#  tools:[{name,description}],reservedTools,exec:{enabled,allowedRoots,defaultTimeoutMs,maxTimeoutMs,maxOutputBytes},appearance}}
+taku_call "$D" connect/appearance '{"id":"taku_macmini","displayName":"书房 Mac mini","deviceType":"mac_mini","icon":"builtin:mac_mini"}'
+taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":"/data/local/tmp/mini.png"}'   # inlined as data:image/png;base64
+taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":null}'                          # clear: next icon tier applies
+taku_call "$D" connect/setEnabled '{"id":"taku_macmini","enabled":false}'   # leaves mcpServers (agent stops using it), kept in connect.json
+taku_call "$D" connect/test '{"url":"192.168.1.30:7878","token":"…"}'       # probe without saving
+taku_call "$D" connect/add '{"name":"客厅电视","url":"192.168.1.30:7878","token":"…","deviceType":"tv"}'
+taku_call "$D" connect/remove '{"id":"taku_living_room_tv"}'
+```
+
+`list`/`probe` need `taku.control`; every other `connect/*` needs `taku.root` (a token test sends a
+bearer to an arbitrary URL). `add` probes first and refuses a node that is not `online`; the token is
+written root-only to `/data/local/agentos/acp/secrets/<id>.token` (or `tokenFile`, which must be under
+`/data/local/agentos/`). The id is `taku_<ascii slug of name>` (unique; `taku_node` for non-ASCII names).
+Icons resolve in three tiers on every client: custom `icon` (phone override, then the device's own
+`capabilities.appearance.icon`) → built-in drawing for `deviceType` → `generic`. `icon` accepts
+`builtin:<type>`, `http(s)://…`, `data:image/(png|jpeg|webp|gif|svg+xml);base64,…` (≤ 256 KiB) or an absolute
+`.png/.jpg/.webp/.svg` path; `deviceType` is one of `mac_mini laptop desktop tv server phone tablet speaker car generic`.
+Errors: `NODE_NOT_FOUND`, `NODE_UNREACHABLE`, `NODE_UNAUTHORIZED`, `TOKEN_REQUIRED`, `INVALID_URL`, `INVALID_NAME`,
+`INVALID_TOKEN`, `TOKEN_FILE_NOT_FOUND`, `TOKEN_FILE_LOCATION_NOT_ALLOWED`, `INVALID_ICON`, `ICON_TOO_LARGE`,
+`ICON_TYPE_NOT_SUPPORTED`, `ICON_FILE_NOT_FOUND`, `INVALID_DEVICE_TYPE`, `NOTHING_TO_UPDATE`, `TOO_MANY_NODES`, `REVISION_CONFLICT`.
+Changing `mcpServers` retires the warm ACP agent (pool stamp = runtime.json size+mtime); the next turn sees the new set.
+
 ## Screen suggestions
 
 ```sh

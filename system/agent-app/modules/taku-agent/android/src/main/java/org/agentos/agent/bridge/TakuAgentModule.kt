@@ -335,7 +335,8 @@ class TakuAgentModule : Module() {
         val envelope = SecretFields.descriptor(context, bytes).use { descriptor ->
           callGateway(context.contentResolver, action, params, Bundle().apply { putParcelable("credential", descriptor) })
         }
-        if (JSONObject(envelope).optBoolean("ok")) mainHandler.post { fieldIds.forEach(SecretFields::clear) }
+        // A connection test keeps the token typed, so the same field can then be saved.
+        if (action != "connect/test" && JSONObject(envelope).optBoolean("ok")) mainHandler.post { fieldIds.forEach(SecretFields::clear) }
         promise.resolve(envelope)
       } catch (error: Exception) {
         val code = error.message?.takeIf { Regex("[A-Z][A-Z_]{2,80}").matches(it) } ?: "GATEWAY_UNAVAILABLE"
@@ -619,7 +620,7 @@ class TakuAgentModule : Module() {
      * The field is emptied once the gateway accepts it.
      */
     AsyncFunction("submitSecret") { fieldId: String, action: String, params: String, promise: Promise ->
-      if (action != "accounts/saveKey" && action != "manageAssistant") {
+      if (action != "accounts/saveKey" && action != "manageAssistant" && action != "connect/add" && action != "connect/test") {
         promise.reject("INVALID_ARGUMENT", "Unsupported secret action", null); return@AsyncFunction
       }
       submitCredential(action, params, listOf(fieldId), promise) { SecretFields.bytes(fieldId) }

@@ -144,6 +144,7 @@ final class NativeBridge {
    case "imeReplies":answer=ImeReplies.control(input,uid);break;
    case "systemAi":answer=SystemAi.control(input);break;
    case "acpRuntime":answer=AcpConversations.runtimeControl(input);break;
+   case "connect":answer=TaskBroker.CONNECT.control(input);break;
    case "acpPrewarm":answer=AcpConversations.prewarm(input);break;
    case "byok":answer=byok.control(input);break;
    case "ui":answer=SystemAi.ui(input);break;

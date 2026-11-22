@@ -23,7 +23,8 @@ public final class AppPermissionPolicyTest {
                 "account/login/start", "account/login/cancel", "account/login/futureOperation",
                 "capture/read", "capture/request", "capture/accept", "capture/dismiss",
                 "capture/openConversation", "capture/futureOperation", "interrupt", "cancelQueued", "continueTask", "readTaskDetail",
-                "requests/futureMutation", "accounts/futureMutation", "composer/futureMutation"}) {
+                "requests/futureMutation", "accounts/futureMutation", "composer/futureMutation",
+                "connect/add", "connect/test", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/futureOperation"}) {
             check("PERMISSION_DENIED".equals(AgentOpenAccessPolicy.denial(method, scope -> {
                 try { return store.check(app, scope).getBoolean("allowed"); }
                 catch (Exception failure) { throw new AssertionError(failure); }
@@ -33,7 +34,7 @@ public final class AppPermissionPolicyTest {
         }
         for (String method : new String[]{"readSystemAi", "requests/list", "requests/read", "accounts/read",
                 "accounts/keys", "composer/read", "composer/receipt", "composer/options/read",
-                "skills/read", "reactions/options", "reactions/list", "reactions/set"}) {
+                "skills/read", "reactions/options", "reactions/list", "reactions/set", "connect/list", "connect/probe"}) {
             check(AgentOpenAccessPolicy.denial(method, "taku.control"::equals) == null,
                     "ordinary control access must remain available: " + method);
         }
