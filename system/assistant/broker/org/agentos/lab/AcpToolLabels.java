@@ -42,7 +42,12 @@ final class AcpToolLabels {
         }
     }
 
-    private static final Pattern PHONE = Pattern.compile("^(?:mcp_)?taku_phone(?:__|_|\\.|/)([a-z][a-z0-9_]*)$");
+    /**
+     * A taku_phone tool name. agy prefixes {@code mcp_}; when one agy process holds several
+     * {@code taku_phone} servers (a warm process serving several conversations, each with its own
+     * declaration) it inserts an 8-hex disambiguator: {@code mcp_taku_phone_3013b55d_apps}.
+     */
+    private static final Pattern PHONE = Pattern.compile("^(?:mcp_)?taku_phone(?:__|_|\\.|/)(?:[0-9a-f]{8}_)?([a-z][a-z0-9_]*)$");
     private static final Pattern NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.:/-]{0,79}");
 
     /** {@code en} and {@code zh} labels by key. Unknown keys fall back to a generic label. */
@@ -122,7 +127,7 @@ final class AcpToolLabels {
      * {@code mcptakuphonedeviceinfo} some models produce. Group 1 is the tool part.
      */
     private static final Pattern PHONE_IN_TEXT = Pattern.compile(
-            "`?(?<![\\w./-])(?:mcp_{0,2})?taku_?phone(?:__|_|\\.|/)?([a-z][a-z0-9_]*)(?![\\w/-]|\\.\\w)(?:\\(\\))?`?",
+            "`?(?<![\\w./-])(?:mcp_{0,2})?taku_?phone(?:__|_|\\.|/)?(?:[0-9a-f]{8}_)?([a-z][a-z0-9_]*)(?![\\w/-]|\\.\\w)(?:\\(\\))?`?",
             Pattern.CASE_INSENSITIVE);
     /** A bare snake_case tool key the agent runs (e.g. {@code invoke_subagent}, {@code view_file}). */
     private static final Pattern KEY_IN_TEXT = Pattern.compile("`?(?<![\\w./-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\\w/-]|\\.\\w)(?:\\(\\))?`?");

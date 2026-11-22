@@ -1828,7 +1828,7 @@ final class AcpRuntime implements TaskRuntime {
 
         /** {@code taku_phone} tool name in an agent tool title such as "Run mcp_taku_phone_device_info". */
         static String phoneToolName(String title) {
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:mcp_)?taku_phone(?:__|_|\\.|/)([a-z_]+)").matcher(title == null ? "" : title);
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:mcp_)?taku_phone(?:__|_|\\.|/)(?:[0-9a-f]{8}_)?([a-z_]+)").matcher(title == null ? "" : title);
             return m.find() ? m.group(1) : null;
         }
 

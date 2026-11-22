@@ -368,6 +368,23 @@ public final class AcpWarmPoolTest {
         AcpPhoneTurns.hooks = saved;
     }
 
+    /**
+     * A warm agy process serving several conversations holds several taku_phone servers and names their
+     * tools with an 8-hex disambiguator (Pixel 9, agy 1.5.14: mcp_taku_phone_3013b55d_apps). They are
+     * still phone tools with the canonical id, label and failure lookup.
+     */
+    static void disambiguatedPhoneToolNames() throws Exception {
+        AcpToolLabels.Tool tool = AcpToolLabels.identify("mcp_taku_phone_3013b55d_apps", "", "other");
+        check(tool.phone && "apps".equals(tool.key) && "taku_phone__apps".equals(tool.canonical()),
+                "disambiguated name: a phone tool with the canonical id: " + tool.canonical());
+        AcpToolLabels.Tool lettered = AcpToolLabels.identify("mcp_taku_phone_ab12cd34_request_apps", "", "other");
+        check(lettered.phone && "request_apps".equals(lettered.key), "a disambiguator starting with a letter: " + lettered.key);
+        check(AcpToolLabels.identify("mcp_taku_phone_device_info", "", "other").key.equals("device_info"), "the plain name still works");
+        check("open_app".equals(AcpRuntime.Chat.phoneToolName("mcp_taku_phone_3013b55d_open_app")), "failure lookup: tool part found");
+        String prose = AcpToolLabels.humanizePhoneTools("called `mcp_taku_phone_3013b55d_device_info` first", java.util.Locale.ENGLISH);
+        check(!prose.contains("3013b55d") && !prose.contains("mcp_taku_phone"), "prose: the disambiguated identifier reads as the tool: " + prose);
+    }
+
     /** P0: only the ACP route skips the execution display; background tasks still capture context. */
     static void displayPreparationByRoute() throws Exception {
         check(!RuntimeRouter.preparesExecutionDisplay(new RuntimeRouter.Route(RuntimeRouter.ACP, "acp", "selected-by-config", new JSONObject())),
@@ -421,6 +438,7 @@ public final class AcpWarmPoolTest {
         subagentsAreNotPooled();
         nativePhoneMcp();
         bridgeTurnFollowsCurrentTurn();
+        disambiguatedPhoneToolNames();
         displayPreparationByRoute();
         coalescedNotifications();
         System.out.println("AcpWarmPoolTest passed " + checks + " checks");
