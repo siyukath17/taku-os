@@ -61,7 +61,7 @@ public final class WorkspaceRevocationTest {
                 "Spec 2: the allowed page and Agent control survive");
         check(CodexAppServer.stopProofChecks == 0 && WorkspaceExecutionRuntime.subAgentLookups == 0,
                 "Spec 2: automatic revocation never invokes turn-stop or child-close handling");
-        check(NativeBridge.notices.get(NativeBridge.notices.size() - 1).get(5, TimeUnit.SECONDS).contains("重新评估"),
+        check(NativeBridge.notices.get(NativeBridge.notices.size() - 1).get(5, TimeUnit.SECONDS).contains("Reassess"),
                 "Spec 2: completion resolves the reevaluation notice");
 
         rig = rig();

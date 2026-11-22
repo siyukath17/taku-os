@@ -14,7 +14,7 @@ public final class SkillCredentialsTest {
         try {
             JSONObject source=SkillCommunity.source("fixture","fixture",repo,"").put("private",true);
             try { SkillCommunity.commit(source);throw new Exception("missing credential accepted"); }
-            catch(java.io.IOException expected) { check(expected.getMessage().contains("未配置 GitHub 凭据"),"unclear missing credential error"); }
+            catch(java.io.IOException expected) { check(expected.getMessage().contains("No GitHub credentials are configured"),"unclear missing credential error"); }
             check(!SkillCredentials.control(new JSONObject(request.toString()).put("action","status")).getBoolean("configured"),"unexpected token");
             JSONObject saved=SkillCredentials.control(new JSONObject(request.toString()).put("action","set").put("token",secret));
             check(saved.getBoolean("configured")&&!saved.toString().contains(secret),"credential exposed in response");
@@ -23,7 +23,7 @@ public final class SkillCredentialsTest {
             check((Os.stat(file.getParent()).st_mode & 0777)==0700,"credential directory is not private");
             check(secret.equals(SkillCredentials.get(repo)),"credential not retrieved");
             try { SkillCommunity.commit(source);throw new Exception("invalid token unexpectedly worked"); }
-            catch(java.io.IOException expected) { check(expected.getMessage().startsWith("无法访问私有仓库"),"expected GitHub to reject the synthetic token"); check(!expected.toString().contains(secret),"credential leaked in error"); }
+            catch(java.io.IOException expected) { check(expected.getMessage().startsWith("Cannot access the private repository"),"expected GitHub to reject the synthetic token"); check(!expected.toString().contains(secret),"credential leaked in error"); }
             System.out.println("PASS: missing credential, private device storage, redacted result/error and removal");
         } finally { SkillCredentials.control(new JSONObject(request.toString()).put("action","remove")); }
         check(!SkillCredentials.control(new JSONObject(request.toString()).put("action","status")).getBoolean("configured"),"credential not removed");

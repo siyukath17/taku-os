@@ -43,7 +43,7 @@ public final class PhoneExecutionScreensTest {
         check(events.equals(List.of("DOWN")),"replacement during live gesture receives neither MOVE nor cleanup CANCEL");
         check(pointer.state()==null,"invalidated pointer cannot retain a reusable gesture");
         rejects("SCREEN_GESTURE_NOT_PREPARED",()->pointers.screen(2));
-        rejects("本轮没有有效",()->pointer.touch("turn",2,"UP",110,110));
+        rejects("no valid held gesture",()->pointer.touch("turn",2,"UP",110,110));
         pointers.prepare(new PhoneExecutionScreens.Screen("task-b","replacement",2,false));
         pointers.pointer(2).touch("turn",2,"DOWN",120,120);pointers.pointer(2).touch("turn",2,"UP",120,120);
         check(events.equals(List.of("DOWN","DOWN","UP")),"explicitly prepared replacement accepts only its new gesture");

@@ -263,7 +263,7 @@ final class WorkspaceControl {
         };
         if (receipt.release() != null)
             result += " Released: " + receipt.release().optJSONArray("released")
-                    + "; still held: " + receipt.release().optJSONArray("heldApps") + "。"
+                    + "; still held: " + receipt.release().optJSONArray("heldApps") + ". "
                     + (receipt.release().optBoolean("screenRetained")
                             ? "This conversation still holds its original dedicated screen." : "This conversation no longer holds its original dedicated screen.");
         return result + " Reassess the task using the remaining App permissions. Continue if possible; otherwise end this turn and "
