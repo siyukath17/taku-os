@@ -43,6 +43,7 @@ import {TakuHomePage} from '../chat/TakuHomePage';
 import {sheetSpace, type ImeGeometry} from '../model/sheetGeometry';
 import {emptyPreview, PREVIEW_FRESH_MS, PREVIEW_LOAD_TIMEOUT_MS, PREVIEW_REFRESH_MS, previewReducer} from '../model/preview';
 import {rowDemand, sameBand, visibleBand, type CardDemand, type RowBand} from '../chat/cardDemand';
+import {createChatScrollState, distanceFromBottom, findPinnedTurn, PIN_SETTLE_MS, pinnedSpacerHeight, reduceChatScroll, sameChatScrollState, type ChatScrollEffect, type ChatScrollEvent, type ChatScrollState} from '../chat/chatScroll';
 import {ComposerTools} from '../chat/ComposerTools';
 import type {ComposerAttachment, ComposerRecovery} from '../hooks/composerDraft';
 import {attachmentPreviewUri} from '../native/composerPicker';
@@ -387,7 +388,13 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   const headerBottom = insets.top + chatMetrics.header;
   const composerBottom = (keyboardVisible ? 16 : insets.bottom + 16) + space.bottom;
   const composerTop = hostHeight - composerBottom - composerBox;
-  const scroll = useRef<FlatList<ChatMessageBlock>>(null), reading = useRef(false);
+  const scroll = useRef<FlatList<ChatMessageBlock>>(null);
+  const [scrollState, setScrollState] = useState<ChatScrollState>(() => createChatScrollState());
+  const scrollStateRef = useRef<ChatScrollState>(scrollState);
+  const pinSettleUntil = useRef<number>(0);
+  const preSendRef = useRef<{lastUserId: string | null; count: number}>({lastUserId: null, count: 0});
+  const scrollMetrics = useRef({contentHeight: 0, viewportHeight: 0, offsetY: 0});
+  const [turnHeights, setTurnHeights] = useState({key: '', user: 0, assistant: 0, footer: 0});
   const [demandBand, setDemandBand] = useState<RowBand | null>(null);
   // RN forbids replacing these handlers on the fly, so they live for the screen's lifetime.
   const [viewability] = useState(() => ({
@@ -400,6 +407,16 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   const scrollingByUser = useRef(false);
   const positions = useRef<Record<string, {y: number; follow: boolean}>>({});
   const restoreY = useRef<number | null>(null);
+  const applyScrollEffect = useCallback((effect: ChatScrollEffect) => {
+    if (effect === 'toBottomInstant') scroll.current?.scrollToEnd({animated: false});
+    else if (effect === 'toBottomAnimated') scroll.current?.scrollToEnd({animated: true});
+  }, []);
+  const dispatchScroll = useCallback((event: ChatScrollEvent) => {
+    const {state: next, effect} = reduceChatScroll(scrollStateRef.current, event);
+    scrollStateRef.current = next;
+    setScrollState(previous => sameChatScrollState(previous, next) ? previous : next);
+    applyScrollEffect(effect);
+  }, [applyScrollEffect]);
   const sessionId = props.session?.id || '';
   // Requests the cards cannot answer in place are handled on the pending-requests page.
   const openRequests = (requestKey?: string) => router.push({pathname: '/assistant-management',
@@ -409,12 +426,18 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   const viewKey = `${props.conversationKey ?? sessionId}/${taskView ? 'tasks' : 'chat'}`;
   useEffect(() => {
     const position = positions.current[viewKey];
-    reading.current = position ? !position.follow : false;
-    restoreY.current = position && !position.follow ? position.y : null;
-    if (position && !position.follow) requestAnimationFrame(() => {
-      if (restoreY.current === position.y && reading.current) scroll.current?.scrollToOffset({offset: position.y, animated: false});
+    const browsing = !!(position && !position.follow);
+    pinSettleUntil.current = 0;
+    scrollingByUser.current = false;
+    dispatchScroll({type: 'reset', browsing});
+    restoreY.current = browsing && position ? position.y : null;
+    if (browsing && position) requestAnimationFrame(() => {
+      if (restoreY.current === position.y && scrollStateRef.current.mode === 'browsing') {
+        scroll.current?.scrollToOffset({offset: position.y, animated: false});
+      }
     });
-  }, [viewKey]);
+  }, [viewKey, dispatchScroll]);
+  const activeTurnHeights = turnHeights.key === viewKey ? turnHeights : {key: viewKey, user: 0, assistant: 0, footer: 0};
   const workspaces = useMemo(() => props.workspaces.filter(w => w.threadId === sessionId), [props.workspaces, sessionId]);
   const blocks = props.session?.blocks || [];
   const visibleBlocks = useMemo(() => {
@@ -427,22 +450,68 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   // The 2-1 greeting opens the conversation, unless it is still loading or its history is unknown.
   // Issue #32 C2: the greeting is the empty state of a new conversation, not a line above messages.
   const greeting = !taskView && visibleBlocks.length === 0 && !!newConversation;
+  const listTopPadding = headerBottom + (error ? 56 : 0);
+  const pinnedTurn = useMemo(() => taskView ? null : findPinnedTurn(visibleBlocks, scrollState.anchor), [taskView, visibleBlocks, scrollState.anchor]);
+  const pinnedSpacer = !taskView && pinnedTurn
+    ? pinnedSpacerHeight({
+        viewportHeight: Math.max(0, composerTop - listTopPadding),
+        userHeight: activeTurnHeights.user,
+        assistantHeight: activeTurnHeights.assistant,
+        footerHeight: activeTurnHeights.footer,
+        itemGap: chatMetrics.itemGap,
+      })
+    : 0;
+  useEffect(() => {
+    if (taskView || !scrollState.pendingSend) return;
+    let lastUser: ChatMessageBlock | null = null;
+    for (let i = visibleBlocks.length - 1; i >= 0; i -= 1) {
+      if (visibleBlocks[i].role === 'user') { lastUser = visibleBlocks[i]; break; }
+    }
+    if (!lastUser) return;
+    if (lastUser.id === preSendRef.current.lastUserId && visibleBlocks.length <= preSendRef.current.count) return;
+    pinSettleUntil.current = Date.now() + PIN_SETTLE_MS;
+    dispatchScroll({type: 'anchorBound', userId: lastUser.id, turnId: lastUser.turnId});
+    requestAnimationFrame(() => {
+      if (scrollStateRef.current.mode === 'pinned' && !scrollingByUser.current) {
+        scroll.current?.scrollToEnd({animated: true});
+      }
+    });
+  }, [taskView, scrollState.pendingSend, visibleBlocks, dispatchScroll]);
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const {contentOffset, contentSize, layoutMeasurement} = event.nativeEvent;
-    if (restoreY.current !== null || !scrollingByUser.current) return;
-    reading.current = contentSize.height - layoutMeasurement.height - contentOffset.y > 64;
-    positions.current[viewKey] = {y: contentOffset.y, follow: !reading.current};
+    scrollMetrics.current = {contentHeight: contentSize.height, viewportHeight: layoutMeasurement.height, offsetY: contentOffset.y};
+    if (restoreY.current !== null) return;
+    const dist = distanceFromBottom(contentSize.height, layoutMeasurement.height, contentOffset.y);
+    dispatchScroll({type: 'scrolled', distance: dist, byUser: scrollingByUser.current, spacerActive: pinnedSpacer > 0});
+    if (scrollingByUser.current) {
+      positions.current[viewKey] = {y: contentOffset.y, follow: scrollStateRef.current.mode === 'following'};
+    }
   };
   const sendAndFollow = () => {
-    // A new message is an explicit request to leave history and follow the latest reply.
-    reading.current = false;
+    // Dismiss keyboard like Renma and pin the newly sent user message to the top of the viewport.
+    let lastUserId: string | null = null;
+    for (let i = visibleBlocks.length - 1; i >= 0; i -= 1) {
+      if (visibleBlocks[i].role === 'user') { lastUserId = visibleBlocks[i].id; break; }
+    }
+    preSendRef.current = {lastUserId, count: visibleBlocks.length};
     scrollingByUser.current = false;
     restoreY.current = null;
     positions.current[viewKey] = {y: 0, follow: true};
-    scroll.current?.scrollToEnd({animated: false});
+    pinSettleUntil.current = Date.now() + PIN_SETTLE_MS;
+    setTurnHeights(previous => {
+      const base = previous.key === viewKey ? previous : {key: viewKey, user: 0, assistant: 0, footer: 0};
+      return base.user === 0 && base.assistant === 0 ? base : {...base, user: 0, assistant: 0};
+    });
+    Keyboard.dismiss();
+    dispatchScroll({type: 'sent'});
     props.onSend();
-    // Optimistic rows are rendered after the press; content-size changes keep following.
-    requestAnimationFrame(() => { if (!reading.current) scroll.current?.scrollToEnd({animated: false}); });
+  };
+  const scrollToLatest = () => {
+    pinSettleUntil.current = 0;
+    scrollingByUser.current = false;
+    restoreY.current = null;
+    positions.current[viewKey] = {y: 0, follow: true};
+    dispatchScroll({type: 'tappedToBottom'});
   };
   const collapseChat = () => { cancelDictation(); stopReading(); live.stop(); (props.onCollapse ?? props.onClose)(); };
   const openHome = () => {
@@ -569,18 +638,21 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       bottomSharp={composerTop - 32} bottomFull={composerTop + 16} sigma={chatBlur.edgeSigma} fade uniformSigma={replyMenu ? chatBlur.menuSigma : 0}>
     <FlatList key={viewKey} ref={scroll} data={visibleBlocks} keyExtractor={block => block.id} style={styles.flex}
       contentContainerStyle={[styles.messages, taskView && styles.taskMessages,
-        {paddingTop: headerBottom + (error ? 56 : 0), paddingBottom: hostHeight - composerTop + chatMetrics.itemGap}]}
+        {paddingTop: listTopPadding, paddingBottom: hostHeight - composerTop + chatMetrics.itemGap}]}
       initialNumToRender={12} maxToRenderPerBatch={8} windowSize={7} removeClippedSubviews={false}
       onScroll={onScroll} scrollEventThrottle={32}
-      onScrollBeginDrag={() => {scrollingByUser.current = true; reading.current = true;}}
+      onScrollBeginDrag={() => {scrollingByUser.current = true; pinSettleUntil.current = 0;}}
       onScrollEndDrag={event => {onScroll(event); scrollingByUser.current = false;}}
       onMomentumScrollBegin={() => {scrollingByUser.current = true;}}
       onMomentumScrollEnd={event => {onScroll(event); scrollingByUser.current = false;}}
       extraData={demandBand} onViewableItemsChanged={viewability.onViewableItemsChanged}
       viewabilityConfig={viewability.viewabilityConfig}
-      keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" onContentSizeChange={() => {
-        if (restoreY.current !== null && blocks.length) { scroll.current?.scrollToOffset({offset: restoreY.current, animated: false}); restoreY.current = null; }
-        else if (!reading.current) scroll.current?.scrollToEnd({animated: false});
+      keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" onContentSizeChange={(_w, height) => {
+        scrollMetrics.current.contentHeight = height;
+        if (restoreY.current !== null && blocks.length) { scroll.current?.scrollToOffset({offset: restoreY.current, animated: false}); restoreY.current = null; return; }
+        const {viewportHeight, offsetY} = scrollMetrics.current;
+        const dist = viewportHeight > 0 ? distanceFromBottom(height, viewportHeight, offsetY) : undefined;
+        dispatchScroll({type: 'contentResized', withinPinSettle: Date.now() <= pinSettleUntil.current, distance: dist});
       }}
       ListEmptyComponent={taskFailure || newConversation ? undefined : props.loading ? <View style={styles.empty}><ActivityIndicator color={colors.secondary}/><Label role="meta" style={styles.secondary}>{t('loading')}</Label></View> : <View style={styles.empty}>
         <Icon name="tako" size={40}/><Label role="context" style={styles.center}>{t('historyUnknown')}</Label>
@@ -592,16 +664,39 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       {!props.session?.historyComplete && blocks.length > 0 && <Label role="caption" style={[styles.secondary, styles.historyHint]}>{t('historyIncomplete')}</Label>}
       {taskView && blocks.length > 0 && <Label role="caption" style={styles.historyHint}>{t('taskViewHint')}</Label>}
       </View>}
-      renderItem={({item: block, index}) => taskView ? <View style={[styles.treeNode, block.role === 'user' && styles.treeRoot]}>
-        {block.role === 'user' ? <Label selectable>{block.text || t('image')}</Label> : <>
-          {block.activity.map(item => <ActivityRow key={item.id} item={item} language={language}/>)}
-          {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={props.renderMarkdown} fallbackProvider={provider}/>}
-          {hasBody(block) && <View style={styles.treeAnswer}><MessageBody block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} demand={rowDemand(demandBand, index)}/></View>}
-          {!hasBody(block) && !block.activity.length && !block.subagents?.length && <Label role="meta" style={styles.secondary}>{t(statusKey[block.status])}</Label>}
-        </>}
-      </View> : <Message block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} provider={provider}
-        demand={rowDemand(demandBand, index)} onLongPressReply={openReplyMenu}/>}
-      ListFooterComponent={<View style={styles.stack}>
+      renderItem={({item: block, index}) => {
+        if (taskView) {
+          return <View style={[styles.treeNode, block.role === 'user' && styles.treeRoot]}>
+            {block.role === 'user' ? <Label selectable>{block.text || t('image')}</Label> : <>
+              {block.activity.map(item => <ActivityRow key={item.id} item={item} language={language}/>)}
+              {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={props.renderMarkdown} fallbackProvider={provider}/>}
+              {hasBody(block) && <View style={styles.treeAnswer}><MessageBody block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} demand={rowDemand(demandBand, index)}/></View>}
+              {!hasBody(block) && !block.activity.length && !block.subagents?.length && <Label role="meta" style={styles.secondary}>{t(statusKey[block.status])}</Label>}
+            </>}
+          </View>;
+        }
+        const messageNode = <Message block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} provider={provider}
+          demand={rowDemand(demandBand, index)} onLongPressReply={openReplyMenu}/>;
+        if (pinnedTurn && (block.id === pinnedTurn.userId || block.id === pinnedTurn.assistantId)) {
+          const roleKey = block.id === pinnedTurn.userId ? 'user' : 'assistant';
+          return <View onLayout={event => {
+            const h = Math.round(event.nativeEvent.layout.height);
+            setTurnHeights(previous => {
+              const base = previous.key === viewKey ? previous : {key: viewKey, user: 0, assistant: 0, footer: 0};
+              return base[roleKey] === h ? previous : {...base, [roleKey]: h};
+            });
+          }}>{messageNode}</View>;
+        }
+        return messageNode;
+      }}
+      ListFooterComponent={<View>
+      <View style={styles.stack} onLayout={event => {
+        const h = Math.round(event.nativeEvent.layout.height);
+        setTurnHeights(previous => {
+          const base = previous.key === viewKey ? previous : {key: viewKey, user: 0, assistant: 0, footer: 0};
+          return base.footer === h ? previous : {...base, footer: h};
+        });
+      }}>
       {!!props.workspaceError && <Label role="meta" style={styles.secondary}>{props.workspaceError}</Label>}
       {workspaces.map(workspace => <WorkspaceCard key={`${workspace.screenKey}/${workspace.generation}`} workspace={workspace} language={language} onPress={() => props.onOpenWorkspace(workspace)}/>)}
       {props.session?.questions.map(question => <PendingCard key={question.key} question={question} language={language} busy={props.busy} onAnswer={props.onAnswer} onOpenRequest={() => openRequests(question.key)}/>)}
@@ -614,6 +709,8 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
           onPress={() => props.onRestoreSavedDraft(entry.id)}><Label role="meta">{language === 'zh' ? '恢复已保存草稿' : 'Restore saved draft'}</Label></Pressable>
       </View>)}
       {pendingSubmission && !props.busy && <PendingSubmissionCard key={`${pendingSubmission.threadId}/${pendingSubmission.requestId}`} text={pendingSubmission.text} language={language} onRetry={props.onRetrySubmission} onContinue={props.onContinueWithoutResending}/>}
+      </View>
+      {pinnedSpacer > 0 && <View testID="pinned-turn-spacer" style={{height: pinnedSpacer}}/>}
       </View>}/>
     </EdgeBlur>
     {/* The page is opaque now, so the title row brings its own paper: the dotted canvas, then a short fade. */}
@@ -666,6 +763,14 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
         </View>
       </View>
     </View> : <>
+    {!taskView && scrollState.showToBottom && visibleBlocks.length > 0 && (
+      <Pressable testID="scroll-to-bottom" accessibilityRole="button"
+        accessibilityLabel={language === 'zh' ? '回到底部' : 'Scroll to bottom'}
+        onPress={scrollToLatest}
+        style={({pressed}) => [styles.scrollToBottom, {bottom: composerBottom + composerBox + 12}, pressed && styles.pressed]}>
+        <Icon name="chevron_down" size={18} color={chatColors.icon}/>
+      </Pressable>
+    )}
     <View style={[styles.composerStack, {bottom: composerBottom}]}
       onLayout={event => setComposerBox(Math.round(event.nativeEvent.layout.height))}>
     {!dictating && props.attachments.length > 0 && <ScrollView horizontal style={styles.attachmentStrip} keyboardShouldPersistTaps="handled">
@@ -808,6 +913,9 @@ const styles = themedStyles(() => StyleSheet.create({
   // Figma 2-1 field: Surface/900 pill, 12 dp padding, 48 dp ambient shadow, 16 dp from the sides.
   hidden: {opacity: 0},
   composerStack: {position: 'absolute', left: chatMetrics.side, right: chatMetrics.side, gap: 8},
+  scrollToBottom: {position: 'absolute', alignSelf: 'center', width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: chatColors.composer,
+    borderWidth: 1, borderColor: chatColors.hairline, boxShadow: `0px 3px 12px 0px ${chatColors.shadow}`},
   attachmentStrip: {flexGrow: 0},
   attachmentChip: {flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingHorizontal: 12, marginRight: 8, borderRadius: 16, backgroundColor: chatColors.surfaceRaised},
   attachmentLabel: {maxWidth: 180},
