@@ -359,13 +359,23 @@ final class FakeAcpAgent implements AcpProcessTransport {
                     .put("title", "Run invoke_subagent").put("kind", "other").put("status", "completed").put("rawInput", args));
         }
 
+        /** The child's own transcript (agy: brain/<child>/.system_generated/logs/transcript.jsonl). */
+        void childStep(String child, JSONObject step) throws IOException {
+            if (scenario == Scenario.SUBAGENTS_NO_STORE) return;
+            java.io.File log = new java.io.File(storeRoot().getParentFile().getParentFile(), child + "/.system_generated/logs/transcript.jsonl");
+            log.getParentFile().mkdirs();
+            java.nio.file.Files.writeString(log.toPath(), step.toString() + "\n",
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        }
+
         /** A child's report lands in the store; delivered=true when the parent consumed it. */
         void report(String child, boolean delivered) throws Exception {
             if (scenario == Scenario.SUBAGENTS_NO_STORE) return;
             String id = "m-" + child;
             reports.add(id);
             write(new java.io.File(storeRoot(), "messages/" + id + ".json"), new JSONObject().put("id", id)
-                    .put("sender", child).put("recipient", currentSession).put("content", "result of " + child));
+                    .put("sender", child).put("recipient", currentSession).put("timestamp", java.time.Instant.now().toString())
+                    .put("content", "## Result\n- **" + child + "** done, see /data/local/agentos/acp/home/.gemini/taku-acp/brain/x/out.txt\n\nresult of " + child));
             readFlags.put(id, delivered);
             writeRead();
         }
@@ -389,6 +399,8 @@ final class FakeAcpAgent implements AcpProcessTransport {
         boolean subagentPrompt() throws Exception {
             spawn("call-a", "child-a", "Version Checker");
             spawn("call-b", "child-b", "Battery Checker");
+            childStep("child-a", new JSONObject().put("source", "MODEL").put("type", "PLANNER_RESPONSE").put("model", "gemini-4-neon-high")
+                    .put("tool_calls", new org.json.JSONArray().put(new JSONObject().put("name", "mcp_taku_phone_device_info").put("args", new JSONObject()))));
             if (scenario == Scenario.SUBAGENTS_INLINE) {
                 report("child-a", true);
                 report("child-b", true);

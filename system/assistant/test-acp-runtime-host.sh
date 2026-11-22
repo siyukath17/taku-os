@@ -20,6 +20,7 @@ task_sources=(
  system/assistant/broker/org/agentos/lab/AcpRuntime.java
  system/assistant/broker/org/agentos/lab/AcpToolLabels.java
  system/assistant/broker/org/agentos/lab/AcpSubagents.java
+ system/assistant/broker/org/agentos/lab/AcpSubagentCards.java
  system/assistant/broker/org/agentos/lab/PhoneMcpBridge.java
  system/assistant/broker/org/agentos/lab/PhoneDeviceInfo.java
  system/assistant/broker/org/agentos/lab/AcpRuntimeSettings.java

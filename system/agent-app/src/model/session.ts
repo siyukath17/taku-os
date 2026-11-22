@@ -1,6 +1,7 @@
 /** Read-only presentation of native records. The native thread remains authoritative. */
 import {isStateCardItem, parseUiRequest, type CardPresentation, type MainReply, type UiRequest} from './genui.ts';
 import {parseMainReply} from './genuiCompose.ts';
+import {subagentTask, type SubagentTask} from './subagents.ts';
 
 export type Json = Record<string, unknown>;
 export type ItemStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'waiting' | 'unknown';
@@ -28,6 +29,8 @@ export interface MessageBlock {
   parts: MessagePart[];
   attachments: string[];
   activity: Activity[];
+  /** Subagents this reply dispatched, one task card each (absent when none). */
+  subagents?: SubagentTask[];
   status: ItemStatus;
   active: boolean;
   /** Taku's emoji reaction on a user message (Jev's choice, Figma 297:433); absent when none. */
@@ -194,9 +197,11 @@ export function projectSession(value: unknown): SessionView {
       if (!segment.length && !finalState) return;
       // A card is part of the answer, so text before it is not demoted to commentary.
       const lastTool = segment.reduce((last, item, i) => toolTypes.has(string(item.type)) && !isStateCardItem(item) ? i : last, -1);
-      const parts: MessagePart[] = [], activities: Activity[] = [];
+      const parts: MessagePart[] = [], activities: Activity[] = [], subagents: SubagentTask[] = [];
       segment.forEach((item, i) => {
         const type = string(item.type);
+        const subagent = subagentTask(item, turnId, i, status);
+        if (subagent) { subagents.push(subagent); return; }
         const commentary = type === 'agentMessage' && (item.phase === 'commentary' || (!label(item.phase) && i < lastTool));
         const replyId = string(item.replyId) || Object.keys(replies).find(key => list(record(record(replies[key]).provenance).sourceItemIds).includes(item.id));
         if (replyId) {
@@ -230,8 +235,9 @@ export function projectSession(value: unknown): SessionView {
         }
       });
       const primary = parts.find(part => part.card?.kind === 'primary')?.card;
-      if (parts.length || activities.length || finalState) blocks.push({id: primary?.kind === 'primary' ? `${turnId}/reply-anchor/${primary.reply.provenance.anchorOrdinal}` : `${turnId}/after/${anchor}`,
-        turnId, role: 'assistant', text: parts.map(part => part.text).filter(Boolean).join('\n\n'), parts, attachments: [], activity: activities, status, active: tail && active});
+      if (parts.length || activities.length || subagents.length || finalState) blocks.push({id: primary?.kind === 'primary' ? `${turnId}/reply-anchor/${primary.reply.provenance.anchorOrdinal}` : `${turnId}/after/${anchor}`,
+        turnId, role: 'assistant', text: parts.map(part => part.text).filter(Boolean).join('\n\n'), parts, attachments: [], activity: activities,
+        ...(subagents.length ? {subagents} : {}), status, active: tail && active});
       segment = [];
     };
     list(turn.items).forEach((rawItem, itemIndex) => {

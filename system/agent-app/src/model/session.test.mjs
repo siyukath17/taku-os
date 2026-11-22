@@ -39,8 +39,10 @@ test('on-device ACP agent tools show translated labels, never raw agent names', 
     {id: 'a', type: 'agentMessage', phase: 'final_answer', text: 'Done.'},
   ]}]}, native: {}, historyComplete: true});
   const activity = result.blocks[1].activity;
-  assert.deepEqual(activity.map(a => a.titleKey), ['deviceInfo', 'requestApps', 'invokeSubagent', 'phoneTool', 'tool', 'tool', 'screenshot']);
-  assert.deepEqual(activity.map(a => a.name), ['', '', '', '', '', 'Open Settings', '']);
+  // invoke_subagent is a subagent task card (see subagents.test.mjs), not an activity row.
+  assert.deepEqual(activity.map(a => a.titleKey), ['deviceInfo', 'requestApps', 'phoneTool', 'tool', 'tool', 'screenshot']);
+  assert.deepEqual(activity.map(a => a.name), ['', '', '', '', 'Open Settings', '']);
+  assert.deepEqual(result.blocks[1].subagents.map(task => task.id), ['turn-1/t3']);
 });
 
 test('private reasoning and credential records are never conversation text', () => {

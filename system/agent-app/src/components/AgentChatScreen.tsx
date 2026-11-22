@@ -18,6 +18,7 @@ import {Icon, IconButton} from './Icon';
 import {chatPresentation, type ChatMessageBlock} from '../model/chatPresentation';
 import {FIRST_RESPONSE_TIMEOUT_MS, type OptimisticSubmission} from '../model/optimisticChat';
 import {ReplyLoading} from './ReplyLoading';
+import {SubagentGroup} from './SubagentCards';
 import {onImeInsets, setWindowBackdrop, showKeyboard} from '../native/agent';
 import {ReplyMenu, type ReplyMenuTarget} from './ReplyMenu';
 import {cardPanelActions, openPinnedCard, pinCardToPanels, unpinCard} from '../hooks/useGenUi';
@@ -185,7 +186,7 @@ function Message({block, language, renderMarkdown, renderCard, expanded, demand,
   // A restored turn/started snapshot can precede both its user item and task metadata.
   // Bound even that native-only placeholder; never fabricate a request to track it.
   const untrackedPending = block.role === 'assistant' && block.responsePending === undefined
-    && block.active && !['failed', 'stopped'].includes(block.status) && !hasBody(block) && !block.activity.length;
+    && block.active && !['failed', 'stopped'].includes(block.status) && !hasBody(block) && !block.activity.length && !block.subagents?.length;
   // The timeout belongs to the block it was started for; a different block starts unexpired.
   const [timedOutBlock, setTimedOutBlock] = useState<string | null>(null);
   const untrackedTimeout = timedOutBlock === block.id;
@@ -230,6 +231,7 @@ function Message({block, language, renderMarkdown, renderCard, expanded, demand,
       {pending && !hasBody(block) && <View style={{height: 26 * fontScale}}><ReplyLoading label={t('working')}/></View>}
       {!!responseError && <Label accessibilityLiveRegion="polite" role="meta" style={{color: colors.error}}>{responseError}</Label>}
     </Pressable>}
+    {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={renderMarkdown}/>}
     {block.activity.length > 0 && <View style={styles.activityGroup}>
       <View style={styles.replyActions}>
         {block.activity.length > 0 && <Pressable testID={`activity-${block.id}`} style={[styles.activityToggle, expanded && styles.activityToggleExpanded]} accessibilityRole="button" accessibilityState={{expanded}}
@@ -584,8 +586,9 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       renderItem={({item: block, index}) => taskView ? <View style={[styles.treeNode, block.role === 'user' && styles.treeRoot]}>
         {block.role === 'user' ? <Label selectable>{block.text || t('image')}</Label> : <>
           {block.activity.map(item => <ActivityRow key={item.id} item={item} language={language}/>)}
+          {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={props.renderMarkdown}/>}
           {hasBody(block) && <View style={styles.treeAnswer}><MessageBody block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} demand={rowDemand(demandBand, index)}/></View>}
-          {!hasBody(block) && !block.activity.length && <Label role="meta" style={styles.secondary}>{t(statusKey[block.status])}</Label>}
+          {!hasBody(block) && !block.activity.length && !block.subagents?.length && <Label role="meta" style={styles.secondary}>{t(statusKey[block.status])}</Label>}
         </>}
       </View> : <Message block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} expanded={expandedActivities.has(`${sessionId}/${block.id}`)}
         demand={rowDemand(demandBand, index)}

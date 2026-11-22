@@ -94,6 +94,114 @@ final class AcpSubagents {
         return status;
     }
 
+    /** What one child started in this turn looks like, for its chat card (see {@link AcpSubagentCards}). */
+    static final class Child {
+        String id = "", role = "", typeName = "";
+        /** When the child's record appeared (its file's mtime), 0 if unknown. */
+        long createdMillis;
+        /** The model the child ran on (agy's id, e.g. {@code gemini-4-neon-high}), empty if not yet known. */
+        String model = "";
+        /** agy's name of the child's latest tool call, empty if none; {@code stage} says what it is doing. */
+        String lastTool = "";
+        /** {@code starting} (no step yet), {@code thinking}, {@code tool}, {@code reporting}, {@code done}. */
+        String stage = "starting";
+        boolean reported;
+        long reportedMillis;
+        /** The child's report to the parent (raw; the card sanitizes and clips it). */
+        String report = "";
+    }
+
+    /** Children started in this turn, oldest first, with their latest step and report. Never null. */
+    java.util.List<Child> details() {
+        java.util.List<Child> out = new java.util.ArrayList<>();
+        Map<String, JSONObject> messages = messages();
+        for (Map.Entry<String, JSONObject> entry : children().entrySet()) {
+            if (baselineChildren.contains(entry.getKey())) continue;
+            Child child = new Child();
+            child.id = entry.getKey();
+            JSONObject descriptor = entry.getValue().optJSONObject("subagentDescriptor");
+            if (descriptor != null) {
+                child.role = descriptor.optString("role", "");
+                child.typeName = descriptor.optString("typeName", "");
+            }
+            child.createdMillis = entry.getValue().optLong(MODIFIED, 0);
+            for (JSONObject message : messages.values()) {
+                if (!child.id.equals(message.optString("sender")) || baselineMessages.contains(message.optString("id"))) continue;
+                long at = timestamp(message.optString("timestamp", ""), message.optLong(MODIFIED, 0));
+                if (!child.reported || at >= child.reportedMillis) {
+                    child.reported = true;
+                    child.reportedMillis = at;
+                    child.report = message.optString("content", "");
+                }
+            }
+            transcript(child);
+            if (child.reported) child.stage = "done";
+            out.add(child);
+        }
+        out.sort((a, b) -> Long.compare(a.createdMillis, b.createdMillis));
+        return out;
+    }
+
+    private static long timestamp(String iso, long fallback) {
+        try {
+            return iso.isEmpty() ? fallback : java.time.Instant.parse(iso).toEpochMilli();
+        } catch (Exception unparsable) {
+            return fallback;
+        }
+    }
+
+    /**
+     * The child's model and latest step from its own transcript,
+     * {@code brain/<child>/.system_generated/logs/transcript.jsonl} (one JSON step per line; a model
+     * step carries {@code model} and {@code tool_calls:[{name,args}]}). Only the tail is read.
+     */
+    private void transcript(Child child) {
+        File brain = root.getParentFile() == null ? null : root.getParentFile().getParentFile();
+        if (brain == null) return;
+        File log = new File(new File(new File(new File(brain, child.id), ".system_generated"), "logs"), "transcript.jsonl");
+        String tail = tail(log, 96 * 1024);
+        if (tail.isEmpty()) return;
+        String[] lines = tail.split("\n");
+        boolean stepSeen = false;
+        for (int i = lines.length - 1; i >= 0; i--) {
+            JSONObject step;
+            try {
+                step = new JSONObject(lines[i]);
+            } catch (Exception partial) {
+                continue; // The first line of a tail, or a line agy is still writing.
+            }
+            if (child.model.isEmpty() && !step.optString("model", "").isEmpty()) child.model = step.optString("model");
+            if (!stepSeen && "MODEL".equals(step.optString("source"))) {
+                stepSeen = true;
+                org.json.JSONArray calls = step.optJSONArray("tool_calls");
+                JSONObject last = calls == null || calls.length() == 0 ? null : calls.optJSONObject(calls.length() - 1);
+                if (last != null && !last.optString("name", "").isEmpty()) {
+                    child.lastTool = last.optString("name");
+                    child.stage = "send_message".equals(child.lastTool) ? "reporting" : "tool";
+                } else if ("PLANNER_RESPONSE".equals(step.optString("type"))) {
+                    child.stage = "thinking";
+                } else {
+                    child.stage = "thinking"; // A tool's output: the model reads it next.
+                }
+            }
+            if (stepSeen && !child.model.isEmpty()) break;
+        }
+    }
+
+    private static String tail(File file, int max) {
+        if (!file.isFile()) return "";
+        try (java.io.RandomAccessFile in = new java.io.RandomAccessFile(file, "r")) {
+            long length = in.length();
+            long start = Math.max(0, length - max);
+            byte[] bytes = new byte[(int) (length - start)];
+            in.seek(start);
+            in.readFully(bytes);
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (Exception unreadable) {
+            return "";
+        }
+    }
+
     private Map<String, JSONObject> children() {
         Map<String, JSONObject> out = new LinkedHashMap<>();
         File[] files = new File(root, "subagents").listFiles((dir, name) -> name.endsWith(".json"));
@@ -102,7 +210,9 @@ final class AcpSubagents {
         for (File file : files) {
             JSONObject child = json(file);
             String id = child == null ? "" : child.optString("conversationId", "");
-            if (!id.isEmpty()) out.put(id, child);
+            if (id.isEmpty()) continue;
+            try { child.put(MODIFIED, file.lastModified()); } catch (Exception impossible) { /* org.json on Android declares it */ }
+            out.put(id, child);
         }
         return out;
     }

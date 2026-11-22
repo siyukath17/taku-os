@@ -238,6 +238,32 @@ parent woke and summarized unprompted.
   ends the task as a timeout. Either way the process is destroyed (stdin closed, then killed after
   the grace period), so no agy process outlives the task.
 
+### Subagent task cards
+
+Each `invoke_subagent` chat item (`mcpToolCall`, `toolName: "invoke_subagent"`) carries an additive
+`subagent` object (`AcpSubagentCards`) that the chat page draws as a task card instead of an
+activity row:
+
+| field | meaning |
+| --- | --- |
+| `id` | `subagent-<n>`, the dispatch ordinal in the turn (never agy's conversation id) |
+| `title` / `role` | the `Role` the parent gave (`Device Status Inspector`) |
+| `type`, `source` | agy's `TypeName` (`self`, `research`, …); `local` for an on-device child |
+| `status` | `running` → `completed` (reported) / `failed` (dispatch failed) / `interrupted` (turn ended first) |
+| `startedAt`, `completedAt`, `elapsedMs` | epoch ms; `completedAt`/`elapsedMs` are 0 while running (the page ticks from `startedAt`) |
+| `model` | display name from the child's transcript (`gemini-4-neon-high` → `Gemini 4 Neon`), else the `Model` argument or the session model |
+| `goal` | the dispatched `Prompt` |
+| `activity` | while running: the child's latest step in the broker locale (`读取设备信息`, `思考中`, `回报结果`) |
+| `summary`, `report` | the report's first plain line, and the report (Markdown, ≤4000 chars) |
+
+Sources are read-only: the `invoke_subagent` arguments, `subagents/<child>.json` (role, type),
+`messages/<id>.json` (report, `timestamp`) and the tail of the child's own
+`brain/<child>/.system_generated/logs/transcript.jsonl` (`model`, latest `tool_calls`). Cards bind
+to children by role, then by dispatch order. They refresh at most every `subagentPollMillis`, and the
+turn is rewritten only when a card changed. Every text is redacted and sanitized as below. Records
+without `subagent` (older turns, Codex) still get a card on the page from the call's `Role` and the
+turn status.
+
 ## Tool labels and internal paths
 
 `AcpToolLabels` turns agy's tool calls into display labels: chat items keep `tool` as a canonical

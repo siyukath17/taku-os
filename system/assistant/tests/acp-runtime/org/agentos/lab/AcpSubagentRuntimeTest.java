@@ -123,6 +123,39 @@ public final class AcpSubagentRuntimeTest {
                     && "invoke_subagent".equals(tool.getString("toolName")) && "completed".equals(tool.getString("status")),
                     "async: invoke_subagent shows as 派发子任务, internal name kept: " + tool);
 
+            // Each invoke_subagent item carries a structured task card.
+            JSONObject cardA = tool.getJSONObject("subagent");
+            JSONObject cardB = AcpChatRuntimeTest.item(turn, "mcpToolCall", 1).getJSONObject("subagent");
+            check("subagent-1".equals(cardA.getString("id")) && "subagent-2".equals(cardB.getString("id")),
+                    "cards: ordinal ids, never agy's conversation ids " + cardA + cardB);
+            check("Version Checker".equals(cardA.getString("title")) && "Battery Checker".equals(cardB.getString("title"))
+                    && "self".equals(cardA.getString("type")) && "local".equals(cardA.getString("source")),
+                    "cards: title from the Role, type and source " + cardA);
+            check("completed".equals(cardA.getString("status")) && "completed".equals(cardB.getString("status")),
+                    "cards: both completed once reported " + cardA + cardB);
+            check(cardA.getLong("startedAt") > 0 && cardA.getLong("completedAt") >= cardA.getLong("startedAt")
+                    && cardA.getLong("elapsedMs") == cardA.getLong("completedAt") - cardA.getLong("startedAt")
+                    && cardB.getLong("completedAt") >= cardA.getLong("completedAt"), "cards: start, end and elapsed " + cardA + cardB);
+            check("Gemini 4 Neon".equals(cardA.getString("model")), "cards: the child's model from its transcript " + cardA);
+            check("do Version Checker".equals(cardA.getString("goal")), "cards: the goal is the dispatched prompt " + cardA);
+            check("child-a done, see out.txt".equals(cardA.getString("summary")),
+                    "cards: summary is the report's first line of substance, plain and without internal paths " + cardA);
+            check(cardA.getString("report").contains("result of child-a") && !cardA.getString("report").contains(".gemini")
+                    && !cardA.toString().contains("/data/local/agentos"), "cards: report sanitized " + cardA);
+            check(cardA.getString("activity").isEmpty(), "cards: no current activity once finished " + cardA);
+            boolean runningCard = false, runningStage = false;
+            for (JSONObject view : host.published) {
+                JSONObject t = AcpChatRuntimeTest.lastTurn(view);
+                if (!"inProgress".equals(t.getString("status"))) continue;
+                for (int i = 0; i < t.getJSONArray("items").length(); i++) {
+                    JSONObject card = t.getJSONArray("items").getJSONObject(i).optJSONObject("subagent");
+                    if (card == null || !"running".equals(card.getString("status"))) continue;
+                    runningCard = true;
+                    if ("Version Checker".equals(card.getString("title")) && "读取设备信息".equals(card.getString("activity"))) runningStage = true;
+                }
+            }
+            check(runningCard && runningStage, "cards: while running, the card streams with the child's current step");
+
             JSONObject finalProgress = json(dir, "progress.json");
             check(finalProgress.getInt("subagents") == 2 && finalProgress.getInt("subagentsDone") == 2,
                     "async: progress.json counts the subagents " + finalProgress);
@@ -196,6 +229,9 @@ public final class AcpSubagentRuntimeTest {
         check(agent.methods("session/cancel").size() == 1, "cancel: session/cancel is sent to the agent");
         check(agent.processes.get(0).destroyed, "cancel: the agent process is reclaimed");
         check("interrupted".equals(AcpChatRuntimeTest.lastTurn(host.view()).getString("status")), "cancel: chat turn interrupted");
+        JSONObject card = AcpChatRuntimeTest.item(AcpChatRuntimeTest.lastTurn(host.view()), "mcpToolCall", 0).getJSONObject("subagent");
+        check("interrupted".equals(card.getString("status")) && card.getLong("completedAt") > 0 && card.getString("activity").isEmpty(),
+                "cancel: a child that never reported ends interrupted " + card);
     }
 
     static void budgetEndsTheWait() throws Exception {
@@ -277,7 +313,51 @@ public final class AcpSubagentRuntimeTest {
         check(new JSONObject(args).getString("Path").equals("instructions.md"), "sanitize: JSON arguments stay valid JSON " + args);
     }
 
+    static void subagentCards() throws Exception {
+        check("Gemini 4 Neon".equals(AcpSubagentCards.model("gemini-4-neon-high")), "model: effort dropped, words capitalized");
+        check("Claude Opus 5.5".equals(AcpSubagentCards.model("claude-opus-5-5")), "model: version digits joined");
+        check("Gemini 4 Neon".equals(AcpSubagentCards.model("Gemini 4 Neon")) && "".equals(AcpSubagentCards.model("")), "model: names kept, empty stays empty");
+        check("Android 17, battery 74%".equals(AcpSubagentCards.summary("### 1. Device\n\n- **Android 17**, battery `74%`\n- more")),
+                "summary: the line after a heading, Markdown removed");
+        check("Device".equals(AcpSubagentCards.summary("# Device\n## Details")), "summary: only headings → the first heading");
+        check("Battery 74%, Android 17".equals(AcpSubagentCards.summary("Device and battery check results:\n\n- **Battery** 74%, Android 17")),
+                "summary: a lead-in ending in a colon is skipped like a heading");
+        check("电量 74%".equals(AcpSubagentCards.summary("查询结果如下：\n电量 74%")), "summary: a full-width colon lead-in too");
+        check("Taku Agent org.agentos.agent".equals(AcpSubagentCards.summary("| --- | --- |\n| Taku Agent | `org.agentos.agent` |")),
+                "summary: table rules skipped, a row reads as words");
+        check("".equals(AcpSubagentCards.summary(null)) && "".equals(AcpSubagentCards.summary("  ")), "summary: empty");
+        JSONObject card = AcpSubagentCards.fromArguments(null, new JSONObject().put("Role", "Taku App Scanner")
+                .put("Prompt", "List apps; notes in /data/local/agentos/acp/home/.gemini/taku-acp/brain/s/notes.md token=abcd1234")
+                .put("TypeName", "research").put("Model", "inherit"), 3, 1000);
+        check("subagent-3".equals(card.getString("id")) && "Taku App Scanner".equals(card.getString("title")) && "research".equals(card.getString("type"))
+                && "running".equals(card.getString("status")) && card.getLong("startedAt") == 1000 && card.getString("model").isEmpty(),
+                "card: from arguments; an inherited model is left for the child's transcript " + card);
+        check(card.getString("goal").contains("notes.md") && !card.getString("goal").contains("/data/local") && !card.getString("goal").contains("abcd1234"),
+                "card: the goal is sanitized and redacted " + card);
+        AcpSubagents.Child child = new AcpSubagents.Child();
+        child.stage = "tool";
+        child.lastTool = "run_command";
+        child.model = "gemini-4-neon-high";
+        check(AcpSubagentCards.merge(card, child, "", Locale.US) && "Run command".equals(card.getString("activity"))
+                && "Gemini 4 Neon".equals(card.getString("model")), "card: running stage and model merged " + card);
+        check(!AcpSubagentCards.merge(card, child, "", Locale.US), "card: no change, no rewrite");
+        child.reported = true;
+        child.reportedMillis = 19_000;
+        child.report = "Found **14** apps.";
+        check(AcpSubagentCards.merge(card, child, "", Locale.US) && "completed".equals(card.getString("status"))
+                && card.getLong("elapsedMs") == 18_000 && "Found 14 apps.".equals(card.getString("summary")), "card: report completes it " + card);
+        check(!AcpSubagentCards.end(card, 50_000) && card.getLong("completedAt") == 19_000, "card: the end of the turn keeps a finished card");
+        JSONObject failed = AcpSubagentCards.fromArguments(null, new JSONObject().put("Role", "x"), 1, 10);
+        AcpSubagentCards.toolStatus(failed, "failed", 20);
+        check("failed".equals(failed.getString("status")) && failed.getLong("elapsedMs") == 10, "card: a failed dispatch fails the card");
+        AcpSubagents.Child starting = new AcpSubagents.Child();
+        check("启动中".equals(AcpSubagentCards.stage(starting, Locale.SIMPLIFIED_CHINESE)), "stage: starting");
+        starting.stage = "reporting";
+        check("回报结果".equals(AcpSubagentCards.stage(starting, Locale.SIMPLIFIED_CHINESE)), "stage: reporting");
+    }
+
     public static void main(String[] args) throws Exception {
+        subagentCards();
         toolLabels();
         approvalFlagOnlyForFullMode();
         asyncSubagentsKeepTheAgentAlive();

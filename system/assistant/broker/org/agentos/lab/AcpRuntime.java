@@ -347,6 +347,9 @@ final class AcpRuntime implements TaskRuntime {
         final java.util.Set<String> subagentCalls = new java.util.LinkedHashSet<>();
         AcpSubagents subagents;
         AcpSubagents.Status subagentStatus;
+        /** The session's model (agy's id), the card's model for children that inherit it. */
+        String parentModel = "";
+        long lastCardRefresh;
         boolean followUp;
         /** Last session/update of this session, and last reply text chunk (nanoTime). */
         long lastUpdate, lastChunk, lastChunkWall;
@@ -483,6 +486,7 @@ final class AcpRuntime implements TaskRuntime {
                 String effort = AcpModelCatalog.current(configOptions, AcpModelCatalog.EFFORT);
                 if (!model.isEmpty()) info.put("model", model);
                 if (!effort.isEmpty()) info.put("effort", effort);
+                parentModel = model;
                 if (configRefusals.length() > 0) info.put("configRefusals", configRefusals);
                 String text = request.getString("prompt");
                 if (chat != null) {
@@ -519,6 +523,7 @@ final class AcpRuntime implements TaskRuntime {
                 // The parent's turn ends while its subagents still run; keep the agent alive for their
                 // reports and the parent's own follow-up reply (see AcpSubagents).
                 if ("end_turn".equals(stopReason) && !subagentCalls.isEmpty() && !cancelSent) stopReason = awaitSubagents();
+                refreshSubagentCards(true);
                 completed(stopReason);
             } catch (CancelledEarly cancelled) {
                 finish(directory, request, "cancelled", "Cancelled before execution.", null);
@@ -556,6 +561,7 @@ final class AcpRuntime implements TaskRuntime {
             subagentStatus = subagents.status();
             phase = "subagents";
             progress(subagentSummary(), true);
+            refreshSubagentCards(true);
             for (; ; ) {
                 boolean cancel = new File(directory, "cancel").exists();
                 if (cancel || System.nanoTime() > turnDeadline) {
@@ -581,6 +587,7 @@ final class AcpRuntime implements TaskRuntime {
                 now = System.nanoTime();
                 if (now - lastPoll >= TimeUnit.MILLISECONDS.toNanos(options.subagentPollMillis)) {
                     lastPoll = now;
+                    refreshSubagentCards(false);
                     int before = subagentStatus.reportedCount() * 1000 + subagentStatus.started();
                     subagentStatus = subagents.status();
                     int after = subagentStatus.reportedCount() * 1000 + subagentStatus.started();
@@ -889,6 +896,8 @@ final class AcpRuntime implements TaskRuntime {
             JSONObject update = params.optJSONObject("update");
             if (update == null) return;
             lastUpdate = System.nanoTime();
+            // Children run while the parent is still in its turn: their cards follow from the first update on.
+            refreshSubagentCards(false);
             switch (update.optString("sessionUpdate")) {
                 case "usage_update":
                     // agy ends each model step (and each wake-up of the parent) with one.
@@ -969,6 +978,22 @@ final class AcpRuntime implements TaskRuntime {
             if ("invoke_subagent".equals(call.optString("key")) && "completed".equals(call.optString("status"))) subagentCalls.add(toolId);
         }
 
+        /**
+         * Brings the chat's subagent cards up to date with agy's store (each child's latest step, model
+         * and report). Throttled to the subagent poll interval unless forced; never fails the turn.
+         */
+        void refreshSubagentCards(boolean force) {
+            if (chat == null || subagents == null || !chat.hasSubagents()) return;
+            long now = System.currentTimeMillis();
+            if (!force && now - lastCardRefresh < options.subagentPollMillis) return;
+            lastCardRefresh = now;
+            try {
+                chat.subagents(subagents.details(), parentModel, java.util.Locale.getDefault());
+            } catch (Exception unreadable) {
+                System.err.println("acp subagent cards: " + unreadable);
+            }
+        }
+
         /** Throttled progress for the Dynamic Island: progress.json plus a short state message. */
         void progress(String text, boolean force) throws Exception {
             long now = System.currentTimeMillis();
@@ -1036,6 +1061,8 @@ final class AcpRuntime implements TaskRuntime {
         int messages;
         long lastFlush;
         boolean ended;
+        /** Subagent card item id → agy child id, once bound (see {@link #subagents}). */
+        final Map<String, String> boundChildren = new LinkedHashMap<>();
 
         private Chat(ChatHost host, String conversationId, String turnId, String priorSession, String transcript, long intervalMillis) {
             this.host = host;
@@ -1110,6 +1137,14 @@ final class AcpRuntime implements TaskRuntime {
             if (input instanceof JSONObject) {
                 String raw = AcpToolLabels.sanitize(redact(input.toString()));
                 item.put("arguments", raw.length() <= 4000 ? new JSONObject(raw) : new JSONObject().put("summary", clip(raw, 4000)));
+            }
+            if ("invoke_subagent".equals(item.optString("toolName"))) {
+                // A task card for the child: the page shows it instead of a generic activity row.
+                JSONObject card = item.optJSONObject("subagent");
+                int ordinal = card != null ? 0 : 1 + subagentCards().size();
+                card = AcpSubagentCards.fromArguments(card, input instanceof JSONObject ? (JSONObject) input : null, ordinal, System.currentTimeMillis());
+                if (update.has("status") && !update.isNull("status")) AcpSubagentCards.toolStatus(card, update.optString("status"), System.currentTimeMillis());
+                item.put("subagent", card);
             }
             JSONArray content = update.optJSONArray("content");
             if (content != null) {
@@ -1189,6 +1224,46 @@ final class AcpRuntime implements TaskRuntime {
             }
         }
 
+        boolean hasSubagents() {
+            return !subagentCards().isEmpty();
+        }
+
+        /** Items that carry a subagent card, in dispatch order. */
+        List<JSONObject> subagentCards() {
+            List<JSONObject> out = new java.util.ArrayList<>();
+            for (JSONObject item : items.values()) if (item.optJSONObject("subagent") != null) out.add(item);
+            return out;
+        }
+
+        /**
+         * Binds each card to an agy child (same role first, then dispatch order) and merges the child's
+         * state into it; the turn is rewritten only when a card changed.
+         */
+        void subagents(List<AcpSubagents.Child> children, String parentModel, java.util.Locale locale) throws Exception {
+            List<JSONObject> cards = subagentCards();
+            Map<String, AcpSubagents.Child> byId = new LinkedHashMap<>();
+            for (AcpSubagents.Child child : children) byId.put(child.id, child);
+            java.util.Set<String> taken = new java.util.HashSet<>(boundChildren.values());
+            for (int pass = 0; pass < 2; pass++) for (JSONObject item : cards) {
+                String key = item.getString("id");
+                if (boundChildren.containsKey(key)) continue;
+                String role = item.getJSONObject("subagent").optString("role").trim();
+                for (AcpSubagents.Child child : children) {
+                    if (taken.contains(child.id)) continue;
+                    if (pass == 0 && (role.isEmpty() || !role.equalsIgnoreCase(AcpSubagentCards.clean(child.role, AcpSubagentCards.MAX_TITLE).replace('\n', ' ').trim()))) continue;
+                    boundChildren.put(key, child.id);
+                    taken.add(child.id);
+                    break;
+                }
+            }
+            boolean changed = false;
+            for (JSONObject item : cards) {
+                AcpSubagents.Child child = byId.get(boundChildren.get(item.getString("id")));
+                if (child != null && AcpSubagentCards.merge(item.getJSONObject("subagent"), child, parentModel, locale)) changed = true;
+            }
+            if (changed) flush(true);
+        }
+
         void flush(boolean force) throws Exception {
             long now = System.currentTimeMillis();
             if (!force && now - lastFlush < intervalMillis) return;
@@ -1221,6 +1296,8 @@ final class AcpRuntime implements TaskRuntime {
             if (ended) return;
             ended = true;
             if (messages == 0 && reply != null && !reply.isBlank() && "completed".equals(taskStatus)) message(reply);
+            long now = System.currentTimeMillis();
+            for (JSONObject item : subagentCards()) AcpSubagentCards.end(item.getJSONObject("subagent"), now);
             String status = "completed".equals(taskStatus) ? "completed" : "cancelled".equals(taskStatus) ? "interrupted" : "failed";
             store.updateTurn(conversationId, turnId, snapshot(true), status);
             host.changed(conversationId);
