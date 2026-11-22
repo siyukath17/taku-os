@@ -32,14 +32,19 @@ export interface ChatScrollState {
   showToBottom: boolean;
 }
 
-export type ChatScrollEffect = 'none' | 'toBottomInstant' | 'toBottomAnimated';
+/**
+ * `toPinAnimated` puts the pinned user row at the top of the reading viewport by the row itself (its
+ * measured frame), not by "content end": the end moves a frame before the spacer catches up while the
+ * reply streams, so aiming at it overshoots and the ScrollView clamps back. The row's top does not move.
+ */
+export type ChatScrollEffect = 'none' | 'toBottomInstant' | 'toBottomAnimated' | 'toPinAnimated';
 
 export type ChatScrollEvent =
   | {type: 'reset'; browsing: boolean}
   | {type: 'sent'}
   | {type: 'anchorBound'; userId: string; turnId: string}
   | {type: 'scrolled'; distance: number; byUser: boolean; spacerActive: boolean}
-  | {type: 'contentResized'; withinPinSettle: boolean; distance?: number}
+  | {type: 'contentResized'; withinPinSettle: boolean; distance?: number; spacerActive?: boolean}
   | {type: 'tappedToBottom'};
 
 export function createChatScrollState(browsing = false): ChatScrollState {
@@ -137,13 +142,18 @@ export function reduceChatScroll(
           anchor: {userId: event.userId, turnId: event.turnId},
           showToBottom: false,
         },
-        effect: 'toBottomAnimated',
+        effect: 'toPinAnimated',
       };
 
     case 'scrolled': {
       const dist = Math.max(0, event.distance);
       const showToBottom = dist > SCROLL_LEAVE_DISTANCE;
       if (!event.byUser) {
+        // While the pin spacer is still open, the reply fits on screen: the content end is the pin
+        // position, so a programmatic settle passing through larger distances is not "content below".
+        if (state.mode === 'pinned' && event.spacerActive) {
+          return {state: state.showToBottom ? {...state, showToBottom: false} : state, effect: 'none'};
+        }
         return {
           state: state.showToBottom === showToBottom ? state : {...state, showToBottom},
           effect: 'none',
@@ -176,8 +186,10 @@ export function reduceChatScroll(
         return {state: state.showToBottom ? {...state, showToBottom: false} : state, effect: 'toBottomInstant'};
       }
       if (state.mode === 'pinned') {
-        if (event.withinPinSettle) {
-          return {state, effect: 'toBottomAnimated'};
+        // While the spacer is open the content end IS the pin position (spacer = viewport - turn), so
+        // re-aligning is idempotent and absorbs late layout (IME closing, optimistic->native handoff).
+        if (event.withinPinSettle || event.spacerActive) {
+          return {state: state.showToBottom ? {...state, showToBottom: false} : state, effect: 'toPinAnimated'};
         }
         if (event.distance !== undefined) {
           const showToBottom = Math.max(0, event.distance) > SCROLL_LEAVE_DISTANCE;
@@ -205,4 +217,68 @@ export function reduceChatScroll(
         effect: 'toBottomAnimated',
       };
   }
+}
+
+/**
+ * Who is moving the list. Android's ScrollView reports a programmatic smooth scroll
+ * (`scrollToEnd({animated: true})`) as momentum too (ReactScrollViewHelper.smoothScrollTo ->
+ * startFlingAnimator -> onMomentumScrollBegin), so momentum is the user's only when it is the fling
+ * of a drag that just ended; any programmatic scroll disarms that.
+ */
+export interface ScrollIntent {
+  byUser: boolean;
+  flingArmed: boolean;
+}
+
+export type ScrollIntentEvent = 'dragBegin' | 'dragEnd' | 'momentumBegin' | 'momentumEnd' | 'programmatic';
+
+export function createScrollIntent(): ScrollIntent {
+  return {byUser: false, flingArmed: false};
+}
+
+export function nextScrollIntent(intent: ScrollIntent, event: ScrollIntentEvent): ScrollIntent {
+  switch (event) {
+    case 'dragBegin':
+      return {byUser: true, flingArmed: false};
+    case 'dragEnd':
+      return {byUser: false, flingArmed: true};
+    case 'momentumBegin':
+      return {byUser: intent.flingArmed, flingArmed: false};
+    case 'momentumEnd':
+    case 'programmatic':
+      return {byUser: false, flingArmed: false};
+  }
+}
+
+/** The user rows (ids and turns) already on screen when a message is sent. */
+export interface KnownUsers {
+  ids: ReadonlySet<string>;
+  turnIds: ReadonlySet<string>;
+}
+
+export function knownUsers(blocks: readonly {id: string; role: 'user' | 'assistant'; turnId: string}[]): KnownUsers {
+  const ids = new Set<string>(), turnIds = new Set<string>();
+  for (const block of blocks) {
+    if (block.role !== 'user') continue;
+    ids.add(block.id);
+    if (block.turnId) turnIds.add(block.turnId);
+  }
+  return {ids, turnIds};
+}
+
+/**
+ * The sent message's row: the last user row whose id AND turn were both unknown at send. An earlier
+ * row can change id meanwhile (its optimistic request settles or is pruned: `optimistic/<r>/user` <->
+ * native id), or rows can be appended around it; neither makes it the message just sent.
+ */
+export function findSentUser<T extends {id: string; role: 'user' | 'assistant'; turnId: string}>(
+  blocks: readonly T[],
+  before: KnownUsers,
+): T | null {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i];
+    if (block.role !== 'user') continue;
+    if (!before.ids.has(block.id) && !(block.turnId && before.turnIds.has(block.turnId))) return block;
+  }
+  return null;
 }

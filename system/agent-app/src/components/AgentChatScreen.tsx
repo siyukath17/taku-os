@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode} from 'react';
 import {ActivityIndicator, Alert, AppState, BackHandler, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, ToastAndroid, useWindowDimensions, View} from 'react-native';
 import type {NativeScrollEvent, NativeSyntheticEvent, TextProps} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
@@ -43,7 +43,7 @@ import {TakuHomePage} from '../chat/TakuHomePage';
 import {sheetSpace, type ImeGeometry} from '../model/sheetGeometry';
 import {emptyPreview, PREVIEW_FRESH_MS, PREVIEW_LOAD_TIMEOUT_MS, PREVIEW_REFRESH_MS, previewReducer} from '../model/preview';
 import {rowDemand, sameBand, visibleBand, type CardDemand, type RowBand} from '../chat/cardDemand';
-import {createChatScrollState, distanceFromBottom, findPinnedTurn, PIN_SETTLE_MS, pinnedSpacerHeight, reduceChatScroll, sameChatScrollState, type ChatScrollEffect, type ChatScrollEvent, type ChatScrollState} from '../chat/chatScroll';
+import {createChatScrollState, createScrollIntent, nextScrollIntent, distanceFromBottom, findPinnedTurn, findSentUser, knownUsers, type KnownUsers, PIN_SETTLE_MS, pinnedSpacerHeight, reduceChatScroll, sameChatScrollState, type ChatScrollEffect, type ChatScrollEvent, type ChatScrollState, type ScrollIntentEvent} from '../chat/chatScroll';
 import {ComposerTools} from '../chat/ComposerTools';
 import type {ComposerAttachment, ComposerRecovery} from '../hooks/composerDraft';
 import {attachmentPreviewUri} from '../native/composerPicker';
@@ -392,7 +392,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   const [scrollState, setScrollState] = useState<ChatScrollState>(() => createChatScrollState());
   const scrollStateRef = useRef<ChatScrollState>(scrollState);
   const pinSettleUntil = useRef<number>(0);
-  const preSendRef = useRef<{lastUserId: string | null; count: number}>({lastUserId: null, count: 0});
+  const preSendRef = useRef<KnownUsers>(knownUsers([]));
   const scrollMetrics = useRef({contentHeight: 0, viewportHeight: 0, offsetY: 0});
   const [turnHeights, setTurnHeights] = useState({key: '', user: 0, assistant: 0, footer: 0});
   const [demandBand, setDemandBand] = useState<RowBand | null>(null);
@@ -404,13 +404,33 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       setDemandBand(previous => sameBand(previous, next) ? previous : next);
     },
   }));
-  const scrollingByUser = useRef(false);
+  // Only a finger (a drag, or the fling right after it) moves the list as the user; see nextScrollIntent.
+  const scrollIntent = useRef(createScrollIntent());
+  const markScroll = (event: ScrollIntentEvent) => { scrollIntent.current = nextScrollIntent(scrollIntent.current, event); };
   const positions = useRef<Record<string, {y: number; follow: boolean}>>({});
   const restoreY = useRef<number | null>(null);
-  const applyScrollEffect = useCallback((effect: ChatScrollEffect) => {
-    if (effect === 'toBottomInstant') scroll.current?.scrollToEnd({animated: false});
-    else if (effect === 'toBottomAnimated') scroll.current?.scrollToEnd({animated: true});
+  // Read at effect time (a re-pin can run before the render that binds the anchor commits).
+  const pinGeometry = useRef<{blocks: readonly ChatMessageBlock[]; topPadding: number}>({blocks: [], topPadding: 0});
+  // The native ScrollView's own end, not VirtualizedList.scrollToEnd: that one computes the offset from
+  // JS cell metrics and the list's visible length, which are still empty right after a conversation
+  // opens, so "the end" lands near the top and nothing later corrects it.
+  const scrollToEnd = useCallback((animated: boolean) => {
+    const native = scroll.current?.getNativeScrollRef();
+    if (native) native.scrollToEnd({animated});
+    else scroll.current?.scrollToEnd({animated});
   }, []);
+  const applyScrollEffect = useCallback((effect: ChatScrollEffect) => {
+    if (effect === 'none') return;
+    scrollIntent.current = createScrollIntent();
+    if (effect === 'toPinAnimated') {
+      const turn = findPinnedTurn(pinGeometry.current.blocks, scrollStateRef.current.anchor);
+      if (turn) {
+        scroll.current?.scrollToIndex({index: turn.userIndex, viewPosition: 0, viewOffset: pinGeometry.current.topPadding, animated: true});
+        return;
+      }
+    }
+    scrollToEnd(effect !== 'toBottomInstant');
+  }, [scrollToEnd]);
   const dispatchScroll = useCallback((event: ChatScrollEvent) => {
     const {state: next, effect} = reduceChatScroll(scrollStateRef.current, event);
     scrollStateRef.current = next;
@@ -428,11 +448,12 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
     const position = positions.current[viewKey];
     const browsing = !!(position && !position.follow);
     pinSettleUntil.current = 0;
-    scrollingByUser.current = false;
+    scrollIntent.current = createScrollIntent();
     dispatchScroll({type: 'reset', browsing});
     restoreY.current = browsing && position ? position.y : null;
     if (browsing && position) requestAnimationFrame(() => {
       if (restoreY.current === position.y && scrollStateRef.current.mode === 'browsing') {
+        scrollIntent.current = createScrollIntent();
         scroll.current?.scrollToOffset({offset: position.y, animated: false});
       }
     });
@@ -451,6 +472,8 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   // Issue #32 C2: the greeting is the empty state of a new conversation, not a line above messages.
   const greeting = !taskView && visibleBlocks.length === 0 && !!newConversation;
   const listTopPadding = headerBottom + (error ? 56 : 0);
+  // Layout effects run before the passive effect that binds a sent message and before its rAF re-pin.
+  useLayoutEffect(() => { pinGeometry.current = {blocks: visibleBlocks, topPadding: listTopPadding}; }, [visibleBlocks, listTopPadding]);
   const pinnedTurn = useMemo(() => taskView ? null : findPinnedTurn(visibleBlocks, scrollState.anchor), [taskView, visibleBlocks, scrollState.anchor]);
   const pinnedSpacer = !taskView && pinnedTurn
     ? pinnedSpacerHeight({
@@ -463,38 +486,28 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
     : 0;
   useEffect(() => {
     if (taskView || !scrollState.pendingSend) return;
-    let lastUser: ChatMessageBlock | null = null;
-    for (let i = visibleBlocks.length - 1; i >= 0; i -= 1) {
-      if (visibleBlocks[i].role === 'user') { lastUser = visibleBlocks[i]; break; }
-    }
+    const lastUser = findSentUser(visibleBlocks, preSendRef.current);
     if (!lastUser) return;
-    if (lastUser.id === preSendRef.current.lastUserId && visibleBlocks.length <= preSendRef.current.count) return;
     pinSettleUntil.current = Date.now() + PIN_SETTLE_MS;
     dispatchScroll({type: 'anchorBound', userId: lastUser.id, turnId: lastUser.turnId});
     requestAnimationFrame(() => {
-      if (scrollStateRef.current.mode === 'pinned' && !scrollingByUser.current) {
-        scroll.current?.scrollToEnd({animated: true});
-      }
+      if (scrollStateRef.current.mode === 'pinned' && !scrollIntent.current.byUser) applyScrollEffect('toPinAnimated');
     });
-  }, [taskView, scrollState.pendingSend, visibleBlocks, dispatchScroll]);
+  }, [taskView, scrollState.pendingSend, visibleBlocks, dispatchScroll, applyScrollEffect]);
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const {contentOffset, contentSize, layoutMeasurement} = event.nativeEvent;
     scrollMetrics.current = {contentHeight: contentSize.height, viewportHeight: layoutMeasurement.height, offsetY: contentOffset.y};
     if (restoreY.current !== null) return;
     const dist = distanceFromBottom(contentSize.height, layoutMeasurement.height, contentOffset.y);
-    dispatchScroll({type: 'scrolled', distance: dist, byUser: scrollingByUser.current, spacerActive: pinnedSpacer > 0});
-    if (scrollingByUser.current) {
+    dispatchScroll({type: 'scrolled', distance: dist, byUser: scrollIntent.current.byUser, spacerActive: pinnedSpacer > 0});
+    if (scrollIntent.current.byUser) {
       positions.current[viewKey] = {y: contentOffset.y, follow: scrollStateRef.current.mode === 'following'};
     }
   };
   const sendAndFollow = () => {
     // Dismiss keyboard like Renma and pin the newly sent user message to the top of the viewport.
-    let lastUserId: string | null = null;
-    for (let i = visibleBlocks.length - 1; i >= 0; i -= 1) {
-      if (visibleBlocks[i].role === 'user') { lastUserId = visibleBlocks[i].id; break; }
-    }
-    preSendRef.current = {lastUserId, count: visibleBlocks.length};
-    scrollingByUser.current = false;
+    preSendRef.current = knownUsers(visibleBlocks);
+    scrollIntent.current = createScrollIntent();
     restoreY.current = null;
     positions.current[viewKey] = {y: 0, follow: true};
     pinSettleUntil.current = Date.now() + PIN_SETTLE_MS;
@@ -508,7 +521,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   };
   const scrollToLatest = () => {
     pinSettleUntil.current = 0;
-    scrollingByUser.current = false;
+    scrollIntent.current = createScrollIntent();
     restoreY.current = null;
     positions.current[viewKey] = {y: 0, follow: true};
     dispatchScroll({type: 'tappedToBottom'});
@@ -641,18 +654,30 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
         {paddingTop: listTopPadding, paddingBottom: hostHeight - composerTop + chatMetrics.itemGap}]}
       initialNumToRender={12} maxToRenderPerBatch={8} windowSize={7} removeClippedSubviews={false}
       onScroll={onScroll} scrollEventThrottle={32}
-      onScrollBeginDrag={() => {scrollingByUser.current = true; pinSettleUntil.current = 0;}}
-      onScrollEndDrag={event => {onScroll(event); scrollingByUser.current = false;}}
-      onMomentumScrollBegin={() => {scrollingByUser.current = true;}}
-      onMomentumScrollEnd={event => {onScroll(event); scrollingByUser.current = false;}}
+      // The list's own height (first layout, host or IME resize) re-applies the current mode, as content changes do.
+      onLayout={event => {
+        const height = event.nativeEvent.layout.height;
+        if (Math.abs(height - scrollMetrics.current.viewportHeight) < 1) return;
+        scrollMetrics.current.viewportHeight = height;
+        if (restoreY.current !== null) return;
+        const {contentHeight, offsetY} = scrollMetrics.current;
+        dispatchScroll({type: 'contentResized', withinPinSettle: Date.now() <= pinSettleUntil.current,
+          distance: contentHeight > 0 ? distanceFromBottom(contentHeight, height, offsetY) : undefined, spacerActive: pinnedSpacer > 0});
+      }}
+      // An unmeasured pinned row (rare: it is the newest row) falls back to the content end.
+      onScrollToIndexFailed={() => { scrollIntent.current = createScrollIntent(); scrollToEnd(true); }}
+      onScrollBeginDrag={() => {markScroll('dragBegin'); pinSettleUntil.current = 0;}}
+      onScrollEndDrag={event => {onScroll(event); markScroll('dragEnd');}}
+      onMomentumScrollBegin={() => markScroll('momentumBegin')}
+      onMomentumScrollEnd={event => {onScroll(event); markScroll('momentumEnd');}}
       extraData={demandBand} onViewableItemsChanged={viewability.onViewableItemsChanged}
       viewabilityConfig={viewability.viewabilityConfig}
       keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" onContentSizeChange={(_w, height) => {
         scrollMetrics.current.contentHeight = height;
-        if (restoreY.current !== null && blocks.length) { scroll.current?.scrollToOffset({offset: restoreY.current, animated: false}); restoreY.current = null; return; }
+        if (restoreY.current !== null && blocks.length) { scrollIntent.current = createScrollIntent(); scroll.current?.scrollToOffset({offset: restoreY.current, animated: false}); restoreY.current = null; return; }
         const {viewportHeight, offsetY} = scrollMetrics.current;
         const dist = viewportHeight > 0 ? distanceFromBottom(height, viewportHeight, offsetY) : undefined;
-        dispatchScroll({type: 'contentResized', withinPinSettle: Date.now() <= pinSettleUntil.current, distance: dist});
+        dispatchScroll({type: 'contentResized', withinPinSettle: Date.now() <= pinSettleUntil.current, distance: dist, spacerActive: pinnedSpacer > 0});
       }}
       ListEmptyComponent={taskFailure || newConversation ? undefined : props.loading ? <View style={styles.empty}><ActivityIndicator color={colors.secondary}/><Label role="meta" style={styles.secondary}>{t('loading')}</Label></View> : <View style={styles.empty}>
         <Icon name="tako" size={40}/><Label role="context" style={styles.center}>{t('historyUnknown')}</Label>
