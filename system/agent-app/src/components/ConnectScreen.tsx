@@ -255,7 +255,7 @@ function PhoneOrb({x, y, label, selected, live, type, onPress}: {x: number; y: n
       style={({pressed}) => [styles.orb, selected && styles.orbSelected, pressed && styles.pressed]}>
       <DeviceIcon source={{tier: 'builtin', key: 'phone'}} fallback="phone" size={34} color={colors.white}/>
     </Pressable>
-    <Text numberOfLines={1} style={[type('label', label), styles.orbLabel]}>{label}</Text>
+    <View style={styles.orbLabel} pointerEvents="none"><Text numberOfLines={1} style={[type('label', label), styles.labelPill]}>{label}</Text></View>
   </View>;
 }
 
@@ -269,7 +269,7 @@ function NodeBubble({x, y, node, probe, state, name, selected, type, onPress}: {
       <DeviceIcon source={resolveIcon(node, probe)} fallback={effectiveDeviceType(node, probe)} size={30}/>
       <View style={[styles.statusDot, {backgroundColor: toneColor(stateTone(state))}]}/>
     </Pressable>
-    <Text numberOfLines={1} style={[type('meta', name), styles.bubbleLabel]}>{name}</Text>
+    <View style={styles.bubbleLabel} pointerEvents="none"><Text numberOfLines={1} style={[type('meta', name), styles.labelPill]}>{name}</Text></View>
   </View>;
 }
 
@@ -279,7 +279,7 @@ function AddBubble({x, y, label, type, active, onPress}: {x: number; y: number; 
       style={({pressed}) => [styles.bubble, styles.addBubble, active && styles.addActive, pressed && styles.pressed]}>
       <Text style={styles.plus}>+</Text>
     </Pressable>
-    <Text numberOfLines={1} style={[type('meta', label), styles.bubbleLabel, styles.secondary]}>{label}</Text>
+    <View style={styles.bubbleLabel} pointerEvents="none"><Text numberOfLines={1} style={[type('meta', label), styles.labelPill, styles.secondary]}>{label}</Text></View>
   </View>;
 }
 
@@ -498,11 +498,13 @@ const styles = StyleSheet.create({
   orb: {position: 'absolute', width: ORB, height: ORB, borderRadius: ORB / 2, marginLeft: -ORB / 2, marginTop: -ORB / 2, left: 0, top: 0,
     backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: colors.ink, shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: {width: 0, height: 6}},
   orbSelected: {borderWidth: 3, borderColor: colors.brand},
-  orbLabel: {position: 'absolute', top: ORB / 2 + 8, width: 140, left: -70, textAlign: 'center'},
+  orbLabel: {position: 'absolute', top: ORB / 2 + 8, width: 150, left: -75, alignItems: 'center'},
   bubble: {position: 'absolute', width: BUBBLE, height: BUBBLE, borderRadius: BUBBLE / 2, marginLeft: -BUBBLE / 2, marginTop: -BUBBLE / 2, left: 0, top: 0,
     backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', elevation: 3, shadowColor: colors.ink, shadowOpacity: 0.08, shadowRadius: 8, shadowOffset: {width: 0, height: 3}},
   bubbleSelected: {borderWidth: 2, borderColor: colors.brand},
-  bubbleLabel: {position: 'absolute', top: BUBBLE / 2 + 6, width: 120, left: -60, textAlign: 'center'},
+  bubbleLabel: {position: 'absolute', top: BUBBLE / 2 + 6, width: 150, left: -75, alignItems: 'center'},
+  // A page-coloured pill keeps names legible where a connection line passes behind them.
+  labelPill: {backgroundColor: colors.page, borderRadius: 999, paddingHorizontal: 8, maxWidth: 150, overflow: 'hidden'},
   statusDot: {position: 'absolute', right: 3, top: 3, width: 12, height: 12, borderRadius: 6, borderWidth: 2, borderColor: colors.white},
   addBubble: {backgroundColor: colors.page, borderWidth: 1.5, borderStyle: 'dashed', borderColor: colors.secondary, elevation: 0, shadowOpacity: 0},
   addActive: {borderColor: colors.brand},

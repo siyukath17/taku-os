@@ -229,16 +229,18 @@ export interface OrbitSlot {x: number; y: number; ring: 0 | 1}
 export function orbitLayout(count: number, width: number, height: number): {center: {x: number; y: number}; radii: [number, number]; slots: OrbitSlot[]} {
   const center = {x: width / 2, y: height / 2};
   const span = Math.max(0, Math.min(width, height));
-  const radii: [number, number] = [span * 0.27, span * 0.43];
+  // Inner ring clear of the centre orb and its pulse; outer ring kept inside the canvas width.
+  const outer = Math.max(0, Math.min(span * 0.47, width / 2 - 44));
+  const radii: [number, number] = [Math.min(span * 0.34, outer * 0.78), outer];
   const slots: OrbitSlot[] = [];
   const inner = Math.min(count, 4);
-  const outer = count - inner;
+  const rest = count - inner;
   for (let i = 0; i < inner; i++) {
     const angle = -Math.PI / 2 - Math.PI / 5 + (2 * Math.PI * i) / Math.max(inner, 1);
     slots.push({x: center.x + radii[0] * Math.cos(angle), y: center.y + radii[0] * Math.sin(angle), ring: 0});
   }
-  for (let i = 0; i < outer; i++) {
-    const angle = -Math.PI / 2 + Math.PI / 7 + (2 * Math.PI * i) / Math.max(outer, 1);
+  for (let i = 0; i < rest; i++) {
+    const angle = -Math.PI / 2 + Math.PI / 7 + (2 * Math.PI * i) / Math.max(rest, 1);
     slots.push({x: center.x + radii[1] * Math.cos(angle), y: center.y + radii[1] * Math.sin(angle), ring: 1});
   }
   return {center, radii, slots};

@@ -105,6 +105,11 @@ test('orbit layout staggers two rings around the centre', () => {
     assert.ok(Math.abs(r - radii[slot.ring]) < 1e-6);
   }
   assert.deepEqual(orbitLayout(0, 100, 100).slots, []);
+  // Phone-sized canvas: the inner ring clears the 84dp orb plus a 64dp bubble and its pulse, the
+  // outer ring keeps bubbles on screen.
+  const phone = orbitLayout(2, 411, 560);
+  assert.ok(phone.radii[0] >= 42 + 32 + 40, `inner ${phone.radii[0]}`);
+  assert.ok(phone.radii[1] + 32 <= 411 / 2, `outer ${phone.radii[1]}`);
 });
 
 test('error codes become readable messages', () => {
