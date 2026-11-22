@@ -9,6 +9,7 @@ import {Collection, MediaSurface, Metric, Overlay, Progress, RouteView, TimeDisp
 import {ChoiceGroup, ControlledCheckbox, ControlledSwitch, ControlledText, Counter, Field, RangeEditor} from './genuiInputs';
 import {AssemblyRegion, CardBodyRegions, ProgressiveImage, useRegionSkeleton} from './genuiAssembly';
 import {AssistantBubble} from '../chat/ChatSurfaces';
+import {ChecklistCard, ChecklistContext} from './ChecklistCard';
 
 const align = {start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch'} as const;
 const justify = {start: 'flex-start', center: 'center', end: 'flex-end', between: 'space-between'} as const;
@@ -24,7 +25,9 @@ export const ChatReplySurface = createContext(false);
 const {registry: drawingRegistry} = defineRegistry(catalog, {components: {
   Card: ({props, children}) => {
     const chatReply = useContext(ChatReplySurface);
+    const checklist = useContext(ChecklistContext);
     const titleWaiting = useRegionSkeleton('title', props.title), subtitleWaiting = useRegionSkeleton('subtitle', props.subtitle);
+    if (checklist) return <ChecklistCard {...props}>{children}</ChecklistCard>;
     if (chatReply) return <AssistantBubble>
       {props.title ? <FeedText text={props.title} variant="body-lg-medium" tone="inverseSoft"/> : titleWaiting ? <FeedPlaceholder kind="text"/> : null}
       {props.subtitle ? <FeedText text={props.subtitle} variant="body-lg" tone="inverseSoft"/> : subtitleWaiting ? <FeedPlaceholder kind="text"/> : null}

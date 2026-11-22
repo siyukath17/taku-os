@@ -134,11 +134,11 @@ export function FeedItem({leading, children, trailing, corner, onPress, label, l
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({pressed}) => [styles.item, layout === 'tile' && styles.tile, pressed && styles.pressed]}>{body}</Pressable>
     : <View style={[styles.item, layout === 'tile' && styles.tile]}>{body}</View>;
 }
-export function FeedSelection({label, kind, checked, disabled, children, onPress, compact = false}: {
-  label: string; kind: 'checkbox' | 'radio'; checked: boolean | 'mixed'; disabled?: boolean; children: ReactNode; onPress: () => void; compact?: boolean;
+export function FeedSelection({label, kind, checked, disabled, children, onPress, compact = false, appearance = 'selection'}: {
+  label: string; kind: 'checkbox' | 'radio'; checked: boolean | 'mixed'; disabled?: boolean; children: ReactNode; onPress: () => void; compact?: boolean; appearance?: 'selection' | 'checklist';
 }) {
   return <Pressable accessibilityRole={kind} accessibilityLabel={label} accessibilityState={{checked, selected: checked === true, disabled}} disabled={disabled} onPress={onPress}
-    style={({pressed}) => [styles.checkRow, !compact && styles.selection, pressed && styles.pressed, disabled && styles.disabled]}>
+    style={({pressed}) => [styles.checkRow, appearance === 'checklist' ? styles.checklistRow : !compact && styles.selection, pressed && styles.pressed, disabled && styles.disabled]}>
     {compact ? children : <View style={styles.itemBody}>{children}</View>}
     <View style={[styles.checkbox, kind === 'radio' && styles.radio, checked !== false && styles.checkboxOn]}>
       {checked !== false ? <Svg width={12} height={12} viewBox="0 0 12 12"><Path d={checked === 'mixed' ? 'M2.5 6h7' : 'M2.5 6.2l2.3 2.3 4.7-5'} stroke="#fff" strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg> : null}
@@ -211,6 +211,8 @@ const styles = StyleSheet.create({
   itemLead: {flexDirection: 'row', alignItems: 'center', flex: 1, minWidth: 0, gap: 8},
   tile: {flexDirection: 'column', alignItems: 'stretch'}, itemBody: {flex: 1, minWidth: 0, gap: 4}, itemCorner: {position: 'absolute', left: 0, top: 0},
   checkRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8}, selection: {padding: 12, borderRadius: radii.xl, backgroundColor: content[50]},
+  // Figma 115:1699 has no row fill. 48dp is the interactive adaptation of its 20px text row.
+  checklistRow: {minHeight: 48, paddingVertical: 12, backgroundColor: 'transparent'},
   checkbox: {width: 20, height: 20, borderRadius: 5, borderWidth: 1.667, borderColor: content[600], alignItems: 'center', justifyContent: 'center', flexShrink: 0},
   checkboxOn: {backgroundColor: main.foreground, borderColor: main.foreground}, radio: {borderRadius: radii.full},
   track: {height: 8, borderRadius: radii.full, backgroundColor: content[200], overflow: 'hidden'}, trackFill: {height: 8, borderRadius: radii.full}, stack: {gap: 6},

@@ -9,6 +9,8 @@ import {content, main, radii, spacing, surface} from '../feed/feedTokens';
 import {setFeedAssetBase} from '../feed/assets';
 import {catalog} from '../model/genuiCatalog';
 import {assemblySpec} from '../model/genuiAssembly';
+import {checklistFields, panelContentSpec} from '../model/checklist';
+import {ChecklistContext} from '../components/ChecklistCard';
 import {UI_KINDS, compositionCandidates, type UiRequest} from '../model/genui';
 import {componentExamples, type GalleryCategory, type GalleryExample} from './examples';
 import {FEED_ASSETS, FeedGallery} from './FeedGallery';
@@ -59,9 +61,14 @@ function StateInspector({store}: {store: StateStore}) {
   return <Text selectable style={styles.code}>{JSON.stringify(state, null, 2)}</Text>;
 }
 
-function PreviewSession({example, reset}: {example: GalleryExample; reset: () => void}) {
+export function PreviewSession({example, reset}: {example: GalleryExample; reset: () => void}) {
   const store = useMemo(() => createStateStore(example.initialState), [example.initialState]);
-  const renderSpec = useMemo(() => assemblySpec(example.spec), [example.spec]);
+  const renderSpec = useMemo(() => assemblySpec(example.request && example.panelTitle
+    ? panelContentSpec(example.spec, example.request.title, example.panelTitle) : example.spec), [example]);
+  const checklist = useMemo(() => {
+    const fields = example.request && checklistFields(example.request, example.spec);
+    return fields ? {fields, pending: false} : null;
+  }, [example]);
   const [inspect, setInspect] = useState<'spec' | 'state' | null>(null);
   const [actionError, setActionError] = useState('');
   const [feedback, setFeedback] = useState('');
@@ -87,11 +94,12 @@ function PreviewSession({example, reset}: {example: GalleryExample; reset: () =>
   return <>
     <View style={[styles.preview, example.category === 'widgets' && styles.widgetPreview]}>
       <PreviewBoundary>
-        <CardLanguage.Provider value="en">
+        <ChecklistContext.Provider value={checklist}><CardLanguage.Provider value="en">
+          {!!example.panelTitle && <FeedText text={example.panelTitle} variant="heading-xl"/>}
           <JSONUIProvider registry={registry} store={store} handlers={handlers}>
             <Renderer spec={renderSpec} registry={registry} includeStandard={false} fallback={({element}) => <ErrorNotice message={`Unknown component: ${element.type}`}/>}/>
           </JSONUIProvider>
-        </CardLanguage.Provider>
+        </CardLanguage.Provider></ChecklistContext.Provider>
       </PreviewBoundary>
     </View>
     {actionError ? <ErrorNotice message={actionError}/> : null}
@@ -145,7 +153,7 @@ export default function ComponentGallery({assetBase}: {assetBase: string}) {
     return {all, jev: candidates, current: all};
   }, [assetBase]);
   const search = query.trim().toLowerCase();
-  const scoped = examples.filter(example => scopes[scope].has(example.name));
+  const scoped = examples.filter(example => scopes[scope].has(example.name) || scope === 'all' && example.request);
   const searched = scoped.filter(example => `${example.name} ${example.title} ${example.description}`.toLowerCase().includes(search));
   const visible = searched.filter(example => category === 'all' || example.category === category);
   const missing = [...scopes.all].filter(name => !examples.some(example => example.name === name));

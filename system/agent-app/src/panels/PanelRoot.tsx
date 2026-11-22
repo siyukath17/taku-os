@@ -125,7 +125,7 @@ export default function TakuPanelRoot({panelId}: {panelId?: string}) {
       {!!sourceText && <FeedStatus state={source.state === 'current' ? 'info' : 'error'} text={sourceText}/>}
       {!!updateText && rejectedUpdate && <FeedStatus state="error" text={updateText}/>}
       {presentation
-        ? <GenUiCard threadId={detail.panel.originThreadId} presentation={presentation} language={language} active={selected} surface="panel"/>
+        ? <GenUiCard threadId={detail.panel.originThreadId} presentation={presentation} language={language} active={selected} surface="panel" panelTitle={detail.panel.title}/>
         : <FeedStatus state="error" text={t('panelUnavailable')}/>}
       <View style={styles.actions}>
         <FeedButton label={t('panelContinue')} variant="primary" size="md" busy={continuing}

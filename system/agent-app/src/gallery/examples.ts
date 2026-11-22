@@ -1,5 +1,6 @@
 import type {Spec} from '@json-render/core';
 import {spacing, TEXT_VARIANTS} from '../feed/feedTokens';
+import {cardState, type UiRequest} from '../model/genui';
 
 export type GalleryCategory = 'widgets' | 'layout' | 'text' | 'inputs' | 'lists' | 'feedback';
 
@@ -11,6 +12,8 @@ export interface GalleryExample {
   spec: Spec;
   initialState: Record<string, unknown>;
   interactionHint?: string;
+  request?: UiRequest;
+  panelTitle?: string;
 }
 
 type PreviewNode = {
@@ -43,6 +46,21 @@ function spec(root: PreviewNode): Spec {
   return {root: visit(root), elements};
 }
 
+export function checklistExamples(): GalleryExample[] {
+  const entries = [['passport', 'Passport'], ['room-card', 'Room key'], ['phone', 'Phone'], ['wallet', 'Wallet'], ['power-bank', 'Power bank and charging cable for the journey']];
+  const request: UiRequest = {version: 2, key: 'gallery-checklist', mode: 'card', title: 'Before you leave', summary: '', actions: [],
+    blocks: entries.map(([id, title]) => ({id, title, kind: 'input', text: '', image: '', url: '', items: [], config: {editor: 'toggle'}, value: {type: 'boolean', value: id === 'room-card'}}))};
+  const layout = spec(node('Card', {title: {$state: '/data/title'}}, entries.map(([id]) => node('Checkbox', {
+    label: source(`${id}/title`), checked: bind(`fields/${id}/draft`),
+  }))));
+  return ['chat', 'panel'].map(surface => ({
+    name: `Checklist ${surface}`, title: `Departure checklist · ${surface}`, category: 'inputs',
+    description: 'Controlled local fixture using the same checklist adapter, bound controls and progress renderer as live cards.',
+    interactionHint: 'Toggle rows, complete all, then undo. Counts derive from live field drafts; the long label must wrap.',
+    request, ...(surface === 'panel' ? {panelTitle: request.title} : {}), spec: layout, initialState: cardState(request),
+  }));
+}
+
 export function componentExamples(assetBase: string): GalleryExample[] {
   const asset = (name: string) => new URL(`/gallery/${name}.svg`, assetBase).href;
   const artwork = asset('artwork'), landscape = asset('landscape'), avatar = asset('avatar');
@@ -50,6 +68,7 @@ export function componentExamples(assetBase: string): GalleryExample[] {
     name, title, description, category, spec: spec(root), initialState: {...sourceState, ui}, ...(interactionHint ? {interactionHint} : {}),
   });
   return [
+    ...checklistExamples(),
     example('Metric', 'Values and expanded details', 'Feed value hierarchy preserves complete data, unknown states, and explicit field waiting.', 'widgets', column(
       node('Metric', {title: 'Full size · Local weather example', value: {type: 'number', value: 23, unit: '°C'}, text: 'Fixed sample data · Not live weather', config: {size: 'full_size', emphasis: 'hero', icon: 'sun'}}),
       node('Metric', {title: 'Medium size', value: {type: 'number', value: 24}, config: {size: 'medium_size', emphasis: 'hero'}}),

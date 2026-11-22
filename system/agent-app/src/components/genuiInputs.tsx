@@ -9,6 +9,7 @@ import {FeedButton, FeedSelection, FeedSlider, FeedStatus, FeedText, FeedTextInp
 import {CardLanguage} from './genuiWidgets';
 import {formatUiValue} from './genuiFormat';
 import {ItemRegions} from './genuiAssembly';
+import {ChecklistContext} from './ChecklistCard';
 
 type Draft = string | number | boolean | null;
 function UnsetNotice() {
@@ -64,7 +65,9 @@ export function ControlledSwitch({checked, label, disabled, binding, emit}: {
 }
 export function ControlledCheckbox({checked, label, disabled, binding, emit}: InferComponentProps<TakuCatalog, 'Checkbox'> & {binding?: string; emit?: (event: string) => void}) {
   const [current, setCurrent] = useBoundProp<boolean | null | undefined>(checked, binding);
+  const checklist = useContext(ChecklistContext);
   return <FeedSelection kind="checkbox" label={label ?? ''} checked={current == null ? 'mixed' : current} disabled={disabled}
+    appearance={checklist ? 'checklist' : 'selection'}
     onPress={() => {if (!disabled) {setCurrent(current !== true); emit?.('change');}}}><FeedText text={label ?? ''}/></FeedSelection>;
 }
 export function Field({title, text, value, config = {}, draft, binding}: {title?: string; text?: string; value?: UiValue; config?: UiConfig; draft: Draft; binding?: string}) {
