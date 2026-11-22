@@ -47,6 +47,9 @@ public final class AcpIslandProjectionTest {
         JSONObject p = valid(AcpIslandProjection.project(state("7", "running", "x"),
                 progress("7", "tool", "Working: Open Settings", "Open Settings", "1/4", 3, 1), null), "tool phase");
         check("Using Open Settings".equals(p.getJSONObject("expanded").getString("title")), "tool phase names the tool");
+        JSONObject labelled = valid(AcpIslandProjection.project(state("7", "running", "x"),
+                progress("7", "tool", "Working: Read device info", "Read device info", "", 1, 0).put("toolKey", "device_info"), null), "labelled tool");
+        check("Read device info".equals(labelled.getJSONObject("expanded").getString("title")), "an ACP tool label is the title itself");
         check("Tools 1/3".equals(p.getJSONObject("bigIsland").getJSONObject("trailing").getString("text")), "tool counter in the compact island");
         check(p.getJSONObject("expanded").getJSONObject("progress").getDouble("value") == 0.25, "plan drives determinate progress");
         check("working".equals(p.getJSONObject("bigIsland").getJSONObject("leading").getString("animated")) && p.has("staleAfterS"),
@@ -58,6 +61,17 @@ public final class AcpIslandProjectionTest {
                 && !p.getJSONObject("expanded").getJSONObject("progress").has("value"), "starting is indeterminate");
         for (String phase : new String[]{"working", "thinking", "replying", "stopping", "unexpected"})
             valid(AcpIslandProjection.project(state("7", "running", "x"), progress("7", phase, "s", "", "", 0, 0), null), "phase " + phase);
+        // Waiting for asynchronous subagents: their own counter and determinate progress.
+        p = valid(AcpIslandProjection.project(state("7", "running", "x"),
+                progress("7", "subagents", "Waiting for sub-tasks (1/2 done)…", "Dispatch a sub-task", "", 2, 2)
+                        .put("subagents", 2).put("subagentsDone", 1), null), "subagents phase");
+        check("Waiting for sub-tasks".equals(p.getJSONObject("expanded").getString("title"))
+                && "Sub-tasks 1/2".equals(p.getJSONObject("bigIsland").getJSONObject("trailing").getString("text"))
+                && p.getJSONObject("expanded").getJSONObject("progress").getDouble("value") == 0.5
+                && p.getJSONObject("expanded").getString("body").contains("1/2"), "subagents phase: counter and progress " + p);
+        p = valid(AcpIslandProjection.project(state("7", "running", "x"),
+                progress("7", "subagents", "s", "", "", 2, 2).put("subagents", 2).put("subagentsDone", 2), null), "subagents done");
+        check("Sub-tasks finished".equals(p.getJSONObject("expanded").getString("title")), "subagents phase: all reported");
         p = valid(AcpIslandProjection.project(state("7", "running", "x"), progress("7", "stopping", "Stopping.", "", "", 0, 0), null), "stopping");
         check("none".equals(p.getJSONObject("bigIsland").getJSONObject("leading").getString("animated")), "stopping is not animated");
 
@@ -108,7 +122,7 @@ public final class AcpIslandProjectionTest {
             AcpIslandProjection.Projection projection = AcpIslandProjection.fromTaskDirectory(dir, id);
             titles.add(valid(projection, "live update").getJSONObject("expanded").getString("title"));
         }, null).run(dir, new JSONObject().put("id", "301").put("prompt", "Turn on Wi-Fi").put("permissionMode", "full"));
-        check(titles.contains("Using Open Settings"), "live: the tool phase reached the island " + titles);
+        check(titles.contains("Open Settings"), "live: the tool phase reached the island " + titles);
         check("Taku finished".equals(titles.get(titles.size() - 1)), "live: the final update is the finished card " + titles);
         check("Open Settings".equals(new JSONObject(Files.readString(new File(dir, "progress.json").toPath())).getString("tool")),
                 "progress.json carries the current tool");

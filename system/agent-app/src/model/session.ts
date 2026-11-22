@@ -114,6 +114,15 @@ const toolKeys: Record<string, string> = {
   commandExecution: 'command', fileChange: 'fileChange', webSearch: 'webSearch', contextCompaction: 'compaction',
   collabAgentToolCall: 'collaboration', collabToolCall: 'collaboration', enteredReviewMode: 'review', exitedReviewMode: 'review',
   device_info: 'deviceInfo', observe_background: 'observeScreen', open_app: 'openApp', tap: 'tap', type_text: 'typeText', apps: 'apps',
+  request_apps: 'requestApps', release_apps: 'releaseApps', screen_status: 'screenStatus', screenshot: 'screenshot',
+  swipe: 'swipe', touch: 'touch',
+};
+// Tools of the on-device ACP agent (agy), reported by the broker with server "agy" and the bare tool name.
+const agentToolKeys: Record<string, string> = {
+  invoke_subagent: 'invokeSubagent', manage_subagents: 'manageSubagents', send_message: 'messageSubagent',
+  run_command: 'command', read_file: 'readFile', view_file: 'readFile', list_dir: 'browseFiles',
+  write_to_file: 'fileChange', replace_file_content: 'fileChange', grep_search: 'searchFiles', find_by_name: 'searchFiles',
+  search_web: 'webSearch', read_url_content: 'readWebPage', list_resources: 'toolResources', read_resource: 'toolResources',
 };
 
 function activity(item: Json, turnId: string, outputs: Json, index: number): Activity {
@@ -121,7 +130,8 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   const tool = string(item.tool);
   const short = tool.replace(/^.*(?:__|\/|\.)/, '');
   const phone = tool.startsWith('taku_phone') || item.namespace === 'taku_phone';
-  const titleKey = toolKeys[type] || (phone && toolKeys[short]) || (type === 'agentMessage' ? 'update' : 'tool');
+  const agent = item.server === 'agy' && !phone;
+  const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || (type === 'agentMessage' ? 'update' : 'tool');
   const details: string[] = [];
   for (const value of [item.command, item.aggregatedOutput || outputs[string(item.id)]]) if (typeof value === 'string' && value) details.push(value);
   if (type === 'agentMessage') details.push(string(item.text));
@@ -130,7 +140,7 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   for (const change of list(item.changes)) { const c = record(change); if (typeof c.path === 'string') details.push(c.path); }
   const error = typeof item.error === 'string' ? item.error : string(record(item.error).message);
   if (error) details.push(error);
-  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? tool : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item)};
+  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item)};
 }
 
 function userContent(item: Json): {text: string; attachments: string[]} {

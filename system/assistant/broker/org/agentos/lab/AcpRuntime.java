@@ -89,6 +89,21 @@ final class AcpRuntime implements TaskRuntime {
         long requestTimeoutMillis = TimeUnit.SECONDS.toMillis(60);
         long progressIntervalMillis = 500;
         /**
+         * Start the agent with {@code --dangerously-skip-permissions} for {@code permissionMode: full}
+         * tasks. agy routes only the parent's approvals through {@code session/request_permission}
+         * (which a full-mode task already answers with allow); a subagent's approval has no ACP route and
+         * blocks it forever in {@code waiting_for_input} (Pixel 9, 1.5.14). The flag gives subagents the
+         * same full-mode policy; agy still blocks its system command denylist.
+         */
+        boolean autoApprove = true;
+        /** After every started subagent reported back and was delivered, the parent's silence that ends the task. */
+        long subagentSettleMillis = TimeUnit.SECONDS.toMillis(6);
+        /** A report the parent has not consumed this long (while it is silent) gets one follow-up prompt. */
+        long subagentNudgeMillis = TimeUnit.SECONDS.toMillis(20);
+        /** Without a readable subagent store: the parent's silence that ends the wait. */
+        long subagentIdleMillis = TimeUnit.MINUTES.toMillis(5);
+        long subagentPollMillis = 1000;
+        /**
          * Where the agent's model list ({@code session/new} configOptions) is saved for the model
          * picker ({@link AcpModelCatalog}); null keeps it unsaved. Set by the broker, not runtime.json.
          */
@@ -124,6 +139,11 @@ final class AcpRuntime implements TaskRuntime {
             o.cancelGraceMillis = c.optLong("cancelGraceMillis", o.cancelGraceMillis);
             o.requestTimeoutMillis = c.optLong("requestTimeoutMillis", o.requestTimeoutMillis);
             o.progressIntervalMillis = c.optLong("progressIntervalMillis", o.progressIntervalMillis);
+            o.autoApprove = c.optBoolean("autoApprove", o.autoApprove);
+            o.subagentSettleMillis = c.optLong("subagentSettleMillis", o.subagentSettleMillis);
+            o.subagentNudgeMillis = c.optLong("subagentNudgeMillis", o.subagentNudgeMillis);
+            o.subagentIdleMillis = c.optLong("subagentIdleMillis", o.subagentIdleMillis);
+            o.subagentPollMillis = c.optLong("subagentPollMillis", o.subagentPollMillis);
             return o;
         }
 
@@ -166,6 +186,11 @@ final class AcpRuntime implements TaskRuntime {
 
     /** The agent command line and environment. Auto-update is always disabled. */
     AcpProcessTransport.Launch launch() {
+        return launch(null);
+    }
+
+    /** The task's command line: {@link #launch()} plus the full-mode approval policy (see {@link Options#autoApprove}). */
+    AcpProcessTransport.Launch launch(JSONObject request) {
         List<String> command = new ArrayList<>();
         command.add(options.binary);
         command.addAll(options.args);
@@ -174,6 +199,9 @@ final class AcpRuntime implements TaskRuntime {
             command.add(options.appDataDir);
         }
         command.addAll(options.extraArgs);
+        if (request != null && options.autoApprove && "full".equals(request.optString("permissionMode", "full"))
+                && !command.contains("--dangerously-skip-permissions"))
+            command.add("--dangerously-skip-permissions");
         Map<String, String> env = new LinkedHashMap<>();
         env.put("HOME", options.home);
         // A pinned on-device binary must never replace itself; the ROM owns its version.
@@ -206,7 +234,7 @@ final class AcpRuntime implements TaskRuntime {
             // appDataDir is relative to $HOME/.gemini and created by the agent itself.
             for (String path : new String[]{options.home, options.cwd})
                 if (!path.isEmpty()) new File(path).mkdirs();
-            connection = transport.start(launch());
+            connection = transport.start(launch(request));
         } catch (IOException startFailed) {
             diagnostic(directory, "start-failed", startFailed.getMessage(), "");
             if (chat != null) chat.end("failed", null);
@@ -231,6 +259,8 @@ final class AcpRuntime implements TaskRuntime {
     private Chat activeChat;
 
     private void finish(File directory, JSONObject request, String status, String message, String reply) throws Exception {
+        // Agent text can link or quote agent-internal paths; never shown or stored in results.
+        if (reply != null) reply = AcpToolLabels.sanitize(reply);
         // The conversation shows the turn's end before the task record does.
         if (activeChat != null && !activeChat.ended) activeChat.end(status, reply);
         if (request.has("conversationId") && chatHost != null) {
@@ -313,6 +343,16 @@ final class AcpRuntime implements TaskRuntime {
         long lastProgressWrite, lastIdle;
         int permissionsAllowed, permissionsRejected, ignoredLines;
         final Chat chat;
+        /** Completed {@code invoke_subagent} calls of this task (the parent's turns, including wake-ups). */
+        final java.util.Set<String> subagentCalls = new java.util.LinkedHashSet<>();
+        AcpSubagents subagents;
+        AcpSubagents.Status subagentStatus;
+        boolean followUp;
+        /** Last session/update of this session, and last reply text chunk (nanoTime). */
+        long lastUpdate, lastChunk, lastChunkWall;
+        /** Where the parent's latest wake-up text starts in {@link #reply} (its headline), and a pending start. */
+        int lastSegment, pendingSegment = -1;
+        String currentToolKey = "";
 
         Turn(File directory, JSONObject request, AcpProcessTransport.Connection connection, Chat chat) {
             this.chat = chat;
@@ -463,6 +503,8 @@ final class AcpRuntime implements TaskRuntime {
                 progress("Taku is working. You can continue using your phone.", true);
                 inPrompt = true;
                 turnDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.turnLimitMillis);
+                subagents = new AcpSubagents(AcpSubagents.sessionRoot(options.home, options.appDataDir, sessionId));
+                subagents.baseline();
                 JSONObject result;
                 try {
                     result = call("session/prompt", new JSONObject().put("sessionId", sessionId).put("prompt", prompt));
@@ -473,7 +515,11 @@ final class AcpRuntime implements TaskRuntime {
                     }
                     throw error;
                 }
-                completed(result.optString("stopReason", ""));
+                String stopReason = result.optString("stopReason", "");
+                // The parent's turn ends while its subagents still run; keep the agent alive for their
+                // reports and the parent's own follow-up reply (see AcpSubagents).
+                if ("end_turn".equals(stopReason) && !subagentCalls.isEmpty() && !cancelSent) stopReason = awaitSubagents();
+                completed(stopReason);
             } catch (CancelledEarly cancelled) {
                 finish(directory, request, "cancelled", "Cancelled before execution.", null);
             } catch (StopUnconfirmed unconfirmed) {
@@ -490,6 +536,114 @@ final class AcpRuntime implements TaskRuntime {
                 diagnostic(directory, "agent-error", error.code + " " + error.getMessage(), stderr());
                 finish(directory, request, "failed", "The on-device agent reported an error. Check the results before retrying.", null);
             }
+        }
+
+        /**
+         * After the parent's {@code end_turn} with subagents started: stream the agent's unsolicited
+         * updates (agy wakes the parent when a subagent reports) until every started subagent reported,
+         * its report was delivered and the parent answered and fell silent; or the task is cancelled
+         * ({@code session/cancel}) or its fixed budget runs out. A report the silent parent never picked
+         * up gets one follow-up {@code session/prompt} in the same session. Returns the stop reason.
+         */
+        String awaitSubagents() throws Exception {
+            followUp = true;
+            pendingSegment = reply.length();
+            if (chat != null) chat.breakMessage();
+            long now = System.nanoTime(), lastPoll = now, allReportedAt = 0, nudgedAt = 0;
+            lastUpdate = now;
+            long settle = TimeUnit.MILLISECONDS.toNanos(options.subagentSettleMillis);
+            long nudge = TimeUnit.MILLISECONDS.toNanos(options.subagentNudgeMillis);
+            subagentStatus = subagents.status();
+            phase = "subagents";
+            progress(subagentSummary(), true);
+            for (; ; ) {
+                boolean cancel = new File(directory, "cancel").exists();
+                if (cancel || System.nanoTime() > turnDeadline) {
+                    timedOut = !cancel;
+                    // No prompt is pending, so nothing answers the cancel: stop, drain briefly, reclaim.
+                    send(new JSONObject().put("method", "session/cancel").put("params", new JSONObject().put("sessionId", sessionId)));
+                    cancelSent = true;
+                    phase = "stopping";
+                    progress("Stopping. Completed actions will not be automatically undone.", true);
+                    long drainUntil = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.min(1000, options.cancelGraceMillis));
+                    while (System.nanoTime() < drainUntil) {
+                        Object next = inbox.poll(50, TimeUnit.MILLISECONDS);
+                        if (next == null || next == EOF || next instanceof IOException) { if (next != null) break; continue; }
+                        unsolicited((String) next);
+                    }
+                    return "cancelled";
+                }
+                Object next = inbox.poll(100, TimeUnit.MILLISECONDS);
+                runIdle();
+                if (next == EOF) throw new AgentExited("agent closed stdout while subagents were running");
+                if (next instanceof IOException) throw (IOException) next;
+                if (next != null) unsolicited((String) next);
+                now = System.nanoTime();
+                if (now - lastPoll >= TimeUnit.MILLISECONDS.toNanos(options.subagentPollMillis)) {
+                    lastPoll = now;
+                    int before = subagentStatus.reportedCount() * 1000 + subagentStatus.started();
+                    subagentStatus = subagents.status();
+                    int after = subagentStatus.reportedCount() * 1000 + subagentStatus.started();
+                    if (after != before) {
+                        allReportedAt = 0;
+                        if (!"stopping".equals(phase)) phase = "subagents";
+                        progress(subagentSummary(), true);
+                    }
+                }
+                long quiet = now - lastUpdate;
+                boolean known = subagentStatus.readable && subagentStatus.started() >= subagentCalls.size();
+                if (!known) {
+                    // No readable store (another agy layout): fall back to the parent's long silence.
+                    if (quiet >= TimeUnit.MILLISECONDS.toNanos(options.subagentIdleMillis)) return "end_turn";
+                    continue;
+                }
+                if (!subagentStatus.allReported()) continue;
+                if (allReportedAt == 0) allReportedAt = now;
+                // The parent answered the last report: reply text written after that report's file.
+                boolean answered = lastChunkWall > 0 && lastChunkWall >= subagentStatus.lastReportMillis;
+                if (answered && subagentStatus.allDelivered() && quiet >= settle) return "end_turn";
+                if (!answered && quiet >= nudge && now - allReportedAt >= nudge) {
+                    if (nudgedAt == 0) {
+                        nudgedAt = now;
+                        String reason = nudgeParent();
+                        if (!"end_turn".equals(reason)) return reason;
+                        lastUpdate = System.nanoTime();
+                    } else if (now - nudgedAt >= 2 * nudge) {
+                        return "end_turn"; // The parent stays silent: end with what it said.
+                    }
+                }
+            }
+        }
+
+        /** One follow-up prompt in the same session when the parent did not pick up its subagents' reports. */
+        String nudgeParent() throws Exception {
+            pendingSegment = reply.length();
+            if (chat != null) chat.breakMessage();
+            JSONObject result = call("session/prompt", new JSONObject().put("sessionId", sessionId).put("prompt", new JSONArray()
+                    .put(new JSONObject().put("type", "text").put("text",
+                            "All sub-tasks you started have reported back. Read their results and give the user the complete combined answer now, in the user's language."))));
+            return result.optString("stopReason", "end_turn");
+        }
+
+        String subagentSummary() {
+            int total = Math.max(subagentCalls.size(), subagentStatus == null ? 0 : subagentStatus.started());
+            int done = subagentStatus == null ? 0 : subagentStatus.reportedCount();
+            return done >= total && total > 0 ? "Sub-tasks finished. Writing the summary…"
+                    : "Waiting for sub-tasks (" + Math.min(done, total) + "/" + total + " done)…";
+        }
+
+        /** A line that arrives outside any request: agent requests are answered, late responses dropped. */
+        void unsolicited(String line) throws Exception {
+            JSONObject message;
+            try {
+                message = new JSONObject(line);
+            } catch (Exception notJson) {
+                ignoredLines++;
+                return;
+            }
+            if (message.has("id") && !message.has("method")) return;
+            if (message.has("id")) agentRequest(message);
+            else notification(message);
         }
 
         /**
@@ -559,12 +713,14 @@ final class AcpRuntime implements TaskRuntime {
         }
 
         void completed(String stopReason) throws Exception {
-            String text = reply.toString().trim();
+            String text = AcpToolLabels.sanitize(reply.toString()).trim();
+            // After subagents, the parent's last wake-up is the answer; its first line heads the task.
+            String last = lastSegment > 0 ? AcpToolLabels.sanitize(reply.substring(Math.min(lastSegment, reply.length()))).trim() : "";
             String status, message;
             switch (stopReason) {
                 case "end_turn":
                     status = "completed";
-                    message = text.isEmpty() ? "This turn has ended." : headline(text);
+                    message = text.isEmpty() ? "This turn has ended." : headline(last.isEmpty() ? text : last);
                     break;
                 case "cancelled":
                     status = timedOut ? "failed" : "cancelled";
@@ -732,10 +888,24 @@ final class AcpRuntime implements TaskRuntime {
             if (params == null || !sessionId.equals(params.optString("sessionId"))) return;
             JSONObject update = params.optJSONObject("update");
             if (update == null) return;
+            lastUpdate = System.nanoTime();
             switch (update.optString("sessionUpdate")) {
+                case "usage_update":
+                    // agy ends each model step (and each wake-up of the parent) with one.
+                    if (followUp) {
+                        if (chat != null) chat.breakMessage();
+                        pendingSegment = reply.length();
+                    }
+                    break;
                 case "agent_message_chunk": {
+                    lastChunk = System.nanoTime();
+                    lastChunkWall = System.currentTimeMillis();
                     JSONObject content = update.optJSONObject("content");
                     if (content != null && "text".equals(content.optString("type")) && reply.length() < MAX_TEXT_CHARS) {
+                        if (pendingSegment >= 0 && !content.optString("text").isBlank()) {
+                            lastSegment = pendingSegment;
+                            pendingSegment = -1;
+                        }
                         reply.append(content.optString("text"));
                         if (chat != null) chat.message(content.optString("text"));
                     }
@@ -749,11 +919,15 @@ final class AcpRuntime implements TaskRuntime {
                     break;
                 case "tool_call": {
                     String toolId = update.optString("toolCallId");
-                    JSONObject call = new JSONObject().put("title", update.optString("title", "tool"))
+                    AcpToolLabels.Tool tool = AcpToolLabels.identify(update.optString("name", ""), update.optString("title", ""), update.optString("kind", ""));
+                    JSONObject call = new JSONObject().put("title", AcpToolLabels.label(tool, java.util.Locale.getDefault()))
+                            .put("key", tool.key).put("name", tool.name)
                             .put("kind", update.optString("kind", "other")).put("status", update.optString("status", "pending"));
                     toolCalls.put(toolId, call);
                     if (chat != null) chat.tool(toolId, update);
+                    subagentCall(toolId, call);
                     currentTool = call.getString("title");
+                    currentToolKey = tool.key;
                     if (!"stopping".equals(phase)) phase = "tool";
                     progress("Working: " + clip(call.getString("title"), 80), true);
                     break;
@@ -764,10 +938,15 @@ final class AcpRuntime implements TaskRuntime {
                         call = new JSONObject().put("title", "tool").put("kind", "other").put("status", "pending");
                         toolCalls.put(update.optString("toolCallId"), call);
                     }
-                    if (update.has("title") && !update.isNull("title")) call.put("title", update.optString("title"));
+                    if ((update.has("title") && !update.isNull("title")) || update.has("name")) {
+                        AcpToolLabels.Tool tool = AcpToolLabels.identify(update.optString("name", ""), update.optString("title", ""), update.optString("kind", ""));
+                        call.put("title", AcpToolLabels.label(tool, java.util.Locale.getDefault())).put("key", tool.key).put("name", tool.name);
+                    }
                     currentTool = call.getString("title");
+                    currentToolKey = call.optString("key");
                     if (update.has("status") && !update.isNull("status")) call.put("status", update.optString("status"));
                     if (chat != null) chat.tool(update.optString("toolCallId"), update);
+                    subagentCall(update.optString("toolCallId"), call);
                     progress("Working: " + clip(call.getString("title"), 80), false);
                     break;
                 }
@@ -785,6 +964,11 @@ final class AcpRuntime implements TaskRuntime {
             }
         }
 
+        /** Counts a completed {@code invoke_subagent}: the task then waits for that subagent's report. */
+        void subagentCall(String toolId, JSONObject call) {
+            if ("invoke_subagent".equals(call.optString("key")) && "completed".equals(call.optString("status"))) subagentCalls.add(toolId);
+        }
+
         /** Throttled progress for the Dynamic Island: progress.json plus a short state message. */
         void progress(String text, boolean force) throws Exception {
             long now = System.currentTimeMillis();
@@ -800,11 +984,14 @@ final class AcpRuntime implements TaskRuntime {
                     .put("phase", phase)
                     .put("summary", text)
                     // Titles can quote commands or paths: redacted and clipped for the island.
-                    .put("tool", clip(redact(currentTool), 80))
+                    .put("tool", clip(AcpToolLabels.sanitize(redact(currentTool)), 80))
+                    .put("toolKey", currentToolKey)
                     .put("toolCalls", toolCalls.size())
                     .put("toolCallsCompleted", completedTools)
                     .put("plan", plan)
                     .put("replyChars", reply.length())
+                    .put("subagents", Math.max(subagentCalls.size(), subagentStatus == null ? 0 : subagentStatus.started()))
+                    .put("subagentsDone", subagentStatus == null ? 0 : subagentStatus.reportedCount())
                     .put("permissionsAllowed", permissionsAllowed)
                     .put("permissionsRejected", permissionsRejected)
                     .put("updatedAt", now).toString());
@@ -882,6 +1069,11 @@ final class AcpRuntime implements TaskRuntime {
             store.bindSession(conversationId, sessionId, agentInfo);
         }
 
+        /** The next text starts a new message item (a wake-up of the parent is a new message). */
+        void breakMessage() {
+            message = null;
+        }
+
         void message(String chunk) throws Exception {
             if (message == null) {
                 message = new JSONObject().put("type", "agentMessage").put("id", turnId + "-msg-" + (++messages)).put("text", "");
@@ -901,12 +1093,22 @@ final class AcpRuntime implements TaskRuntime {
                 // Text after a tool call is a new message, so the order of events is kept.
                 message = null;
             }
-            if (update.has("title") && !update.isNull("title")) item.put("tool", clip(redact(update.optString("title")), 200));
+            if ((update.has("title") && !update.isNull("title")) || update.has("name")) {
+                // The chat page shows "title"; "tool" is the canonical id it translates
+                // (taku_phone__<tool> with namespace taku_phone, else the agent's tool name), and
+                // "toolName" the agent's own name, for diagnostics. agy's terminal-style title can hold
+                // internal paths ("File ../acp/home/.gemini/…"), so it is never shown.
+                AcpToolLabels.Tool tool = AcpToolLabels.identify(update.optString("name", ""), update.optString("title", ""), update.optString("kind", ""));
+                item.put("tool", tool.canonical()).put("toolName", clip(tool.name, 120))
+                        .put("title", AcpToolLabels.label(tool, java.util.Locale.getDefault()));
+                if (tool.phone) item.put("namespace", "taku_phone");
+                else item.remove("namespace");
+            }
             if (update.has("kind") && !update.isNull("kind")) item.put("kind", update.optString("kind"));
             if (update.has("status") && !update.isNull("status")) item.put("status", toolStatus(update.optString("status")));
             Object input = update.opt("rawInput");
             if (input instanceof JSONObject) {
-                String raw = redact(input.toString());
+                String raw = AcpToolLabels.sanitize(redact(input.toString()));
                 item.put("arguments", raw.length() <= 4000 ? new JSONObject(raw) : new JSONObject().put("summary", clip(raw, 4000)));
             }
             JSONArray content = update.optJSONArray("content");
@@ -921,7 +1123,7 @@ final class AcpRuntime implements TaskRuntime {
                     }
                 }
                 if (out.length() > 0) item.put("result", new JSONObject().put("content",
-                        new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(redact(out.toString()), 4000)))));
+                        new JSONArray().put(new JSONObject().put("type", "text").put("text", clip(AcpToolLabels.sanitize(redact(out.toString())), 4000)))));
             }
             if ("failed".equals(item.optString("status")) && !item.has("error")) item.put("error", toolError(item, update));
             flush(true);
@@ -942,7 +1144,7 @@ final class AcpRuntime implements TaskRuntime {
                 JSONObject first = content == null ? null : content.optJSONObject(0);
                 if (first != null) text = first.optString("text");
             }
-            String phoneTool = phoneToolName(item.optString("tool"));
+            String phoneTool = phoneToolName(item.optString("toolName", item.optString("tool")));
             if (text.isBlank() && phoneTool != null) {
                 JSONObject recorded = PhoneMcpBridge.Failures.take(turnId, phoneTool);
                 if (recorded != null) return new JSONObject().put("code", recorded.optString("code", "TOOL_FAILED"))
@@ -954,7 +1156,7 @@ final class AcpRuntime implements TaskRuntime {
             String code = PhoneMcpBridge.Failures.code(text);
             if (phoneTool != null) PhoneMcpBridge.Failures.take(turnId, phoneTool);
             return new JSONObject().put("code", code == null ? "TOOL_FAILED" : code)
-                    .put("message", clip(redact(text.trim()), 300)).put("source", "agent");
+                    .put("message", clip(AcpToolLabels.sanitize(redact(text.trim())), 300)).put("source", "agent");
         }
 
         /** {@code taku_phone} tool name in an agent tool title such as "Run mcp_taku_phone_device_info". */
@@ -1002,6 +1204,9 @@ final class AcpRuntime implements TaskRuntime {
                 if ("agentMessage".equals(item.optString("type")) && !item.optString("text").isBlank()) last = item.getString("id");
             for (JSONObject item : items.values()) {
                 JSONObject copy = new JSONObject(item.toString());
+                // Agent text can link internal files and subagent conversations (file:///…/.gemini/…,
+                // conversation://…); the whole text is sanitized because chunks split links anywhere.
+                if ("agentMessage".equals(copy.optString("type"))) copy.put("text", AcpToolLabels.sanitize(copy.optString("text")));
                 if (terminal && "agentMessage".equals(copy.optString("type")))
                     copy.put("phase", copy.getString("id").equals(last) ? "final_answer" : "commentary");
                 if (terminal && "mcpToolCall".equals(copy.optString("type")) && "inProgress".equals(copy.optString("status")))

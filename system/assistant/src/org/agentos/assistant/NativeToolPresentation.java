@@ -28,6 +28,9 @@ final class NativeToolPresentation {
             case "commandExecution": return label(labels, "command", "Run command");
             case "fileChange": return label(labels, "file_change", "File changes");
             case "mcpToolCall":
+                // ACP items carry a display "title" (AcpToolLabels); "tool" is then an internal id.
+                String display = string(item, "title");
+                if (!display.isEmpty()) return display;
                 String tool = string(item, "tool");
                 return tool.isEmpty() ? label(labels, "extension", "Call extension tool") : tool;
             case "webSearch": return label(labels, "web_search", "Search the web");

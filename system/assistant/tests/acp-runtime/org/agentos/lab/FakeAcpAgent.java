@@ -41,7 +41,21 @@ final class FakeAcpAgent implements AcpProcessTransport {
         /** authenticate: never answers. */
         AUTH_SILENT,
         /** initialize offers no oauth-personal. */
-        AUTH_NO_METHOD
+        AUTH_NO_METHOD,
+        /**
+         * Like agy 1.5.14 (Pixel 9 probe): two invoke_subagent calls, end_turn while they run; each child
+         * later records its report in agy's store and the parent wakes by itself, streaming more updates
+         * with no session/prompt reply.
+         */
+        SUBAGENTS,
+        /** As SUBAGENTS, but the children finish inside the parent's turn (agy waited for them). */
+        SUBAGENTS_INLINE,
+        /** The children report, but the parent never consumes the reports until prompted again. */
+        SUBAGENTS_SILENT_PARENT,
+        /** The children never report. */
+        SUBAGENTS_HANG,
+        /** As SUBAGENTS, but agy's store is missing (another layout): the runtime falls back to silence. */
+        SUBAGENTS_NO_STORE
     }
 
     static final String AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fake.apps.googleusercontent.com"
@@ -71,6 +85,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
     volatile JSONArray configOptions;
     /** session/set_config_option values refused with -32602 (as agy does for unknown model ids). */
     final java.util.Set<String> refusedConfigValues = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Delay before each subagent report in the SUBAGENTS scenarios. */
+    volatile long subagentDelayMillis = 300;
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
@@ -281,6 +298,14 @@ final class FakeAcpAgent implements AcpProcessTransport {
                 }
                 case "session/prompt":
                     promptId = id;
+                    if (scenario.name().startsWith("SUBAGENTS") && prompts++ > 0) {
+                        // The follow-up prompt: the parent reads the reports and answers.
+                        markRead();
+                        chunk("Combined after prompt: A=17, B=74%.");
+                        update(new JSONObject().put("sessionUpdate", "usage_update").put("used", 3).put("size", 10));
+                        send(new JSONObject().put("id", id).put("result", new JSONObject().put("stopReason", "end_turn")));
+                        return false;
+                    }
                     return prompt();
                 case "session/set_config_option": {
                     JSONObject params = message.getJSONObject("params");
@@ -308,7 +333,106 @@ final class FakeAcpAgent implements AcpProcessTransport {
             }
         }
 
+        int prompts;
+        final java.util.List<String> reports = new java.util.ArrayList<>();
+
+        java.io.File storeRoot() {
+            List<String> command = launch.command;
+            int at = command.indexOf("--app-data-dir");
+            String app = at >= 0 && at + 1 < command.size() ? command.get(at + 1) : "taku-acp";
+            return AcpSubagents.sessionRoot(launch.env.get("HOME"), app, currentSession);
+        }
+
+        void write(java.io.File file, JSONObject value) throws IOException {
+            file.getParentFile().mkdirs();
+            java.nio.file.Files.writeString(file.toPath(), value.toString());
+        }
+
+        void spawn(String toolId, String child, String role) throws Exception {
+            JSONObject args = new JSONObject().put("Prompt", "do " + role).put("Role", role).put("TypeName", "self");
+            update(new JSONObject().put("sessionUpdate", "tool_call").put("toolCallId", toolId).put("name", "invoke_subagent")
+                    .put("title", "Run invoke_subagent").put("kind", "other").put("status", "in_progress").put("rawInput", args));
+            if (scenario != Scenario.SUBAGENTS_NO_STORE)
+                write(new java.io.File(storeRoot(), "subagents/" + child + ".json"), new JSONObject().put("conversationId", child)
+                        .put("subagentDescriptor", new JSONObject().put("typeName", "self").put("role", role)).put("state", "SUBAGENT_STATE_ALIVE"));
+            update(new JSONObject().put("sessionUpdate", "tool_call_update").put("toolCallId", toolId).put("name", "invoke_subagent")
+                    .put("title", "Run invoke_subagent").put("kind", "other").put("status", "completed").put("rawInput", args));
+        }
+
+        /** A child's report lands in the store; delivered=true when the parent consumed it. */
+        void report(String child, boolean delivered) throws Exception {
+            if (scenario == Scenario.SUBAGENTS_NO_STORE) return;
+            String id = "m-" + child;
+            reports.add(id);
+            write(new java.io.File(storeRoot(), "messages/" + id + ".json"), new JSONObject().put("id", id)
+                    .put("sender", child).put("recipient", currentSession).put("content", "result of " + child));
+            readFlags.put(id, delivered);
+            writeRead();
+        }
+
+        final JSONObject readFlags = new JSONObject();
+
+        void markRead() throws Exception {
+            if (scenario == Scenario.SUBAGENTS_NO_STORE) return;
+            for (String id : reports) readFlags.put(id, true);
+            writeRead();
+        }
+
+        void writeRead() throws IOException {
+            write(new java.io.File(storeRoot(), "messages/read.json"), readFlags);
+        }
+
+        void usage() throws IOException {
+            update(new JSONObject().put("sessionUpdate", "usage_update").put("used", 1).put("size", 10));
+        }
+
+        boolean subagentPrompt() throws Exception {
+            spawn("call-a", "child-a", "Version Checker");
+            spawn("call-b", "child-b", "Battery Checker");
+            if (scenario == Scenario.SUBAGENTS_INLINE) {
+                report("child-a", true);
+                report("child-b", true);
+                chunk("Launched both. ");
+                chunk("Summary: A=17, B=74%. See [log](file:///data/local/agentos/acp/home/.gemini/taku-acp/brain/x/log.txt).");
+                usage();
+                send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "end_turn")));
+                return false;
+            }
+            chunk("Both sub-tasks launched ([`child-a`](conversation://child-a)). Waiting for results.");
+            usage();
+            send(new JSONObject().put("id", promptId).put("result", new JSONObject().put("stopReason", "end_turn")));
+            promptStarted.countDown();
+            if (scenario == Scenario.SUBAGENTS_HANG) return false;
+            Thread later = new Thread(() -> {
+                try {
+                    boolean wake = scenario != Scenario.SUBAGENTS_SILENT_PARENT;
+                    Thread.sleep(subagentDelayMillis);
+                    report("child-a", wake);
+                    if (wake) {
+                        chunk("\n\nSub-task A finished (17). Waiting for B.");
+                        usage();
+                    }
+                    Thread.sleep(subagentDelayMillis);
+                    report("child-b", wake);
+                    if (wake) {
+                        update(new JSONObject().put("sessionUpdate", "agent_thought_chunk")
+                                .put("content", new JSONObject().put("type", "text").put("text", "combine")));
+                        chunk("\n\nAll done. Summary: Android 17, battery 74%. Screenshot: ../acp/home/.gemini/taku-acp/brain/s/.system_generated/steps/12/media_0.png");
+                        usage();
+                    }
+                    // A PipedInputStream reports "write end dead" once its last writer thread exits.
+                    while (!destroyed) Thread.sleep(20);
+                } catch (Exception ignored) {
+                    // The client went away.
+                }
+            }, "fake-subagents");
+            later.setDaemon(true);
+            later.start();
+            return false;
+        }
+
         boolean prompt() throws Exception {
+            if (scenario.name().startsWith("SUBAGENTS")) return subagentPrompt();
             switch (scenario) {
                 case PROMPT_AUTH:
                     send(new JSONObject().put("id", promptId).put("error", new JSONObject().put("code", -32000).put("message", "Authentication required")));

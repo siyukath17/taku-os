@@ -193,6 +193,65 @@ thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall
   `cancel` marker; `AcpRuntime` then sends `session/cancel`, reclaims the agent after
   `cancelGraceMillis` and closes the turn `interrupted`, the task `cancelled`.
 
+## Asynchronous subagents (`invoke_subagent`)
+
+**Measured protocol (Pixel 9, agy android_arm64 1.5.14, 2026-11-22, raw probes over `adb shell` stdio).**
+`invoke_subagent` reports `tool_call` → `tool_call_update completed` as soon as the child is
+*created*; the child runs in the same agy process. When the children finish quickly, agy waits
+inside the parent's turn and the summary arrives before the `session/prompt` reply. When they take
+longer, the parent's `session/prompt` answers `end_turn` while they still run ("Waiting for both
+results…"). Later, each child's report wakes the parent **by itself**: agy streams more
+`session/update`s (`agent_thought_chunk`, `agent_message_chunk`, each wake-up ending with a
+`usage_update`) with **no request, no `session/prompt` reply and no end marker**. If the client
+closes stdin after `end_turn`, the children die with the process (the earlier failure: the summary
+never came).
+
+Second cause found by the same probe: agy routes only the *parent's* approvals through
+`session/request_permission`. A child's `run_command` approval has no ACP route, so in `default` mode
+the child waits forever in `waiting_for_input` (seen via `manage_subagents`) and never reports, even
+across a follow-up prompt. With `--dangerously-skip-permissions` the same children finished and the
+parent woke and summarized unprompted.
+
+**What the runtime does.**
+
+- `permissionMode: "full"` tasks start agy with `--dangerously-skip-permissions`
+  (`runtime.json "acp.autoApprove": false` turns it off). Full mode already answers every parent
+  approval with allow, so this only extends the same policy to subagents; agy still blocks its system
+  command denylist. Restricted modes and sign-in/catalog launches never get the flag.
+- After `end_turn`, if the task saw a completed `invoke_subagent`, the agent stays alive and its
+  unsolicited updates keep streaming into the chat turn (still `inProgress`), `progress.json`
+  (`phase: "subagents"`, `subagents`, `subagentsDone`) and the island ("Waiting for sub-tasks",
+  "Sub-tasks 1/2"). Each wake-up starts a new chat message, so the summary is the final answer.
+- Completion comes from agy's own store, read-only (`AcpSubagents`):
+  `$HOME/.gemini/<appDataDir>/brain/<sessionId>/.system_generated/` → `subagents/<child>.json`
+  (children; their `state` stays `SUBAGENT_STATE_ALIVE`, so it is not a completion signal),
+  `messages/<id>.json` (`sender` = child: its report) and `messages/read.json` (`{id: true}` once the
+  parent consumed it). Children present before the turn (resumed session) are ignored. The wait ends
+  when every child started in this task has reported, every report was delivered, the parent wrote
+  reply text after the newest report, and it then stayed silent for `subagentSettleMillis` (6 s).
+- A report the parent has not answered after `subagentNudgeMillis` (20 s) of silence gets one
+  follow-up `session/prompt` in the same session asking for the combined answer.
+- Without a readable store (another agy layout) the wait ends after `subagentIdleMillis` (5 min) of
+  parent silence.
+- `cancel` sends `session/cancel` (no prompt is pending, so nothing confirms it), drains briefly and
+  reclaims the process; the fixed `turnLimitMillis` budget from the turn's start does the same and
+  ends the task as a timeout. Either way the process is destroyed (stdin closed, then killed after
+  the grace period), so no agy process outlives the task.
+
+## Tool labels and internal paths
+
+`AcpToolLabels` turns agy's tool calls into display labels: chat items keep `tool` as a canonical
+id (`taku_phone__<tool>` with `namespace: "taku_phone"`, or agy's bare name such as
+`invoke_subagent`), add `toolName` (agy's own name, diagnostics only) and `title` (label in the
+broker's locale). `progress.json "tool"` is the label and `"toolKey"` the id; the island shows the
+label itself. The chat page (`agent-app` `session.ts`) translates the ids (e.g. `device_info` →
+读取设备信息, `request_apps` → 申请后台专屏, `screenshot` → 查看屏幕, `tap` → 点击屏幕,
+`release_apps` → 释放后台专屏, `invoke_subagent` → 派发子任务). agy's terminal-style titles
+("Run mcp_taku_phone_tap", "File ../acp/home/.gemini/…/media_0.png") are never shown. Agent text,
+tool arguments, results, errors and task results are sanitized: Markdown links to internal files or
+`conversation://` subagent links keep only their text, and internal paths (`/data/local/agentos/…`,
+`…/acp/home/…`, `.gemini/…`) become their file name or `[internal file]`.
+
 ## Model picker without Codex
 
 While new chat turns route to ACP (`RuntimeRouter.newConversation()`: env / `runtime.json`

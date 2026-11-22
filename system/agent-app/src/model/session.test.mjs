@@ -26,6 +26,23 @@ test('chat and task records share native identities; commentary belongs to its f
   assert.equal(result.blocks[1].activity[1].titleKey, 'openApp');
 });
 
+test('on-device ACP agent tools show translated labels, never raw agent names', () => {
+  const result = projectSession({thread: {id: 'thread-1', turns: [{id: 'turn-1', status: 'completed', items: [
+    {id: 'u', type: 'userMessage', content: [{type: 'text', text: 'Do two things'}]},
+    {id: 't1', type: 'mcpToolCall', server: 'agy', tool: 'taku_phone__device_info', namespace: 'taku_phone', toolName: 'mcp_taku_phone_device_info', title: '读取设备信息', status: 'completed'},
+    {id: 't2', type: 'mcpToolCall', server: 'agy', tool: 'taku_phone__request_apps', namespace: 'taku_phone', status: 'completed'},
+    {id: 't3', type: 'mcpToolCall', server: 'agy', tool: 'invoke_subagent', toolName: 'invoke_subagent', title: '派发子任务', status: 'completed'},
+    {id: 't4', type: 'mcpToolCall', server: 'agy', tool: 'taku_phone__future_tool', namespace: 'taku_phone', status: 'completed'},
+    {id: 't5', type: 'mcpToolCall', server: 'agy', tool: 'brand_new_tool', status: 'completed'},
+    {id: 't6', type: 'mcpToolCall', server: 'agy', tool: 'Open Settings', title: 'Open Settings', status: 'completed'},
+    {id: 't7', type: 'mcpToolCall', server: 'agy', tool: 'taku_phone__screenshot', namespace: 'taku_phone', status: 'completed'},
+    {id: 'a', type: 'agentMessage', phase: 'final_answer', text: 'Done.'},
+  ]}]}, native: {}, historyComplete: true});
+  const activity = result.blocks[1].activity;
+  assert.deepEqual(activity.map(a => a.titleKey), ['deviceInfo', 'requestApps', 'invokeSubagent', 'phoneTool', 'tool', 'tool', 'screenshot']);
+  assert.deepEqual(activity.map(a => a.name), ['', '', '', '', '', 'Open Settings', '']);
+});
+
 test('private reasoning and credential records are never conversation text', () => {
   const result = projectSession({thread: {id: 't', turns: [{id: '1', status: 'completed', items: [
     {id: 'r', type: 'reasoning', text: 'private thought'},

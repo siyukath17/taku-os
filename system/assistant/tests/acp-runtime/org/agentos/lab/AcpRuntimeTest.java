@@ -88,8 +88,9 @@ public final class AcpRuntimeTest {
         check(!result.getString("message").contains("LEAK"), "normal: other sessions' updates are ignored");
 
         AcpProcessTransport.Launch launch = agent.launches.get(0);
-        check(launch.command.equals(List.of("/data/local/agentos/acp/bin/agy", "acp", "--app-data-dir", "taku-acp")),
-                "launch: binary, acp subcommand and --app-data-dir, got " + launch.command);
+        // A full-mode task gives agy's subagents the same policy (their approvals have no ACP route).
+        check(launch.command.equals(List.of("/data/local/agentos/acp/bin/agy", "acp", "--app-data-dir", "taku-acp", "--dangerously-skip-permissions")),
+                "launch: binary, acp subcommand, --app-data-dir and the full-mode approval flag, got " + launch.command);
         check("/data/local/agentos/acp/home".equals(launch.env.get("HOME")), "launch: HOME is the agent's own home");
         check("http://127.0.0.1:7890".equals(launch.env.get("HTTPS_PROXY")), "launch: HTTPS_PROXY is forwarded");
         check("1".equals(launch.env.get("AGY_DISABLE_AUTO_UPDATE")) && "1".equals(launch.env.get("DISABLE_AUTO_UPDATE")),

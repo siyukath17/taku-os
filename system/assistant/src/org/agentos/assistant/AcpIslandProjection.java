@@ -94,6 +94,7 @@ public final class AcpIslandProjection {
                 && !auth.optString("loginMethod").isEmpty();
         String title, trailing, emphasis = "normal";
         double relevance = .5;
+        Double ratioOverride = null;
         boolean alert = false;
         switch (status) {
             case "running":
@@ -101,8 +102,19 @@ public final class AcpIslandProjection {
                     case "thinking": title = "Taku is thinking"; trailing = "Thinking"; break;
                     case "tool": {
                         String tool = progress == null ? "" : progress.optString("tool");
-                        title = tool.isEmpty() ? "Taku is using a tool" : "Using " + tool;
+                        // With "toolKey" (ACP), "tool" is already a display label (AcpToolLabels), never agy's
+                        // raw name; other runtimes report the tool itself (e.g. a command).
+                        boolean label = progress != null && !progress.optString("toolKey").isEmpty();
+                        title = tool.isEmpty() ? "Taku is using a tool" : label ? tool : "Using " + tool;
                         trailing = toolCounter(progress);
+                        break;
+                    }
+                    case "subagents": {
+                        int total = progress == null ? 0 : progress.optInt("subagents", 0);
+                        int done = progress == null ? 0 : Math.min(total, progress.optInt("subagentsDone", 0));
+                        title = total > 0 && done >= total ? "Sub-tasks finished" : "Waiting for sub-tasks";
+                        trailing = total > 0 && total <= 99 ? "Sub-tasks " + done + "/" + total : "Sub-tasks";
+                        if (total > 0) ratioOverride = done / (double) total;
                         break;
                     }
                     case "replying": title = "Taku is writing the result"; trailing = "Writing"; break;
@@ -146,7 +158,7 @@ public final class AcpIslandProjection {
                 return null; // Unknown state: keep the plain notification.
         }
         JSONObject progressSlot = new JSONObject().put("type", "progress");
-        Double ratio = planRatio(progress == null ? "" : progress.optString("plan"));
+        Double ratio = ratioOverride != null ? ratioOverride : planRatio(progress == null ? "" : progress.optString("plan"));
         if (!running) progressSlot.put("value", 1);
         else if (ratio != null) progressSlot.put("value", ratio);
         JSONArray actions = new JSONArray();
