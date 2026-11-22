@@ -100,9 +100,7 @@ final class PhoneGestures {
         return (Integer)value;
     }
     private static String owner(JSONObject call) throws Exception {
-        String thread=call.optString("threadId"),turn=call.optString("turnId");
-        if(!thread.matches("[a-f0-9-]{36}") || !turn.matches("[a-f0-9-]{36}"))throw new IOException("Current task and execution turn are missing");
-        return thread+"\n"+turn;
+        return GestureOwners.of(call.optString("threadId"),call.optString("turnId"));
     }
     static JSONObject touch(JSONObject call,int display,JSONObject args) throws Exception {
         return guarded(display,()->{
