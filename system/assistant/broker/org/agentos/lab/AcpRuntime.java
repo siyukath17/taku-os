@@ -208,7 +208,7 @@ final class AcpRuntime implements TaskRuntime {
      * Where one task's time went, from the broker taking the request to its end: written into
      * runtime-info.json as {@code timings} and summed up in one broker.log line per task. Plain
      * nanoTime stamps on the turn's own thread, no extra I/O except a runtime-info rewrite on the first
-     * update / text / tool of the prompt. Unset values are left out ({@code promptToFirstToolMs} is
+     * model output / text / tool of the prompt. Unset values are left out ({@code promptToFirstToolMs} is
      * null when the turn called no tool).
      *
      * <ul>
@@ -221,7 +221,8 @@ final class AcpRuntime implements TaskRuntime {
      *     model / effort {@code session/set_config_option}; {@code totalPrepMs}: taken to
      *     {@code session/prompt} sent.
      * <li>{@code promptToFirstChunkMs} / {@code promptToFirstTextMs} / {@code promptToFirstToolMs}: the
-     *     prompt to the first {@code session/update}, the first visible reply text, the first tool call.
+     *     prompt to the first model output (non-blank thought or reply text, or a tool call; status
+     *     updates do not count), the first visible reply text, the first tool call.
      * <li>{@code turnTotalMs}: taken to finished.
      * </ul>
      */
@@ -251,14 +252,23 @@ final class AcpRuntime implements TaskRuntime {
             totalPrepMs = TimeUnit.NANOSECONDS.toMillis(promptSent - claimed);
         }
 
-        /** True when this update set a first-* value (runtime-info is then rewritten once). */
-        boolean update(String kind, boolean visibleText) {
+        /**
+         * True when this update set a first-* value (runtime-info is then rewritten once). Only model
+         * output counts: a non-blank thought or reply chunk, or a tool call. agy answers
+         * {@code session/prompt} with status updates (commands, mode, usage, plan, empty chunks) within a
+         * millisecond, which would pin {@code promptToFirstChunkMs} near zero and say nothing about the model.
+         */
+        boolean update(String kind, JSONObject content) {
             if (promptSent == 0) return false;
+            boolean text = content != null && "text".equals(content.optString("type")) && !content.optString("text").isBlank();
+            boolean reply = text && "agent_message_chunk".equals(kind);
+            boolean tool = "tool_call".equals(kind);
+            if (!reply && !tool && !(text && "agent_thought_chunk".equals(kind))) return false;
             long since = millisSince(promptSent);
             boolean changed = false;
             if (promptToFirstChunkMs < 0) { promptToFirstChunkMs = since; changed = true; }
-            if (visibleText && promptToFirstTextMs < 0) { promptToFirstTextMs = since; changed = true; }
-            if ("tool_call".equals(kind) && promptToFirstToolMs < 0) { promptToFirstToolMs = since; changed = true; }
+            if (reply && promptToFirstTextMs < 0) { promptToFirstTextMs = since; changed = true; }
+            if (tool && promptToFirstToolMs < 0) { promptToFirstToolMs = since; changed = true; }
             return changed;
         }
 
@@ -1643,9 +1653,7 @@ final class AcpRuntime implements TaskRuntime {
             if (update == null) return;
             lastUpdate = System.nanoTime();
             String kind = update.optString("sessionUpdate");
-            JSONObject firstContent = update.optJSONObject("content");
-            if (timings.update(kind, "agent_message_chunk".equals(kind) && firstContent != null
-                    && "text".equals(firstContent.optString("type")) && !firstContent.optString("text").isBlank())) writeInfo();
+            if (timings.update(kind, update.optJSONObject("content"))) writeInfo();
             // Children run while the parent is still in its turn: their cards follow from the first update on.
             refreshSubagentCards(false);
             switch (update.optString("sessionUpdate")) {

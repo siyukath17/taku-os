@@ -455,8 +455,47 @@ public final class AcpWarmPoolTest {
         check(sent.equals(List.of("a", "b", "a")), "in order, one pending update per task: " + sent);
     }
 
+    private static JSONObject text(String value) {
+        return new JSONObject().put("type", "text").put("text", value);
+    }
+
+    /**
+     * promptToFirstChunkMs counts model output only: agy's immediate status updates (commands, mode,
+     * usage, plan, empty or blank chunks) leave it unset; the first non-blank thought, reply or tool call sets it.
+     */
+    static void firstChunkIsModelOutput() throws Exception {
+        AcpRuntime.Timings before = new AcpRuntime.Timings();
+        check(!before.update("agent_message_chunk", text("early")), "nothing is timed before the prompt is sent");
+        String[] status = {"available_commands_update", "current_mode_update", "usage_update", "plan", "tool_call_update",
+                "user_message_chunk", "config_option_update"};
+        for (String first : new String[] {"agent_thought_chunk", "agent_message_chunk", "tool_call"}) {
+            AcpRuntime.Timings t = new AcpRuntime.Timings();
+            t.promptSent();
+            for (String kind : status) check(!t.update(kind, null), first + ": status update " + kind + " is not a first chunk");
+            check(!t.update("user_message_chunk", text("echo")), first + ": the user's echoed prompt is not model output");
+            check(!t.update("agent_thought_chunk", text("")) && !t.update("agent_message_chunk", text("  \n")),
+                    first + ": empty / blank chunks are not model output");
+            check(!t.update("agent_message_chunk", new JSONObject().put("type", "image")), first + ": a non-text chunk is not text");
+            check(t.promptToFirstChunkMs < 0 && t.promptToFirstTextMs < 0 && t.promptToFirstToolMs < 0,
+                    first + ": status updates leave every first-* unset");
+            Thread.sleep(3);
+            check(t.update(first, "tool_call".equals(first) ? null : text("hi")), first + ": sets a first-* value");
+            check(t.promptToFirstChunkMs >= 3, first + ": promptToFirstChunkMs is timed at the first model output: " + t.promptToFirstChunkMs);
+            check((t.promptToFirstTextMs >= 0) == "agent_message_chunk".equals(first), first + ": firstText only for reply text");
+            check((t.promptToFirstToolMs >= 0) == "tool_call".equals(first), first + ": firstTool only for a tool call");
+            long chunk = t.promptToFirstChunkMs;
+            Thread.sleep(2);
+            t.update("agent_message_chunk", text("reply"));
+            t.update("tool_call", null);
+            check(t.promptToFirstChunkMs == chunk && t.promptToFirstTextMs >= chunk && t.promptToFirstToolMs >= chunk,
+                    first + ": later output keeps the first chunk and fills text / tool: " + t.toJson());
+            check(!t.update("agent_message_chunk", text("more")) && !t.update("tool_call", null), first + ": set once");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         PhoneTurnLog.install();
+        firstChunkIsModelOutput();
         reuseAcrossTurns();
         prewarmThenFirstTurn();
         takeWaitsForWarming();

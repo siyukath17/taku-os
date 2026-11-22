@@ -176,16 +176,19 @@ keeps **one** warm process (~240MB) between turns:
   cold. `runtime-info.json` records `agentProcess: warm|cold`.
 - **Timings.** `runtime-info.json` carries `timings` (milliseconds; unset keys are left out,
   `promptToFirstToolMs` is `null` when no tool was called), rewritten when the prompt is sent, on
-  the first update / text / tool and at the end:
+  the first model output / text / tool and at the end:
   `poolState` (`warm_hit` an idle warm process taken at once, `waited_prewarm` a warm-up in flight
   awaited, `cold_start` a new process), `warmWaitMs` (getting the process: the wait or the spawn),
   `pingMs` (the warm probe), `initializeMs` (a cold handshake), `claimDelayMs` (the request's `ready`
   mark to the broker taking it), `sessionPrepareMs` (`session/load` or `session/new`),
   `configOptionMs` (model / effort `session/set_config_option`), `totalPrepMs` (taken to
-  `session/prompt` sent), `promptToFirstChunkMs` (to the first `session/update`),
+  `session/prompt` sent), `promptToFirstChunkMs` (to the first model output: a non-blank thought
+  or reply chunk, or a tool call; agy's immediate status updates do not count),
   `promptToFirstTextMs` (to the first visible reply text), `promptToFirstToolMs`, `turnTotalMs`.
   Each task also ends with one broker.log line:
   `acp turn <id> <status> pool=… wait=… ping=… init=… claim=… session=… config=… prep=… firstChunk=… firstText=… firstTool=… total=… (ms)`.
+  `scripts/acp-ttft-report.py --device <serial>` (read-only adb) or `--log <broker.log>` sums
+  these up: per-turn table, prewarm reasons and outcomes, warm-hit rate, P50/P90.
 - **Validity.** Same command line, environment and cwd (fingerprint), and the same
   stamp: agy binary size/mtime, runtime.json and `acp-login.json`. A changed stamp
   retires the process; another permission mode (another command line) runs cold and
