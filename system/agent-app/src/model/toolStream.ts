@@ -3,6 +3,22 @@
  * step, with its natural name, state and duration. Pure, so the tests read it without React.
  */
 import type {Activity} from './session.ts';
+import {firstLine} from './subagents.ts';
+
+/**
+ * What the agent says between its tool calls (a commentary `agentMessage`, e.g. "派发了两个子任务，等待回报"):
+ * a progress note in the stream, not a step. It shows its own words instead of a generic "Update"
+ * row, and is left out of the step count.
+ */
+export function isStatusNote(item: Pick<Activity, 'type'>): boolean {
+  return item.type === 'agentMessage';
+}
+
+/** The note's one-line text: the first line of substance of its Markdown, clipped. */
+export function statusNoteLine(text: string, max = 140): string {
+  const line = firstLine(text).replace(/\s+/g, ' ').trim();
+  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+}
 
 export interface ToolStreamSummary {
   total: number;
@@ -15,7 +31,8 @@ export interface ToolStreamSummary {
   spanMs: number | null;
 }
 
-export function toolStreamSummary(items: readonly Activity[], now: number): ToolStreamSummary {
+export function toolStreamSummary(all: readonly Activity[], now: number): ToolStreamSummary {
+  const items = all.filter(item => !isStatusNote(item));
   const running = items.filter(item => item.status === 'running' || item.status === 'waiting').length;
   const failed = items.filter(item => item.status === 'failed').length;
   const stopped = items.filter(item => item.status === 'stopped').length;

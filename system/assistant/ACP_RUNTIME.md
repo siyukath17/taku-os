@@ -183,7 +183,10 @@ thread/turn/item shape (`userMessage`, `agentMessage` with `phase`, `mcpToolCall
   ACP. Because no Codex thread exists behind it, native-RPC `thread/read` (submit precheck, history
   refresh) is answered from the store and `state.ready` is true for it even without the app server.
   With Codex selected (the default), thread/start is unchanged. Renaming a standalone conversation
-  (`thread/name/set`) still goes to the app server and fails.
+  (`agent_control thread/name/set`, `AcpCodexGate.renamesWithoutCodex`) stores the trimmed title
+  (1–120 characters) in its store record (`name`) without starting or asking Codex, republishes the
+  projection (so `thread/list`, `thread/read` and `thread/name/get` show it) and answers
+  `{threadId, loaded:true, runtime:"acp", thread}`; every other conversation keeps the Codex path.
 - **Stop.** The chat page derives the active turn from the streamed `inProgress` ACP turn
   (`acp-<uuid>`) and sends `interrupt`; the gateway hands an `acp-` turn to the broker op
   `acpInterrupt` instead of Codex `turn/interrupt` (which answered `TURN_CHANGED`). `liveTask`
@@ -277,6 +280,12 @@ label itself. The chat page (`agent-app` `session.ts`) translates the ids (e.g. 
 tool arguments, results, errors and task results are sanitized: Markdown links to internal files or
 `conversation://` subagent links keep only their text, and internal paths (`/data/local/agentos/…`,
 `…/acp/home/…`, `.gemini/…`) become their file name or `[internal file]`.
+Internal tool identifiers in prose (`mcp_taku_phone_device_info`, `mcp__taku_phone__tap`,
+`taku_phone.open_app`, squashed `mcptakuphonedeviceinfo`) read as the tool's label in the
+broker's locale: in subagent cards (goal, report, summary) together with agy's own tool keys
+(`invoke_subagent` → 派发子任务), in chat messages only the unambiguous taku_phone ones. The agent's
+words between tool calls (commentary `agentMessage`) show in the tool stream as a quiet
+"Status update / 进度同步" note with their own first line, not as a counted step.
 
 ## Model picker without Codex
 

@@ -5,7 +5,7 @@ import {textFor, type Language, type TextKey} from '../i18n';
 import {chatColors, chatType, themedStyles} from '../chat/chatTheme';
 import type {Activity} from '../model/session';
 import {formatClock, formatDuration} from '../model/subagents';
-import {cleanToolDetail, toolStepElapsed, toolStreamSummary, visibleToolSteps} from '../model/toolStream';
+import {cleanToolDetail, isStatusNote, statusNoteLine, toolStepElapsed, toolStreamSummary, visibleToolSteps} from '../model/toolStream';
 import {Icon} from './Icon';
 import {PulseDot, useNow} from './SubagentCards';
 
@@ -26,7 +26,37 @@ function StepMark({status}: {status: Activity['status']}) {
   return <View style={styles.mark}><Icon name="check" size={13} color={chatColors.success}/></View>;
 }
 
+/**
+ * The agent's own words between steps ("Dispatched two sub-tasks; waiting for their reports"): a
+ * quiet note under a small "Status update" caption, not a checked step. Opens to the full message
+ * when it is longer than its line.
+ */
+function StatusNote({item, language}: {item: Activity; language: Language}) {
+  const t = textFor(language), [open, setOpen] = useState(false);
+  const line = item.name || statusNoteLine(item.text);
+  const full = item.text.trim();
+  const more = !!full && full !== line;
+  return <View>
+    <Pressable testID={`status-note-${item.id}`} accessibilityRole={more ? 'button' : 'text'} accessibilityState={more ? {expanded: open} : undefined}
+      accessibilityLabel={`${t('statusNote')}: ${line}`} disabled={!more}
+      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setOpen(!open); }}
+      style={({pressed}) => [styles.note, pressed && styles.pressed]}>
+      <View style={styles.mark}><View style={styles.noteMark}/></View>
+      <View style={styles.noteBody}>
+        <Text numberOfLines={1} style={[chatType.bodySm(language === 'zh'), styles.noteCaption]}>{t('statusNote')}</Text>
+        {!!line && <Text numberOfLines={open ? undefined : 2} style={[chatType.bodySm(containsChinese(line)), styles.noteText]}>{open ? full : line}</Text>}
+      </View>
+      <View style={styles.chevron}>{more && <Icon name={open ? 'chevron_down' : 'chevron_right'} size={12} color={chatColors.textTertiary}/>}</View>
+    </Pressable>
+  </View>;
+}
+
 function ToolStep({item, language, now}: {item: Activity; language: Language; now: number}) {
+  if (isStatusNote(item)) return <StatusNote item={item} language={language}/>;
+  return <ToolCallStep item={item} language={language} now={now}/>;
+}
+
+function ToolCallStep({item, language, now}: {item: Activity; language: Language; now: number}) {
   const t = textFor(language), [open, setOpen] = useState(false);
   const name = item.name || t(item.titleKey as TextKey);
   const detail = item.text ? cleanToolDetail(item.text) : '';
@@ -97,6 +127,11 @@ const styles = themedStyles(() => StyleSheet.create({
   chevron: {width: 12, alignItems: 'center', flexShrink: 0},
   detail: {marginLeft: 34, marginRight: 10, marginBottom: 6, padding: 8, borderRadius: 6, backgroundColor: chatColors.surfaceSunken,
     color: chatColors.textSecondary, fontFamily: 'TakuCode', fontSize: 11.5, lineHeight: 16},
+  note: {flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 30, paddingHorizontal: 10, paddingVertical: 5},
+  noteMark: {width: 5, height: 5, borderRadius: 2.5, backgroundColor: chatColors.textTertiary},
+  noteBody: {flex: 1, minWidth: 0, gap: 1},
+  noteCaption: {color: chatColors.textTertiary, fontSize: 11, lineHeight: 14},
+  noteText: {color: chatColors.textSecondary},
   earlier: {flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 24, paddingHorizontal: 10},
   rail: {width: 16, alignItems: 'center', height: 1, backgroundColor: chatColors.line},
   earlierText: {color: chatColors.textTertiary},

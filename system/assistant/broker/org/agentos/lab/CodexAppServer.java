@@ -156,7 +156,7 @@ public final class CodexAppServer implements AutoCloseable {
         boolean cancel = !input.getString("action").equals("read");
         LiveTask task = new LiveTask(input);
         if (replace && !task.request.optString("permissionMode").equals("readOnly")) throw new IOException("LIVE_TASK_NOT_READ_ONLY");
-        if (AcpTurnControl.acpTask(AcpConversations.STORE, task.directory, task.thread, task.turn)) return acpLiveTask(task, cancel);
+        if (AcpConversations.ownsTask(task.directory, task.thread, task.turn)) return acpLiveTask(task, cancel);
         CodexAppServer server = shared;
         JSONObject goal = null;
         if (cancel && !task.terminal) {
@@ -207,7 +207,7 @@ public final class CodexAppServer implements AutoCloseable {
         try (CleanupWork.Held held = NativeBridge.lock()) {
             JSONObject result = task.snapshot(null);
             if (!cancel || task.terminal || !task.state.equals("queued") && !task.state.equals("running")) return result;
-            AcpTurnControl.cancel(AcpConversations.STORE, new File(TaskBroker.ROOT, "tasks"), task.thread, task.id, task.turn);
+            AcpConversations.cancelTask(task.thread, task.id, task.turn);
             return result.put("goalActive", false).put("cancellationRequested", true);
         }
     }
@@ -678,6 +678,13 @@ public final class CodexAppServer implements AutoCloseable {
                 TaskBroker.write(new File(directory, "done"), "control");
                 return;
             }
+            if (AcpConversations.servesRename(request)) {
+                // A standalone ACP conversation has no Codex thread: its title lives in the ACP store.
+                answer.put("ok", true).put("result", AcpConversations.rename(request.getJSONObject("params")));
+                TaskBroker.write(new File(directory, "response.json"), answer.toString());
+                TaskBroker.write(new File(directory, "done"), "control");
+                return;
+            }
             if ("thread/start".equals(method) && AcpConversations.startsOnAcp()) {
                 // Chat turns run on ACP: the broker owns the new conversation; the Codex app server
                 // is neither started nor asked (runtime.json default "codex" never takes this path).
@@ -688,11 +695,11 @@ public final class CodexAppServer implements AutoCloseable {
             }
             CodexAppServer server;
             try {
-                server = AcpCodexGate.listsWithoutCodex(method, shared != null ? null : TaskBroker.router().newConversation(), shared != null)
+                server = AcpConversations.listsWithoutCodex(method, shared != null)
                         ? null : shared("control:" + method);
             } catch (Exception unavailable) {
                 // ACP conversations stay listable while the Codex app server cannot start.
-                if (!"thread/list".equals(method) || AcpConversations.STORE.ids().isEmpty()) throw unavailable;
+                if (!"thread/list".equals(method) || !AcpConversations.any()) throw unavailable;
                 server = null;
             }
             JSONObject params = request.optJSONObject("params");

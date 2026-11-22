@@ -22,9 +22,16 @@ import java.io.File;
  *       thread/start} creates the conversation here instead of in the Codex app server
  *       (a <em>standalone</em> conversation); {@link #nativeRead} answers native-RPC thread/read for
  *       it, since no Codex thread exists behind it.</li>
+ *   <li>{@link #servesRename}/{@link #rename}: {@code agent_control thread/name/set} of a standalone
+ *       conversation stores the title here ({@link AcpConversationStore#rename}); Codex is not
+ *       started or asked.</li>
  *   <li>{@link #interrupt} stops a running ACP chat turn (chat page stop button) through the
  *       task's cancel marker ({@link AcpTurnControl}).</li>
  * </ul>
+ *
+ * <p>This class is the only ACP seam of {@link CodexAppServer} and {@link NativeBridge}: they ask it,
+ * never the store, router or catalog directly, so their host tests replace ACP with one double that
+ * answers "not ACP".
  */
 final class AcpConversations {
     private AcpConversations() {}
@@ -34,7 +41,7 @@ final class AcpConversations {
     static JSONObject overlay(JSONObject thread) throws Exception {
         String id = thread.optString("id");
         if (!STORE.owns(id)) return thread;
-        return AcpConversationStore.overlay(thread, STORE.turns(id));
+        return STORE.project(thread, id);
     }
 
     /** Republish the conversation's projection (native view + ACP turns). */
@@ -112,9 +119,58 @@ final class AcpConversations {
         return "thread/read".equals(method) && params != null && STORE.standalone(params.optString("threadId"));
     }
 
+    /** True when {@code agent_control thread/name/set} is answered here ({@link AcpCodexGate#renamesWithoutCodex}). */
+    static boolean servesRename(JSONObject request) {
+        return AcpCodexGate.renamesWithoutCodex(request.optString("method"), request.optJSONObject("params"), STORE);
+    }
+
+    /** Stores a standalone conversation's title and republishes its projection (thread/list, thread/read). */
+    static JSONObject rename(JSONObject params) throws Exception {
+        String id = params.getString("threadId");
+        STORE.rename(id, params.optString("name"));
+        changed(id);
+        JSONObject view = AgentViews.snapshot(id);
+        return AcpConversationStore.renameAnswer(id, view != null ? view : AcpConversationStore.seed(id, STORE.read(id)));
+    }
+
     /** Chat page stop of a running ACP turn ({@code turnId} {@code acp-...}). */
     static JSONObject interrupt(String threadId, String turnId) throws Exception {
         return AcpTurnControl.interrupt(STORE, TaskBroker.TASKS, threadId, turnId);
+    }
+
+    /** True for a conversation the broker started on ACP (no Codex thread behind it). */
+    static boolean standalone(String id) {
+        return STORE.standalone(id);
+    }
+
+    /** True when any ACP conversation exists (thread/list stays answerable without Codex). */
+    static boolean any() {
+        return !STORE.ids().isEmpty();
+    }
+
+    /** True when {@code method} is answered without starting Codex ({@link AcpCodexGate#listsWithoutCodex}). */
+    static boolean listsWithoutCodex(String method, boolean codexRunning) throws Exception {
+        return AcpCodexGate.listsWithoutCodex(method, codexRunning ? null : TaskBroker.router().newConversation(), codexRunning);
+    }
+
+    /** True when the live task (chat page, liveTask) is an ACP turn of this conversation ({@link AcpTurnControl#acpTask}). */
+    static boolean ownsTask(File taskDir, String threadId, String turnId) {
+        return AcpTurnControl.acpTask(STORE, taskDir, threadId, turnId);
+    }
+
+    /** Cancels a queued or running ACP task of this conversation ({@link AcpTurnControl#cancel}). */
+    static void cancelTask(String threadId, String taskId, String turnId) throws Exception {
+        AcpTurnControl.cancel(STORE, TaskBroker.TASKS, threadId, taskId, turnId);
+    }
+
+    /** Native-RPC model/list on ACP without Codex, else null ({@link AcpModelCatalog#nativeAnswer}). */
+    static JSONObject nativeModels(String method) throws Exception {
+        return AcpModelCatalog.nativeAnswer(method, TaskBroker.router().newConversation(), TaskBroker.ACP_MODELS);
+    }
+
+    /** Native {@code acpRuntime} control: ACP runtime settings and sign-in ({@link TaskBroker#acpRuntimeControl}). */
+    static JSONObject runtimeControl(JSONObject input) throws Exception {
+        return TaskBroker.acpRuntimeControl(input);
     }
 
     /** Phone-tool sessions of ACP turns seen by this broker process (chat or background). */

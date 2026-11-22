@@ -27,8 +27,9 @@ import java.util.Locale;
  * }
  * </pre>
  *
- * Every text is passed through {@link AcpRuntime#redact} and {@link AcpToolLabels#sanitize}, so no
- * agent-internal path, conversation link or credential reaches the page.
+ * Every text is passed through {@link AcpRuntime#redact}, {@link AcpToolLabels#sanitize} and
+ * {@link AcpToolLabels#humanize}, so no agent-internal path, conversation link, credential or tool
+ * identifier ({@code mcp_taku_phone_device_info}) reaches the page.
  */
 final class AcpSubagentCards {
     private AcpSubagentCards() {}
@@ -68,7 +69,7 @@ final class AcpSubagentCards {
     static boolean merge(JSONObject card, AcpSubagents.Child child, String parentModel, Locale locale) throws Exception {
         String before = card.toString();
         if (card.optString("role").isEmpty() && !child.role.isEmpty()) {
-            String role = clean(child.role, MAX_TITLE).replace('\n', ' ');
+            String role = clean(child.role, MAX_TITLE, locale).replace('\n', ' ');
             card.put("role", role).put("title", role);
         }
         if (card.optString("type").isEmpty() && child.typeName.matches("[A-Za-z0-9_.-]{1,40}")) card.put("type", child.typeName);
@@ -78,7 +79,7 @@ final class AcpSubagentCards {
         }
         if (!"running".equals(card.optString("status"))) return !before.equals(card.toString());
         if (child.reported) {
-            String report = clean(child.report, MAX_REPORT);
+            String report = clean(child.report, MAX_REPORT, locale);
             card.put("report", report).put("summary", summary(report));
             long end = child.reportedMillis > 0 ? child.reportedMillis : System.currentTimeMillis();
             finish(card, "completed", Math.max(end, card.optLong("startedAt")));
@@ -173,10 +174,15 @@ final class AcpSubagentCards {
         return out.trim();
     }
 
-    /** Redacted, internal paths removed, clipped. */
+    /** Redacted, internal paths removed, internal tool names named, clipped (device language). */
     static String clean(String text, int max) {
+        return clean(text, max, Locale.getDefault());
+    }
+
+    static String clean(String text, int max, Locale locale) {
         if (text == null || text.isBlank()) return "";
         String bounded = AcpConversationStore.clip(text.trim(), Math.max(max * 2, 256));
-        return AcpConversationStore.clip(AcpToolLabels.sanitize(AcpRuntime.redact(bounded)).trim(), max);
+        String shown = AcpToolLabels.humanize(AcpToolLabels.sanitize(AcpRuntime.redact(bounded)), locale);
+        return AcpConversationStore.clip(shown.trim(), max);
     }
 }

@@ -20,6 +20,7 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/PhoneConfirmation.java \
  system/assistant/broker/org/agentos/lab/PhoneAskUser.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeTestDoubles.java \
+ system/assistant/tests/acp-doubles/org/agentos/lab/AcpConversationsTestDouble.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeHostServer.java \
  system/assistant/tests/native-routing/org/agentos/lab/AgentViewsTestDouble.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeRoutingTest.java \
@@ -41,6 +42,7 @@ compile_jvm "$task_out/task-ownership" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/PhoneConfirmation.java \
  system/assistant/broker/org/agentos/lab/PhoneAskUser.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeTestDoubles.java \
+ system/assistant/tests/acp-doubles/org/agentos/lab/AcpConversationsTestDouble.java \
  system/assistant/tests/native-routing/org/agentos/lab/AgentViewsTestDouble.java \
  system/assistant/tests/native-routing/org/agentos/lab/CodexTaskOwnershipTest.java
 "$JDK/bin/java" -cp "$task_out/task-ownership:$task_json:$ANDROID_JAR:$KOTLIN_LIB/kotlin-stdlib.jar" org.agentos.lab.CodexTaskOwnershipTest | tee "$task_out/task-ownership-result.txt"

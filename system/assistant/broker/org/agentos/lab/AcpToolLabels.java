@@ -114,6 +114,76 @@ final class AcpToolLabels {
         return zh ? "调用工具" : "Use a tool";
     }
 
+    // ---- internal tool names in prose ----------------------------------------------------------
+
+    /**
+     * A taku_phone tool name as an agent writes it in prose: {@code mcp_taku_phone_device_info},
+     * {@code mcp__taku_phone__tap}, {@code taku_phone.open_app}, and the squashed
+     * {@code mcptakuphonedeviceinfo} some models produce. Group 1 is the tool part.
+     */
+    private static final Pattern PHONE_IN_TEXT = Pattern.compile(
+            "`?(?<![\\w./-])(?:mcp_{0,2})?taku_?phone(?:__|_|\\.|/)?([a-z][a-z0-9_]*)(?![\\w/-]|\\.\\w)(?:\\(\\))?`?",
+            Pattern.CASE_INSENSITIVE);
+    /** A bare snake_case tool key the agent runs (e.g. {@code invoke_subagent}, {@code view_file}). */
+    private static final Pattern KEY_IN_TEXT = Pattern.compile("`?(?<![\\w./-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\\w/-]|\\.\\w)(?:\\(\\))?`?");
+
+    /**
+     * Text for display with agent-internal tool identifiers replaced by their user-facing names in
+     * the device language: "called `mcp_taku_phone_device_info`" → "called Read device info" /
+     * "调用了读取设备信息". Known agent tool keys ({@code invoke_subagent}) read the same way; any other
+     * snake_case word is left alone. Used for subagent cards (goal, report, summary).
+     */
+    static String humanize(String text, Locale locale) {
+        String phoneNamed = humanizePhoneTools(text, locale);
+        boolean zh = chinese(locale);
+        Matcher key = KEY_IN_TEXT.matcher(phoneNamed);
+        StringBuilder out = new StringBuilder();
+        while (key.find()) {
+            String[] pair = LABELS.get(key.group(1));
+            key.appendReplacement(out, Matcher.quoteReplacement(pair == null ? key.group() : unquoted(key.group(), pair[zh ? 1 : 0])));
+        }
+        key.appendTail(out);
+        return out.toString();
+    }
+
+    /**
+     * Only the taku_phone tool identifiers of {@link #humanize}, which never mean anything else: safe
+     * for the agent's chat messages, where a bare {@code read_file} may be the user's own code.
+     */
+    static String humanizePhoneTools(String text, Locale locale) {
+        if (text == null || text.isEmpty()) return text == null ? "" : text;
+        boolean zh = chinese(locale);
+        Matcher phone = PHONE_IN_TEXT.matcher(text);
+        StringBuilder sb = new StringBuilder();
+        while (phone.find()) phone.appendReplacement(sb, Matcher.quoteReplacement(unquoted(phone.group(), phoneLabel(phone.group(1), zh))));
+        phone.appendTail(sb);
+        return sb.toString();
+    }
+
+    /** {@code label} in place of {@code found}; a lone backtick belongs to the surrounding text and stays. */
+    private static String unquoted(String found, String label) {
+        boolean open = found.startsWith("`"), close = found.endsWith("`") && found.length() > 1;
+        if (open == close) return label;
+        return open ? "`" + label : label + "`";
+    }
+
+    /** The label of a phone tool written as {@code device_info} or squashed as {@code deviceinfo}. */
+    private static String phoneLabel(String tool, boolean zh) {
+        String wanted = tool.toLowerCase(Locale.ROOT);
+        String[] pair = LABELS.get(wanted);
+        if (pair == null) {
+            String squashed = wanted.replace("_", "");
+            for (Map.Entry<String, String[]> entry : LABELS.entrySet()) {
+                if (entry.getKey().replace("_", "").equals(squashed)) {
+                    pair = entry.getValue();
+                    break;
+                }
+            }
+        }
+        if (pair != null) return pair[zh ? 1 : 0];
+        return zh ? "手机操作" : "a phone action";
+    }
+
     // ---- internal paths --------------------------------------------------------------------------
 
     /**

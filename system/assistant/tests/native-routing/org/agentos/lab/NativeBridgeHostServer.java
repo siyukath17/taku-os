@@ -14,6 +14,7 @@ final class CodexAppServer {
     volatile ReplyHook replyHook;
     volatile Object failBeforeReply,failAfterReply;
     static CodexAppServer shared() { return shared; }
+    static CodexAppServer shared(String cause) { return shared; }
     static JSONObject liveTask(JSONObject input) { throw new AssertionError("Live task control requires the production runtime"); }
     void nativeReply(Object id,JSONObject reply) throws Exception {
         ReplyHook hook=replyHook;if(hook!=null)hook.beforeReply(id,reply);

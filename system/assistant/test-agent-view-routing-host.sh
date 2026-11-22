@@ -18,6 +18,7 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/WorkspaceAdmissions.java \
  system/assistant/broker/org/agentos/lab/PhoneConfirmation.java \
  system/assistant/broker/org/agentos/lab/PhoneAskUser.java \
+ system/assistant/broker/org/agentos/lab/WorkspaceTextFiles.kt \
  system/assistant/broker/org/agentos/lab/PhoneSubAgents.java \
  system/assistant/broker/org/agentos/lab/AgentViewProjection.java \
  system/assistant/broker/org/agentos/lab/AgentSessionReducer.java \
@@ -27,6 +28,7 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/broker/org/agentos/lab/MainReplySession.kt \
  system/assistant/broker/org/agentos/lab/AgentViews.kt \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeTestDoubles.java \
+ system/assistant/tests/acp-doubles/org/agentos/lab/AcpConversationsTestDouble.java \
  system/assistant/tests/native-routing/org/agentos/lab/NativeBridgeHostServer.java \
  system/assistant/tests/main-reply/org/agentos/lab/MainReplyHostAdapters.java \
  system/assistant/tests/main-reply/android/system/Os.java \

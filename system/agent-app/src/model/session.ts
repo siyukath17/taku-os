@@ -1,4 +1,5 @@
 /** Read-only presentation of native records. The native thread remains authoritative. */
+import {statusNoteLine} from './toolStream.ts';
 import {isStateCardItem, parseUiRequest, type CardPresentation, type MainReply, type UiRequest} from './genui.ts';
 import {parseMainReply} from './genuiCompose.ts';
 import {subagentTask, type SubagentTask} from './subagents.ts';
@@ -141,7 +142,7 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   const short = tool.replace(/^.*(?:__|\/|\.)/, '');
   const phone = tool.startsWith('taku_phone') || item.namespace === 'taku_phone';
   const agent = item.server === 'agy' && !phone;
-  const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || (type === 'agentMessage' ? 'update' : 'tool');
+  const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || (type === 'agentMessage' ? 'statusNote' : 'tool');
   const details: string[] = [];
   for (const value of [item.command, item.aggregatedOutput || outputs[string(item.id)]]) if (typeof value === 'string' && value) details.push(value);
   if (type === 'agentMessage') details.push(string(item.text));
@@ -152,7 +153,7 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   if (error) details.push(error);
   const time = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
   const startedAt = time(item.startedAt), completedAt = time(item.completedAt);
-  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item),
+  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : titleKey === 'statusNote' ? statusNoteLine(string(item.text)) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item),
     ...(startedAt ? {startedAt} : {}), ...(completedAt ? {completedAt} : {})};
 }
 

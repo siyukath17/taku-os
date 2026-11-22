@@ -1283,7 +1283,9 @@ final class AcpRuntime implements TaskRuntime {
                 JSONObject copy = new JSONObject(item.toString());
                 // Agent text can link internal files and subagent conversations (file:///…/.gemini/…,
                 // conversation://…); the whole text is sanitized because chunks split links anywhere.
-                if ("agentMessage".equals(copy.optString("type"))) copy.put("text", AcpToolLabels.sanitize(copy.optString("text")));
+                // Its taku_phone tool identifiers (mcp_taku_phone_tap) read as the tool's name.
+                if ("agentMessage".equals(copy.optString("type")))
+                    copy.put("text", AcpToolLabels.humanizePhoneTools(AcpToolLabels.sanitize(copy.optString("text")), java.util.Locale.getDefault()));
                 if (terminal && "agentMessage".equals(copy.optString("type")))
                     copy.put("phase", copy.getString("id").equals(last) ? "final_answer" : "commentary");
                 if (terminal && "mcpToolCall".equals(copy.optString("type")) && "inProgress".equals(copy.optString("status")))

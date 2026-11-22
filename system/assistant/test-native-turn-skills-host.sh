@@ -15,5 +15,6 @@ mkdir -p "$task_out/classes"
  system/assistant/broker/org/agentos/lab/AgentSkills.java \
  system/assistant/broker/org/agentos/lab/BuiltinSkillUpdate.java \
  system/assistant/tests/native-turn-skills/android/system/Os.java \
+ system/assistant/tests/acp-doubles/org/agentos/lab/AcpConversationsTestDouble.java \
  system/assistant/tests/native-turn-skills/org/agentos/lab/*.java
 "$JDK/bin/java" -cp "$task_out/classes:$task_json" org.agentos.lab.NativeTurnSkillsTest | tee "$task_out/result.txt"

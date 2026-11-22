@@ -51,7 +51,7 @@ public final class AcpStandaloneConversationTest {
         }
 
         JSONObject view(String id) throws Exception {
-            return AcpConversationStore.overlay(AcpConversationStore.seed(id, store.read(id)), store.turns(id));
+            return store.project(AcpConversationStore.seed(id, store.read(id)), id);
         }
 
         @Override public AcpConversationStore store() { return store; }
@@ -263,8 +263,57 @@ public final class AcpStandaloneConversationTest {
         check(failure(() -> AcpTurnControl.cancel(host.store, tasks, id, "../903", "")).equals("INVALID_TASK_ID"), "task id is validated");
     }
 
+    /**
+     * agent_control thread/name/set of a standalone conversation is answered by the ACP store (Codex
+     * has no thread to rename and is not started); the title reaches thread/read and thread/list
+     * through the projection and survives a broker restart. Other conversations keep the Codex path.
+     */
+    static void renameStandaloneWithoutCodex() throws Exception {
+        File root = temp("rename");
+        File dir = new File(root, "acp-conversations");
+        Host host = new Host(dir);
+        String id = host.store.startNew();
+        JSONObject params = new JSONObject().put("threadId", id).put("name", "  Weekend trip  ");
+        check(AcpCodexGate.renamesWithoutCodex("thread/name/set", params, host.store), "standalone rename: answered without Codex");
+        check(!AcpCodexGate.renamesWithoutCodex("thread/read", params, host.store), "only thread/name/set is a rename");
+        check(!AcpCodexGate.renamesWithoutCodex("thread/name/set", null, host.store), "missing params keep the Codex path");
+
+        // A Codex-born conversation that ran ACP turns is not standalone: Codex owns its title.
+        String codexBorn = "11111111-2222-4333-8444-555555555555";
+        host.store.bindSession(codexBorn, "session-1", null);
+        check(host.store.owns(codexBorn) && !AcpCodexGate.renamesWithoutCodex("thread/name/set",
+                new JSONObject().put("threadId", codexBorn).put("name", "x"), host.store), "Codex-born conversation: Codex path");
+        check("THREAD_UNAVAILABLE".equals(failure(() -> host.store.rename(codexBorn, "x"))), "the store never renames a Codex-born conversation");
+        check(!AcpCodexGate.renamesWithoutCodex("thread/name/set",
+                new JSONObject().put("threadId", "22222222-2222-4333-8444-555555555555").put("name", "x"), host.store), "unknown conversation: Codex path");
+
+        check(host.view(id).isNull("name"), "no title before the rename");
+        check("Weekend trip".equals(host.store.rename(id, params.getString("name"))), "title is trimmed");
+        JSONObject view = host.view(id);
+        check("Weekend trip".equals(view.optString("name")), "thread/read projection carries the new title: " + view);
+        JSONObject answer = AcpConversationStore.renameAnswer(id, view);
+        check(id.equals(answer.getString("threadId")) && answer.getBoolean("loaded") && "acp".equals(answer.getString("runtime"))
+                && "Weekend trip".equals(answer.getJSONObject("thread").getString("name")), "Codex-shaped rename answer: " + answer);
+        JSONObject native_ = AcpConversationStore.nativeReadAnswer(id, view, false);
+        check("Weekend trip".equals(native_.getJSONObject("thread").getString("name")), "native thread/read (thread/name/get) sees the title");
+        check("Weekend trip".equals(AcpConversationStore.seed(id, host.store.read(id)).getString("name")), "thread/list seed carries the title");
+
+        // A stored native view keeps its turns; the title still wins over a stale name.
+        JSONObject stale = new JSONObject(view.toString()).put("name", "Old");
+        check("Weekend trip".equals(host.store.project(stale, id).getString("name")), "projection overlay applies the stored title");
+
+        AcpConversationStore restarted = new AcpConversationStore(dir);
+        check("Weekend trip".equals(restarted.name(id)) && restarted.standalone(id), "title persists across a broker restart");
+
+        check("Invalid conversation title".equals(failure(() -> host.store.rename(id, "   "))), "blank title rejected");
+        String longName = "x".repeat(AcpConversationStore.MAX_NAME + 1);
+        check("Invalid conversation title".equals(failure(() -> host.store.rename(id, longName))), "over-long title rejected");
+        check("Weekend trip".equals(host.store.name(id)), "a rejected rename keeps the title");
+    }
+
     public static void main(String[] args) throws Exception {
         standaloneStartReadListAndFirstTurn();
+        renameStandaloneWithoutCodex();
         codexDefaultKeepsCodex();
         chatPageStop();
         liveTaskCancel();

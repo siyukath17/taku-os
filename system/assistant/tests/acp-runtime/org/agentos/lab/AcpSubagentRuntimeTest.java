@@ -357,8 +357,38 @@ public final class AcpSubagentRuntimeTest {
         check("回报结果".equals(AcpSubagentCards.stage(starting, Locale.SIMPLIFIED_CHINESE)), "stage: reporting");
     }
 
+    /** Subagent cards and agent messages never show internal tool identifiers. */
+    static void toolNamesHumanized() throws Exception {
+        Locale en = Locale.US, zh = Locale.SIMPLIFIED_CHINESE;
+        check("Called Read device info, then Tap the screen.".equals(AcpToolLabels.humanize("Called `mcp_taku_phone_device_info`, then mcp_taku_phone_tap().", en)),
+                "humanize: prefixed and backticked phone tools " + AcpToolLabels.humanize("Called `mcp_taku_phone_device_info`, then mcp_taku_phone_tap().", en));
+        check("我用读取设备信息查到电量 74%".equals(AcpToolLabels.humanize("我用mcptakuphonedeviceinfo查到电量 74%", zh)),
+                "humanize: squashed name in Chinese " + AcpToolLabels.humanize("我用mcptakuphonedeviceinfo查到电量 74%", zh));
+        check("Open app and View the screen".equals(AcpToolLabels.humanize("mcp__taku_phone__open_app and taku_phone.screenshot", en)),
+                "humanize: double-underscore and dotted forms");
+        check("手机操作完成".equals(AcpToolLabels.humanize("mcp_taku_phone_frobnicate完成", zh)), "humanize: unknown phone tool → generic name");
+        check("Dispatch a sub-task, then Read file".equals(AcpToolLabels.humanize("invoke_subagent, then `view_file`", en)), "humanize: known agent tool keys");
+        String kept = "my_variable and notes/read_file.py stay";
+        check(kept.equals(AcpToolLabels.humanize(kept, en)), "humanize: other snake_case words and paths stay " + AcpToolLabels.humanize(kept, en));
+        check("use read_file() in code, Tap the screen".equals(AcpToolLabels.humanizePhoneTools("use read_file() in code, mcp_taku_phone_tap", en)),
+                "chat messages: only phone tools are renamed");
+        check("".equals(AcpToolLabels.humanize(null, en)) && "taku_phone".equals(AcpToolLabels.humanize("taku_phone", en)), "humanize: empty and bare server name");
+
+        JSONObject card = AcpSubagentCards.fromArguments(null, new JSONObject().put("Role", "Checker")
+                .put("Prompt", "Use mcp_taku_phone_device_info to read the battery"), 1, 1000);
+        AcpSubagents.Child child = new AcpSubagents.Child();
+        child.reported = true;
+        child.reportedMillis = 3000;
+        child.report = "## Result\n\nmcptakuphonedeviceinfo reports battery **74%** via `mcp_taku_phone_screen_status`.";
+        check(AcpSubagentCards.merge(card, child, "", zh), "card: report merged");
+        check("读取设备信息 reports battery 74% via 查看专屏状态.".equals(card.getString("summary")), "card summary: tool names humanized " + card);
+        check(!card.toString().toLowerCase(Locale.ROOT).contains("taku_phone") && !card.toString().toLowerCase(Locale.ROOT).contains("takuphone"),
+                "card: no internal tool identifier anywhere " + card);
+    }
+
     public static void main(String[] args) throws Exception {
         subagentCards();
+        toolNamesHumanized();
         toolLabels();
         approvalFlagOnlyForFullMode();
         asyncSubagentsKeepTheAgentAlive();

@@ -119,6 +119,42 @@ final class AcpConversationStore {
         return record != null && ORIGIN_ACP.equals(record.optString("origin"));
     }
 
+    /** Longest conversation title, as on the Codex path ({@code agent_control thread/name/set}). */
+    static final int MAX_NAME = 120;
+
+    /**
+     * Renames a standalone conversation ({@code agent_control thread/name/set}): the title lives in
+     * this store, because no Codex thread exists to hold it, and {@link #project} puts it into the
+     * display projection (and so into thread/list and thread/read). Returns the stored title.
+     */
+    synchronized String rename(String id, String name) throws Exception {
+        String title = name == null ? "" : name.trim();
+        if (!validId(id) || title.isEmpty() || title.length() > MAX_NAME) throw new IOException("Invalid conversation title");
+        if (!standalone(id)) throw new IOException("THREAD_UNAVAILABLE");
+        JSONObject record = mutable(id);
+        record.put("name", title);
+        save(id, record);
+        return title;
+    }
+
+    /** The user-set title of a conversation, or "" when it has none. */
+    synchronized String name(String id) {
+        JSONObject record = record(id);
+        return record == null ? "" : record.optString("name", "");
+    }
+
+    /**
+     * The conversation's display thread from this store: {@link #overlay} of its turns plus its
+     * user-set title ({@link #rename}). Installed as the projection overlay on the device.
+     */
+    JSONObject project(JSONObject thread, String id) throws Exception {
+        JSONObject merged = overlay(thread, turns(id));
+        String title = name(id);
+        if (title.isEmpty()) return merged;
+        if (merged == thread) merged = new JSONObject(thread.toString());
+        return merged.put("name", title);
+    }
+
     /**
      * The task running ACP turn {@code turnId} of this conversation, or null when that turn is not
      * (any longer) in progress here.
@@ -260,6 +296,15 @@ final class AcpConversationStore {
     }
 
     /**
+     * The agent_control thread/name/set answer for a standalone conversation: the Codex path's shape
+     * ({@code threadId}, {@code loaded}, the projected {@code thread}) plus {@code runtime}.
+     */
+    static JSONObject renameAnswer(String id, JSONObject view) throws Exception {
+        if (view == null || !id.equals(view.optString("id"))) throw new IOException("THREAD_UNAVAILABLE");
+        return new JSONObject().put("threadId", id).put("loaded", true).put("runtime", "acp").put("thread", view);
+    }
+
+    /**
      * A native-RPC {@code thread/read} answer ({@code {thread}}) for a standalone ACP conversation,
      * which the Codex app server does not know. Without {@code includeTurns} the turns are empty, as
      * in the app server's answer.
@@ -276,7 +321,7 @@ final class AcpConversationStore {
         long created = record == null ? System.currentTimeMillis() : record.optLong("createdAt", System.currentTimeMillis());
         JSONObject thread = new JSONObject()
                 .put("id", id)
-                .put("name", JSONObject.NULL)
+                .put("name", record == null || record.optString("name", "").isEmpty() ? JSONObject.NULL : record.optString("name"))
                 .put("preview", record == null ? "" : record.optString("preview", ""))
                 .put("createdAt", created / 1000)
                 .put("updatedAt", (record == null ? created : record.optLong("updatedAt", created)) / 1000)

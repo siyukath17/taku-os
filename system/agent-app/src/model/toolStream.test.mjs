@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {cleanToolDetail, toolStepElapsed, toolStreamSummary, visibleToolSteps} from './toolStream.ts';
+import {cleanToolDetail, isStatusNote, statusNoteLine, toolStepElapsed, toolStreamSummary, visibleToolSteps} from './toolStream.ts';
 import {firstLine, formatClock} from './subagents.ts';
 import {runtimeFamily} from './provider.ts';
 
@@ -44,4 +44,29 @@ test('clocks, report lines and runtime families', () => {
   assert.equal(runtimeFamily('openai', 'gpt-5'), 'codex');
   assert.equal(runtimeFamily('', 'Claude Sonnet', true), 'agy');
   assert.equal(runtimeFamily('', ''), '');
+});
+
+test('the agent\'s words between steps are status notes, not "Update" steps', async () => {
+  const {projectSession} = await import('./session.ts');
+  const view = projectSession({thread: {id: 't', turns: [{id: 'turn', status: 'completed', items: [
+    {id: 'u', type: 'userMessage', content: [{type: 'text', text: 'check'}]},
+    {id: 'c', type: 'agentMessage', phase: 'commentary', text: '## Plan\n\nDispatched **two** sub-tasks; waiting for their reports.\nMore detail.'},
+    {id: 'tool', type: 'mcpToolCall', server: 'agy', tool: 'read_file', status: 'completed', startedAt: 1000, completedAt: 2000},
+    {id: 'a', type: 'agentMessage', phase: 'final_answer', text: 'Done.'},
+  ]}]}, native: {ready: true}});
+  const activity = view.blocks.flatMap(block => block.activity);
+  const note = activity.find(item => item.type === 'agentMessage');
+  assert.equal(note.titleKey, 'statusNote');
+  assert.equal(note.name, 'Dispatched two sub-tasks; waiting for their reports.');
+  assert.ok(isStatusNote(note) && !isStatusNote(activity.find(item => item.type === 'mcpToolCall')));
+  // Notes are not counted as steps.
+  assert.deepEqual(toolStreamSummary(activity, 9000), {total: 1, running: 0, failed: 0, stopped: 0, current: 0, spanMs: 1000});
+  assert.equal(statusNoteLine('x'.repeat(200)).length, 140);
+  assert.equal(statusNoteLine(''), '');
+});
+
+test('status note labels are bilingual', async () => {
+  const {textFor} = await import('../i18n/index.ts');
+  assert.equal(textFor('en')('statusNote'), 'Status update');
+  assert.equal(textFor('zh')('statusNote'), '进度同步');
 });
