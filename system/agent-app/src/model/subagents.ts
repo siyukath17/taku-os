@@ -4,6 +4,8 @@
  * records carry only the call's arguments and still get a card, from the Role and the turn status.
  * Pure, so the tests read it without React.
  */
+import {runtimeFamily, type RuntimeFamily} from './provider.ts';
+
 type Json = Record<string, unknown>;
 const record = (v: unknown): Json => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Json : {};
 const string = (v: unknown): string => typeof v === 'string' ? v : '';
@@ -18,6 +20,8 @@ export interface SubagentTask {
   model: string;
   /** `local` (on-device child) or `remote`. */
   source: string;
+  /** The runtime family the child runs on, for its brand mark (`agy` for the on-device agent). */
+  provider: RuntimeFamily;
   status: SubagentStatus;
   /** Epoch ms; 0 when the record does not say (older turns). */
   startedAt: number;
@@ -71,6 +75,8 @@ export function subagentTask(item: Json, turnId: string, index: number, turnStat
   return {
     id: `${turnId}/${ordinal}`, title: clip(title, 80), type: clip(string(card.type) || string(args.TypeName), 40),
     model: clip(model, 40), source: string(card.source) || 'local', status: finalStatus,
+    // The runtime that spawned the child decides its mark: an agy child is AGY whatever model it runs.
+    provider: runtimeFamily(string(card.provider), item.server === 'agy' ? '' : model, item.server === 'agy' || card.provider === 'agy'),
     startedAt, completedAt, elapsedMs: number(card.elapsedMs) || (startedAt && completedAt ? Math.max(0, completedAt - startedAt) : 0),
     goal: string(card.goal) || string(args.Prompt), activity: finalStatus === 'running' ? string(card.activity) : '',
     summary: string(card.summary), report: string(card.report),
@@ -126,4 +132,23 @@ export function subagentGroupTitle(group: SubagentGroupState, t: SubagentText): 
   if (group.running > 0) return fill('subagentGroupMixed', group.running);
   if (group.completed === group.total) return fill('subagentGroupDone', group.total);
   return fill('subagentGroupPartial', group.failed + group.stopped);
+}
+
+/** A running clock, as T3 Code ticks it: `0:42`, `2:05`, `1:02:05`. */
+export function formatClock(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/** A report's first line of substance without its Markdown marks: a heading only names what follows. */
+export function firstLine(markdown: string): string {
+  let heading = '';
+  for (const raw of markdown.split('\n')) {
+    const plain = raw.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*)/, '').replace(/[*_`~]/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim();
+    if (!plain) continue;
+    if (/^\s*#/.test(raw)) { heading ||= plain; continue; }
+    return plain;
+  }
+  return heading;
 }

@@ -106,7 +106,8 @@ export function TakuHomePage({language, threads, threadId, historyError = '', in
 function HeaderButton({icon, label, onPress}: {icon: 'search' | 'collapse'; label: string; onPress?: () => void}) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{disabled: !onPress}} disabled={!onPress}
     onPress={onPress} hitSlop={8} style={({pressed}) => [styles.headerButton, pressed && styles.pressed]}>
-    <SvgXml xml={homeAssets[icon]} accessibilityElementsHidden/>
+    {/* Drawn white for the dark glass; on the paper page the strokes take the page's ink. */}
+    <SvgXml xml={homeAssets[icon].replace(/"(?:white|#fff|#FFFFFF|#ffffff)"/g, `"${chatColors.icon}"`)} accessibilityElementsHidden/>
   </Pressable>;
 }
 

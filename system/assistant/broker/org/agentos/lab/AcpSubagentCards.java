@@ -52,7 +52,7 @@ final class AcpSubagentCards {
 
     private static JSONObject fresh(int ordinal, long now) throws Exception {
         return new JSONObject().put("id", "subagent-" + ordinal).put("title", "").put("role", "").put("type", "")
-                .put("source", "local").put("status", "running").put("startedAt", now).put("completedAt", 0)
+                .put("source", "local").put("provider", "agy").put("status", "running").put("startedAt", now).put("completedAt", 0)
                 .put("elapsedMs", 0).put("model", "").put("goal", "").put("activity", "").put("summary", "").put("report", "");
     }
 

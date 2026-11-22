@@ -330,7 +330,8 @@ public final class AcpSubagentRuntimeTest {
                 .put("Prompt", "List apps; notes in /data/local/agentos/acp/home/.gemini/taku-acp/brain/s/notes.md token=abcd1234")
                 .put("TypeName", "research").put("Model", "inherit"), 3, 1000);
         check("subagent-3".equals(card.getString("id")) && "Taku App Scanner".equals(card.getString("title")) && "research".equals(card.getString("type"))
-                && "running".equals(card.getString("status")) && card.getLong("startedAt") == 1000 && card.getString("model").isEmpty(),
+                && "running".equals(card.getString("status")) && card.getLong("startedAt") == 1000 && card.getString("model").isEmpty()
+                && "agy".equals(card.getString("provider")),
                 "card: from arguments; an inherited model is left for the child's transcript " + card);
         check(card.getString("goal").contains("notes.md") && !card.getString("goal").contains("/data/local") && !card.getString("goal").contains("abcd1234"),
                 "card: the goal is sanitized and redacted " + card);

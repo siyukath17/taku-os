@@ -194,9 +194,15 @@ export function retainSessionBlocks(next: SessionView, prior: SessionView | null
     const sameActivity = previous.activity.length === block.activity.length && block.activity.every((item, i) => {
       const old = previous.activity[i];
       return old.id === item.id && old.type === item.type && old.titleKey === item.titleKey
-        && old.name === item.name && old.text === item.text && old.status === item.status;
+        && old.name === item.name && old.text === item.text && old.status === item.status
+        && old.startedAt === item.startedAt && old.completedAt === item.completedAt;
     });
+    // Subagent cards and reactions change on their own (a child starts, reports, ends) while the
+    // text and the tool list stay the same: reusing the old block then hid them until the next text.
+    const sameSubagents = (previous.subagents?.length ?? 0) === (block.subagents?.length ?? 0)
+      && (block.subagents ?? []).every((task, i) => JSON.stringify(task) === JSON.stringify(previous.subagents?.[i]));
     return previous.text === block.text && previous.active === block.active && previous.status === block.status
+      && previous.reaction === block.reaction && sameSubagents
       && previous.parts.length === block.parts.length && block.parts.every((part, i) => part === previous.parts[i])
       && sameActivity && previous.attachments.length === block.attachments.length
       && block.attachments.every((attachment, i) => attachment === previous.attachments[i]) ? previous : block;

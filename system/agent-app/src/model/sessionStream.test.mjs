@@ -201,3 +201,31 @@ test('a snapshot carries a stored reaction onto the user message; none shows no 
   const users = view(state).blocks.filter(block => block.role === 'user');
   assert.deepEqual(users.map(block => block.reaction), ['👋', undefined]);
 });
+
+test('before the first text, a dispatched subagent and its status changes reach the screen at once', () => {
+  // The turn has started and the agent has only called tools so far: no text yet.
+  const subagent = (status, activity = '') => ({id: 'acp-1-tool-c1', type: 'mcpToolCall', server: 'agy', tool: 'invoke_subagent', toolName: 'invoke_subagent',
+    status: 'inProgress', subagent: {id: 'subagent-1', title: 'Research', provider: 'agy', status, startedAt: 1000, completedAt: 0, activity}});
+  const turn = items => snapshot(0, [{id: 'turn', status: 'inProgress', items: [{id: 'u', type: 'userMessage', content: [{type: 'text', text: 'go'}]}, ...items]}]);
+  const empty = view(reduceSessionEvent(emptySessionStream('thread'), turn([])));
+  const dispatched = retainSessionBlocks(view(reduceSessionEvent(emptySessionStream('thread'), turn([subagent('running', 'Reading')]))), empty);
+  assert.equal(dispatched.blocks[1].subagents?.length, 1);
+  assert.equal(dispatched.blocks[1].subagents[0].provider, 'agy');
+  const done = retainSessionBlocks(view(reduceSessionEvent(emptySessionStream('thread'), turn([subagent('completed')]))), dispatched);
+  assert.equal(done.blocks[1].subagents[0].status, 'completed');
+  // Nothing changed: the same block is kept, so the list does not re-render.
+  const again = retainSessionBlocks(view(reduceSessionEvent(emptySessionStream('thread'), turn([subagent('completed')]))), done);
+  assert.equal(again.blocks[1], done.blocks[1]);
+});
+
+test('tool steps keep their recorded start and end times for the tool stream', () => {
+  const state = reduceSessionEvent(emptySessionStream('thread'), snapshot(0, [{id: 'turn', status: 'inProgress', items: [
+    {id: 'u', type: 'userMessage', content: [{type: 'text', text: 'go'}]},
+    {id: 't1', type: 'mcpToolCall', server: 'agy', tool: 'read_file', status: 'completed', startedAt: 1000, completedAt: 4200},
+    {id: 't2', type: 'mcpToolCall', server: 'agy', tool: 'run_command', status: 'inProgress', startedAt: 4300},
+  ]}]));
+  const [first, second] = view(state).blocks[1].activity;
+  assert.deepEqual([first.startedAt, first.completedAt, first.titleKey], [1000, 4200, 'readFile']);
+  assert.deepEqual([second.startedAt, second.completedAt, second.status], [4300, undefined, 'running']);
+  assert.equal(view(state).provider, 'agy');
+});

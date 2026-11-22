@@ -29,7 +29,7 @@ const native = moduleUrl(`
 `);
 const root = new URL('../', import.meta.url).href;
 const mocks = new Map([['react', react], ['react-native', native],
-  ['react-native-svg', moduleUrl("export default 'Svg'; export const Path = 'Path', Rect = 'Rect';")]]);
+  ['react-native-svg', moduleUrl("export default 'Svg'; export const Path = 'Path', Rect = 'Rect', Defs = 'Defs', LinearGradient = 'LinearGradient', Stop = 'Stop', Circle = 'Circle', Pattern = 'Pattern';")]]);
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (mocks.has(specifier)) return {url: mocks.get(specifier), shortCircuit: true};
@@ -83,28 +83,35 @@ function mount(Component, props) {
 
 const task = (over = {}) => ({id: 'turn/subagent-1', title: 'Device Status Inspector', type: 'self', model: 'Gemini 4 Neon', source: 'local',
   status: 'running', startedAt: Date.now() - 18_000, completedAt: 0, elapsedMs: 0, goal: 'Check battery and Android version',
-  activity: '读取设备信息', summary: '', report: '', ...over});
+  activity: '读取设备信息', summary: '', report: '', provider: 'agy', ...over});
 
-test('a running card: title, status capsule with a live clock, badges, current step; nothing to leak', () => {
+test('a running card, as T3 lays it out: brand badge with a status dot, title, model and step, a live clock; nothing to leak', () => {
   const card = mount(SubagentCard, {task: task(), language: 'zh'});
   const text = card.text();
   assert.match(text, /Device Status Inspector/);
   assert.match(text, /运行中/);
-  assert.match(text, /1[89]s/, 'the clock counts from startedAt');
-  assert.match(text, /Gemini 4 Neon/);
+  assert.match(text, /0:1[89]/, 'a running clock ticks as m:ss from startedAt');
+  assert.match(text, /Gemini 4 Neon · 读取设备信息/);
   assert.match(text, /本地子代理/);
-  assert.doesNotMatch(text, /self/, 'the default "self" type is not shown as a badge');
-  assert.match(text, /读取设备信息/);
+  assert.doesNotMatch(text, /self/, 'the default "self" type is not shown');
   assert.doesNotMatch(text, /Check battery/, 'details stay folded');
+  assert.ok(card.byId('provider-icon-agy'), 'an agy child carries the AGY mark');
   assert.equal(card.byId('subagent-card-turn/subagent-1').props.accessibilityState.expanded, false);
+});
+
+test('each runtime family gets its own brand mark; a card that names none takes the conversation runtime', () => {
+  assert.ok(mount(SubagentCard, {task: task({provider: 'claude'}), language: 'en'}).byId('provider-icon-claude'));
+  assert.ok(mount(SubagentCard, {task: task({provider: 'codex'}), language: 'en'}).byId('provider-icon-codex'));
+  assert.ok(mount(SubagentCard, {task: task({provider: ''}), language: 'en', fallbackProvider: 'codex'}).byId('provider-icon-codex'));
+  assert.ok(mount(SubagentCard, {task: task({provider: ''}), language: 'en'}).byId('provider-icon-agy'));
 });
 
 test('tapping a finished card opens its goal and report in place, with a layout animation', () => {
   const done = task({status: 'completed', completedAt: 2_000, startedAt: 1_000, elapsedMs: 18_000, activity: '',
     summary: 'Android 17, battery 74%', report: '### Device\n- Android 17\n- Battery 74%'});
-  const card = mount(SubagentCard, {task: done, language: 'zh', renderMarkdown: text => ({type: 'Markdown', props: {children: `md:${text}`}})});
+  const card = mount(SubagentCard, {task: done, language: 'zh', renderMarkdown: (text, _active, _id, size) => ({type: 'Markdown', props: {children: `md(${size}):${text}`}})});
   let text = card.text();
-  assert.match(text, /已完成/);
+  assert.match(card.byId('subagent-card-turn/subagent-1').props.accessibilityLabel, /已完成/);
   assert.match(text, /18s/);
   assert.match(text, /Android 17, battery 74%/);
   const before = runtime.layout;
@@ -116,7 +123,7 @@ test('tapping a finished card opens its goal and report in place, with a layout 
   assert.match(text, /任务目标/);
   assert.match(text, /Check battery and Android version/);
   assert.match(text, /回报摘要/);
-  assert.match(text, /md:### Device/, 'the report renders as Markdown');
+  assert.match(text, /md\(compact\):### Device/, 'the report renders as compact Markdown, one size down');
 });
 
 test('failed and interrupted cards say so', () => {

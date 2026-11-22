@@ -8,7 +8,7 @@ import {StatusBar} from 'expo-status-bar';
 import Svg, {Defs, LinearGradient, Rect, Stop} from 'react-native-svg';
 import {VoiceEffect} from '../native/VoiceEffect';
 import {VoiceIcon} from '../chat/VoiceIcon';
-import {AssistantBubble, ComposerGlassRim} from '../chat/ChatSurfaces';
+import {AssistantBubble, ComposerGlassRim, DotGridCanvas} from '../chat/ChatSurfaces';
 import {useLiveTalk} from '../chat/useLiveTalk';
 import * as Haptics from 'expo-haptics';
 import {colors as baseColors, containsChinese, layout, typography, type TypeRole} from '../theme';
@@ -19,6 +19,10 @@ import {chatPresentation, type ChatMessageBlock} from '../model/chatPresentation
 import {FIRST_RESPONSE_TIMEOUT_MS, type OptimisticSubmission} from '../model/optimisticChat';
 import {ReplyLoading} from './ReplyLoading';
 import {SubagentGroup} from './SubagentCards';
+import {ToolStream} from './ToolStream';
+import {ProviderIcon, providerName} from './ProviderIcon';
+import type {RuntimeFamily} from '../model/provider';
+import type {MarkdownSize} from '../native/Markdown';
 import {onImeInsets, setWindowBackdrop, showKeyboard} from '../native/agent';
 import {ReplyMenu, type ReplyMenuTarget} from './ReplyMenu';
 import {cardPanelActions, openPinnedCard, pinCardToPanels, unpinCard} from '../hooks/useGenUi';
@@ -26,7 +30,7 @@ import {cardId} from '../model/genuiStore';
 import {presentationRequest} from '../model/genui';
 import {EdgeBlur} from '../native/EdgeBlur';
 import {ChatIcon} from '../chat/ChatIcon';
-import {chatBlur, chatColors, getChatAppearance, homeColors, chatMetrics, chatTitle, chatType, themed, themedStyles} from '../chat/chatTheme';
+import {chatBlur, chatColors, getChatAppearance, chatMetrics, chatTitle, chatType, themed, themedStyles} from '../chat/chatTheme';
 import {chatText} from '../chat/chatText';
 import {useDictation, type DictationFailure} from '../chat/useDictation';
 import {failureOf, insertDictation, type DraftSelection} from '../chat/dictationText';
@@ -87,7 +91,7 @@ export interface AgentChatScreenProps {
   onOpenWorkspace: (workspace: WorkspaceView) => void;
   onClose: () => void;
   onOpenHistory?: () => void;
-  renderMarkdown?: (text: string, active: boolean, itemId: string) => ReactNode;
+  renderMarkdown?: (text: string, active: boolean, itemId: string, size?: MarkdownSize) => ReactNode;
   /**
    * Generated cards render through the app; the chat only places them in order with the text.
    * `demand` is the row's share of native demand: visible on screen, preload in the bounded band
@@ -178,7 +182,7 @@ function MessageBody({block, language, renderMarkdown, renderCard, demand}: {blo
     </>}</React.Fragment>)}</View>;
 }
 
-function Message({block, language, renderMarkdown, renderCard, expanded, demand, onToggleActivity, onLongPressReply}: {block: ChatMessageBlock; language: Language; renderMarkdown?: AgentChatScreenProps['renderMarkdown']; renderCard?: AgentChatScreenProps['renderCard']; expanded: boolean; demand: CardDemand; onToggleActivity: () => void; onLongPressReply?: (block: ChatMessageBlock, body: ViewHandle) => void}) {
+function Message({block, language, renderMarkdown, renderCard, provider, demand, onLongPressReply}: {block: ChatMessageBlock; language: Language; renderMarkdown?: AgentChatScreenProps['renderMarkdown']; renderCard?: AgentChatScreenProps['renderCard']; provider: RuntimeFamily; demand: CardDemand; onLongPressReply?: (block: ChatMessageBlock, body: ViewHandle) => void}) {
   const t = textFor(language);
   const body = useRef<ViewHandle>(null);
   const {fontScale} = useWindowDimensions();
@@ -222,27 +226,20 @@ function Message({block, language, renderMarkdown, renderCard, expanded, demand,
   const responseError = block.responseError || (block.responseErrorKey ? t(block.responseErrorKey) : untrackedPending && untrackedTimeout ? t('replyTimeout') : '');
   const pending = !responseError && (block.responsePending ?? untrackedPending);
   const showState = !responseError && (block.status === 'failed' || block.status === 'stopped');
+  // Tools and subagents show from the first call on, above the words they lead to (Renma, T3): the
+  // waiting dots are only for a reply that has nothing at all to show yet.
+  const working = block.activity.length > 0 || !!block.subagents?.length;
   return <View style={styles.assistant}>
-    {(hasBody(block) || pending || !!responseError) && <Pressable ref={body} testID={`reply-body-${block.id}`} style={{minHeight: 26 * fontScale}}
+    {block.activity.length > 0 && <ToolStream blockId={block.id} items={block.activity} language={language} active={block.active}/>}
+    {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={renderMarkdown} fallbackProvider={provider}/>}
+    {(hasBody(block) || (pending && !working) || !!responseError) && <Pressable ref={body} testID={`reply-body-${block.id}`} style={{minHeight: 26 * fontScale}}
       disabled={!canCopy || !onLongPressReply} onLongPress={() => { if (body.current) onLongPressReply?.(block, body.current); }}
       accessibilityActions={canCopy ? [{name: 'longpress', label: t('copy')}] : undefined}
       onAccessibilityAction={() => { if (body.current) onLongPressReply?.(block, body.current); }}>
       {hasBody(block) && <MessageBody block={block} language={language} renderMarkdown={renderMarkdown} renderCard={renderCard} demand={demand}/>}
-      {pending && !hasBody(block) && <View style={{height: 26 * fontScale}}><ReplyLoading label={t('working')}/></View>}
+      {pending && !working && !hasBody(block) && <View style={{height: 26 * fontScale}}><ReplyLoading label={t('working')}/></View>}
       {!!responseError && <Label accessibilityLiveRegion="polite" role="meta" style={{color: colors.error}}>{responseError}</Label>}
     </Pressable>}
-    {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={renderMarkdown}/>}
-    {block.activity.length > 0 && <View style={styles.activityGroup}>
-      <View style={styles.replyActions}>
-        {block.activity.length > 0 && <Pressable testID={`activity-${block.id}`} style={[styles.activityToggle, expanded && styles.activityToggleExpanded]} accessibilityRole="button" accessibilityState={{expanded}}
-          accessibilityLabel={t(expanded ? 'collapseActivity' : 'expandActivity')} onPress={onToggleActivity}>
-          <Icon name={block.status === 'completed' ? 'check' : 'history'} size={16} color={colors.secondary}/>
-          <Label role="meta" style={[styles.secondary, styles.activityHeading]}>{`${t('activity')}  ${block.activity.length}`}</Label>
-          <Icon name={expanded ? 'chevron_down' : 'chevron_right'} size={16} color={colors.secondary}/>
-        </Pressable>}
-      </View>
-      {expanded && <View style={styles.activityPanel}><View style={styles.activities}>{block.activity.map(item => <ActivityRow key={item.id} item={item} language={language}/>)}</View></View>}
-    </View>}
     {showState && <View style={styles.stateRow}><Label role="meta" style={{color: block.status === 'failed' ? colors.error : colors.secondary}}>{t(block.status === 'stopped' ? (hasText || block.activity.length ? 'responseStopped' : 'requestStopped') : statusKey[block.status])}</Label></View>}
   </View>;
 }
@@ -369,7 +366,6 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
   // Taku Home lists panels; opening one hands off to the desktop.
   const [taskView, setTaskView] = useState(false), [composerHeight, setComposerHeight] = useState(40);
   const [composerBox, setComposerBox] = useState(64);
-  const [expandedActivities, setExpandedActivities] = useState<Set<string>>(() => new Set());
   // Android uses one complete native geometry snapshot, never KAV's asynchronously resized child.
   const space = sheetSpace(nativeIme ? imeGeometry : null, measuredHostHeight ?? dimensions.height, 0);
   // Full host height; the keyboard covers its bottom `space.bottom` dp. Absolutely placed children
@@ -451,6 +447,9 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
     setLayer({kind: 'home'});
   };
   const running = props.session?.running;
+  // The runtime family names the brand marks: the header capsule and subagents that do not name their own.
+  const provider: RuntimeFamily = (props.session?.provider || 'agy') as RuntimeFamily;
+  const modelLabel = props.session?.model || providerName(provider);
   const hasDraft = !!props.draft.trim() || props.attachments.length > 0;
   const [composerTools, setComposerTools] = useState<string | null>(null);
   // Only a send in flight or a queued task holds the send button back.
@@ -551,6 +550,8 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
     <StatusBar style={getChatAppearance() === 'dark' ? 'light' : 'dark'}/>
     <View style={[styles.host, nativeIme && {paddingBottom: space.bottom}]}
       onLayout={event => {if (!nativeIme) setMeasuredHostHeight(event.nativeEvent.layout.height);}}>
+    {/* Renma's e-ink page: paper canvas and dot matrix under everything, Taku Home included. */}
+    <DotGridCanvas/>
     <View style={StyleSheet.absoluteFill} pointerEvents={layer ? 'none' : 'box-none'} importantForAccessibility={layer ? 'no-hide-descendants' : 'auto'}>
     <View style={[StyleSheet.absoluteFill, layer && styles.hidden]} pointerEvents="box-none">
     {live.active && <VoiceEffect kind="light" target="live" level={liveLevel}
@@ -586,18 +587,12 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       renderItem={({item: block, index}) => taskView ? <View style={[styles.treeNode, block.role === 'user' && styles.treeRoot]}>
         {block.role === 'user' ? <Label selectable>{block.text || t('image')}</Label> : <>
           {block.activity.map(item => <ActivityRow key={item.id} item={item} language={language}/>)}
-          {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={props.renderMarkdown}/>}
+          {!!block.subagents?.length && <SubagentGroup tasks={block.subagents} language={language} renderMarkdown={props.renderMarkdown} fallbackProvider={provider}/>}
           {hasBody(block) && <View style={styles.treeAnswer}><MessageBody block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} demand={rowDemand(demandBand, index)}/></View>}
           {!hasBody(block) && !block.activity.length && !block.subagents?.length && <Label role="meta" style={styles.secondary}>{t(statusKey[block.status])}</Label>}
         </>}
-      </View> : <Message block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} expanded={expandedActivities.has(`${sessionId}/${block.id}`)}
-        demand={rowDemand(demandBand, index)}
-        onLongPressReply={openReplyMenu} onToggleActivity={() => {
-          const key = `${sessionId}/${block.id}`;
-          // Expanding is a reading action: keep the tapped reply in view instead of following the footer.
-          if (!expandedActivities.has(key)) reading.current = true;
-          setExpandedActivities(previous => {const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next;});
-        }}/>}
+      </View> : <Message block={block} language={language} renderMarkdown={props.renderMarkdown} renderCard={props.renderCard} provider={provider}
+        demand={rowDemand(demandBand, index)} onLongPressReply={openReplyMenu}/>}
       ListFooterComponent={<View style={styles.stack}>
       {!!props.workspaceError && <Label role="meta" style={styles.secondary}>{props.workspaceError}</Label>}
       {workspaces.map(workspace => <WorkspaceCard key={`${workspace.screenKey}/${workspace.generation}`} workspace={workspace} language={language} onPress={() => props.onOpenWorkspace(workspace)}/>)}
@@ -613,9 +608,26 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       {pendingSubmission && !props.busy && <PendingSubmissionCard key={`${pendingSubmission.threadId}/${pendingSubmission.requestId}`} text={pendingSubmission.text} language={language} onRetry={props.onRetrySubmission} onContinue={props.onContinueWithoutResending}/>}
       </View>}/>
     </EdgeBlur>
+    {/* The page is opaque now, so the title row brings its own paper: the dotted canvas, then a short fade. */}
+    <View pointerEvents="none" style={[styles.headerFade, {height: headerBottom + 20}]}>
+      <View style={[styles.headerPaper, {height: headerBottom}]}><DotGridCanvas/></View>
+      <Svg width="100%" height={20} style={{position: 'absolute', top: headerBottom}}>
+        <Defs><LinearGradient id="header-fade" x1="0" y1="0" x2="0" y2="1">
+          <Stop offset="0" stopColor={chatColors.canvas} stopOpacity={1}/>
+          <Stop offset="1" stopColor={chatColors.canvas} stopOpacity={0}/>
+        </LinearGradient></Defs>
+        <Rect width="100%" height="100%" fill="url(#header-fade)"/>
+      </Svg>
+    </View>
     {/* Figma 2-1 title row: Taku Home (history for now), the fixed title, collapse to the island. */}
     <View style={[styles.header, {top: insets.top}]} pointerEvents="box-none">
-      <Text accessibilityRole="header" numberOfLines={1} style={[chatType.bodyXlMedium(), styles.title]}>{live.active ? ct('liveTalk') : props.session?.title || chatTitle}</Text>
+      <View style={styles.titleColumn} pointerEvents="none">
+        <Text accessibilityRole="header" numberOfLines={1} style={[chatType.bodyLgMedium(containsChinese(props.session?.title || '')), styles.title]}>{live.active ? ct('liveTalk') : props.session?.title || chatTitle}</Text>
+        {!live.active && <View testID="model-capsule" style={styles.modelCapsule} accessible accessibilityLabel={modelLabel}>
+          <ProviderIcon provider={provider} size={11}/>
+          <Text numberOfLines={1} style={[chatType.bodySm(), styles.modelText]}>{modelLabel}</Text>
+        </View>}
+      </View>
       <Pressable testID="open-history" accessibilityRole="button" accessibilityLabel={t('history')} onPress={openHome} hitSlop={8}
         style={({pressed}) => [styles.headerButton, pressed && styles.pressed]}><VoiceIcon name="home" size={24}/></Pressable>
       <Pressable testID="collapse-chat" accessibilityRole="button" accessibilityLabel={ct('collapseToIsland')} onPress={collapseChat} hitSlop={8}
@@ -686,7 +698,7 @@ export function AgentChatScreen(props: AgentChatScreenProps) {
       {hasDraft && <Pressable testID="send-message" accessibilityRole="button" accessibilityLabel={t('send')} accessibilityState={{busy: props.busy}}
             onPress={() => { if (!sendHeld) sendAndFollow(); }} style={({pressed}) => [styles.composerAction, styles.send, pressed && {opacity: 0.8}]}>
             {/* Figma 1-3 send (node 1:3663): #1B1B1B arrow on Main/Brand (issue #32 C3). */}
-            {props.busy ? <ActivityIndicator size="small" color={homeColors.icon}/> : <ChatIcon name="arrowUp" color={homeColors.icon} size={18}/>}
+            {props.busy ? <ActivityIndicator size="small" color={chatColors.sendGlyph}/> : <ChatIcon name="arrowUp" color={chatColors.sendGlyph} size={18}/>}
           </Pressable>}
       {!hasDraft && <Pressable testID="live-talk-start" accessibilityRole="button" accessibilityLabel={ct('liveTalk')}
         disabled={!voiceEnabled} onPress={() => {
@@ -733,12 +745,18 @@ const styles = themedStyles(() => StyleSheet.create({
   liveTranscript: {alignItems: 'center', gap: 24, marginBottom: 24},
   liveControls: {flexDirection: 'row', justifyContent: 'space-between'},
   liveControlGroup: {flexDirection: 'row', gap: 16},
-  liveControl: {width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.08)'},
+  liveControl: {width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center', backgroundColor: chatColors.fillControl},
   root: {flex: 1, backgroundColor: colors.page}, flex: {flex: 1}, center: {textAlign: 'center'}, secondary: {color: colors.secondary},
   // Figma 2-1: 64 dp title row (16 dp padding around 32 dp buttons), title centred.
   header: {position: 'absolute', left: 0, right: 0, height: chatMetrics.header, paddingHorizontal: chatMetrics.side, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
   headerButton: {width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center'}, pressed: {backgroundColor: chatColors.fillControl},
-  title: {position: 'absolute', left: 64, right: 64, textAlign: 'center'},
+  headerFade: {position: 'absolute', top: 0, left: 0, right: 0},
+  headerPaper: {overflow: 'hidden'},
+  titleColumn: {position: 'absolute', left: 64, right: 64, alignItems: 'center', gap: 2},
+  title: {textAlign: 'center', color: chatColors.textPrimary, maxWidth: '100%'},
+  modelCapsule: {flexDirection: 'row', alignItems: 'center', gap: 4, height: 18, paddingHorizontal: 7, borderRadius: 9,
+    borderWidth: 1, borderColor: chatColors.hairline, backgroundColor: chatColors.surfaceCard, maxWidth: '100%'},
+  modelText: {color: chatColors.textTertiary, fontSize: 11, lineHeight: 14, flexShrink: 1},
   modalHeader: {minHeight: 56, paddingLeft: layout.gutter, paddingRight: 4, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border},
   headerTitle: {flex: 1, minWidth: 0, marginRight: 8}, messages: {paddingHorizontal: chatMetrics.side, gap: chatMetrics.itemGap}, taskMessages: {gap: layout.gap}, stack: {gap: layout.gap},
   userText: {color: chatColors.userText},
@@ -747,7 +765,7 @@ const styles = themedStyles(() => StyleSheet.create({
   // Figma 2-1 bubble: 8 dp padding, 16 dp corners but the bottom-right, Content/100. A short message
   // shrinks to its text as in the frame; a long one uses the width up to a 48 dp left margin
   // instead of the frame's 129 dp column (issue #32 C4).
-  userWrap: {alignItems: 'flex-end', paddingLeft: chatMetrics.bubbleMinInset}, userBubble: {backgroundColor: chatColors.bubble, padding: 8, borderRadius: 16, borderBottomRightRadius: 4, gap: 8},
+  userWrap: {alignItems: 'flex-end', paddingLeft: chatMetrics.bubbleMinInset}, userBubble: {backgroundColor: chatColors.bubble, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18, borderBottomRightRadius: 6, gap: 6},
   attachment: {color: chatColors.userText},
   // Figma 297:462: the 32 × 24 badge starts 8 dp above the bubble's bottom edge.
   userWrapReacted: {paddingBottom: 16},
@@ -786,8 +804,9 @@ const styles = themedStyles(() => StyleSheet.create({
   attachmentChip: {flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingHorizontal: 12, marginRight: 8, borderRadius: 16, backgroundColor: chatColors.surfaceRaised},
   attachmentLabel: {maxWidth: 180},
   attachmentThumb: {width: 36, height: 36, borderRadius: 8, marginLeft: -4, backgroundColor: chatColors.fillControl},
+  // Renma's composer on paper: a lifted paper slip with a hairline edge and a soft ink shadow.
   composer: {minHeight: 64, flexDirection: 'row', backgroundColor: chatColors.composer,
-    borderRadius: 32, padding: 12, gap: 0},
+    borderRadius: 32, padding: 12, gap: 0, boxShadow: `0px 6px 24px 0px ${chatColors.shadow}`},
   input: {flex: 1, minWidth: 0, paddingHorizontal: 0, paddingVertical: 8, margin: 0},
   composerAction: {width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', flexShrink: 0},
   // Several lines: a rounded rectangle (Rounded/3xl) instead of the one-line pill.

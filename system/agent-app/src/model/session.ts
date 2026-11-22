@@ -2,6 +2,7 @@
 import {isStateCardItem, parseUiRequest, type CardPresentation, type MainReply, type UiRequest} from './genui.ts';
 import {parseMainReply} from './genuiCompose.ts';
 import {subagentTask, type SubagentTask} from './subagents.ts';
+import {runtimeFamily} from './provider.ts';
 
 export type Json = Record<string, unknown>;
 export type ItemStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'waiting' | 'unknown';
@@ -12,6 +13,9 @@ export interface Activity {
   name: string;
   text: string;
   status: ItemStatus;
+  /** Epoch ms when the runtime recorded them (ACP tool items); absent otherwise. */
+  startedAt?: number;
+  completedAt?: number;
 }
 export interface MessagePart {
   id: string;
@@ -68,6 +72,9 @@ export interface SessionView {
   taskPrompt: string;
   taskTurnId: string;
   taskFailure: TaskFailure | null;
+  /** The conversation's model as the runtime names it, and its runtime family (`agy`, `claude`, `codex`), when known. */
+  model: string;
+  provider: string;
 }
 export interface ThreadSummary {
   id: string;
@@ -143,7 +150,10 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   for (const change of list(item.changes)) { const c = record(change); if (typeof c.path === 'string') details.push(c.path); }
   const error = typeof item.error === 'string' ? item.error : string(record(item.error).message);
   if (error) details.push(error);
-  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item)};
+  const time = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+  const startedAt = time(item.startedAt), completedAt = time(item.completedAt);
+  return {id: `${turnId}/${label(item.id) || `activity-${index}`}`, type, titleKey, name: titleKey === 'tool' ? string(item.title) || (agent ? '' : tool) : '', text: details.filter(Boolean).join('\n'), status: itemStatus(item),
+    ...(startedAt ? {startedAt} : {}), ...(completedAt ? {completedAt} : {})};
 }
 
 function userContent(item: Json): {text: string; attachments: string[]} {
@@ -187,6 +197,7 @@ export function projectSession(value: unknown): SessionView {
   const task = record(root.task);
   const id = string(thread.id), turns = list(thread.turns), blocks: MessageBlock[] = [];
   const activeTurnId = string(native.activeTurnId);
+  let agyItems = false;
   for (const [turnIndex, raw] of turns.entries()) {
     const turn = record(raw), turnId = label(turn.id) || `turn-${turnIndex}`, status = itemStatus(turn);
     const active = status === 'running' || turnId === activeTurnId;
@@ -242,6 +253,7 @@ export function projectSession(value: unknown): SessionView {
     };
     list(turn.items).forEach((rawItem, itemIndex) => {
       const item = record(rawItem), type = string(item.type);
+      if (item.server === 'agy') agyItems = true;
       if (type === 'userMessage') {
         flush(false);
         anchor = label(item.id) || `user-${itemIndex}`;
@@ -275,6 +287,7 @@ export function projectSession(value: unknown): SessionView {
     nativeOnlyRequests: typeof native.unsupportedRequestCount === 'number' ? native.unsupportedRequestCount : 0,
     queued, taskId: string(task.id), taskState: string(task.state), taskFailure,
     taskPrompt: string(record(root.request).prompt), taskTurnId: string(record(root.runtime).turnId),
+    model: label(thread.model), provider: runtimeFamily(label(thread.modelProvider), label(thread.model), agyItems),
   };
 }
 

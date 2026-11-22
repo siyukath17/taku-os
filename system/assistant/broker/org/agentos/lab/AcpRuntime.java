@@ -1114,8 +1114,9 @@ final class AcpRuntime implements TaskRuntime {
             String id = turnId + "-tool-" + (toolCallId == null || toolCallId.isEmpty() ? "unknown" : toolCallId);
             JSONObject item = items.get(id);
             if (item == null) {
+                // startedAt/completedAt (epoch ms) let the chat page show each step's duration.
                 item = new JSONObject().put("type", "mcpToolCall").put("id", id).put("server", "agy")
-                        .put("tool", "tool").put("status", "inProgress");
+                        .put("tool", "tool").put("status", "inProgress").put("startedAt", System.currentTimeMillis());
                 items.put(id, item);
                 // Text after a tool call is a new message, so the order of events is kept.
                 message = null;
@@ -1133,6 +1134,7 @@ final class AcpRuntime implements TaskRuntime {
             }
             if (update.has("kind") && !update.isNull("kind")) item.put("kind", update.optString("kind"));
             if (update.has("status") && !update.isNull("status")) item.put("status", toolStatus(update.optString("status")));
+            if (!"inProgress".equals(item.optString("status")) && !item.has("completedAt")) item.put("completedAt", System.currentTimeMillis());
             Object input = update.opt("rawInput");
             if (input instanceof JSONObject) {
                 String raw = AcpToolLabels.sanitize(redact(input.toString()));

@@ -129,6 +129,8 @@ public final class AcpChatRuntimeTest {
         JSONObject tool = item(turn1, "mcpToolCall", 0);
         check(tool != null && "Open Settings".equals(tool.getString("tool")) && "completed".equals(tool.getString("status")),
                 "turn 1: tool call projected with its final status " + tool);
+        check(tool.optLong("startedAt") > 0 && tool.optLong("completedAt") >= tool.optLong("startedAt"),
+                "turn 1: the tool step records when it started and ended, for its duration on the chat page " + tool);
         JSONObject reply = item(turn1, "agentMessage", 0);
         check(reply != null && "Done: Wi-Fi is on.\nDetails follow.".equals(reply.getString("text")) && "final_answer".equals(reply.getString("phase")),
                 "turn 1: the reply is the final answer " + reply);

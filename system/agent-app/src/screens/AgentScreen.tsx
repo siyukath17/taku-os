@@ -5,14 +5,14 @@ import {GenUiCard} from '../components/GenUiCard';
 import {useAgentController} from '../hooks/useAgentController';
 import {useTakuFonts} from '../theme/useTakuFonts';
 import {chatColors, themedStyles, useChatAppearance} from '../chat/chatTheme';
-import {AgentMarkdown} from '../native/Markdown';
+import {AgentMarkdown, type MarkdownSize} from '../native/Markdown';
 import {collapseToIsland, launchDraft, onDraft} from '../native/agent';
 import type {Language} from '../i18n';
 import {appendHomeDrafts} from '../chat/homeDraft';
 import type {CardDemand} from '../chat/cardDemand';
 import type {MessagePart} from '../model/session';
 
-const renderMarkdown = (text: string, active: boolean, itemId: string) => <AgentMarkdown key={itemId} text={text} active={active}/>;
+const renderMarkdown = (text: string, active: boolean, itemId: string, size?: MarkdownSize) => <AgentMarkdown key={itemId} text={text} active={active} size={size}/>;
 
 export default function AgentScreen() {
   const appearance = useChatAppearance();
