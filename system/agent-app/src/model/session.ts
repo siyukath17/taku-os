@@ -100,6 +100,16 @@ export const list = (v: unknown): unknown[] => Array.isArray(v) ? v : [];
 export const string = (v: unknown): string => typeof v === 'string' ? v : '';
 const label = (v: unknown): string => { const s = string(v).trim(); return s === 'null' ? '' : s; };
 
+/**
+ * The session root right after Continue was accepted: the continuation (a new, published, queued
+ * task) replaces the failed task, so the next projection shows the conversation running and no
+ * failure card, before the next readSession confirms it.
+ */
+export function continuedSessionRoot(root: Json, continuationTaskId: string): Json {
+  return {...root, task: {id: continuationTaskId, state: 'queued', published: true, turnStarted: false},
+    request: {prompt: ''}, runtime: {}};
+}
+
 /** Restore is a local draft operation. A newer draft must never be overwritten. */
 export function failedTaskDraft(failure: TaskFailure, currentDraft: string): string | null {
   if (!failure.prompt.trim()) return null;
@@ -273,7 +283,13 @@ export function projectSession(value: unknown): SessionView {
   const queued = task.published === true && ['queued', 'running'].includes(string(task.state)) && !activeTurnId;
   // The gateway only exposes task/request after matching request.conversationId to this thread.
   // Keep a failed TaskBroker submission separate from native turn/message history.
-  const taskFailure: TaskFailure | null = id && label(task.id) && ['failed', 'needs_user'].includes(string(task.state)) ? {
+  const running = Boolean(activeTurnId) || blocks.some(b => b.active) || queued;
+  // The failure card is for a conversation that is idle on that failure. A running turn (e.g. after
+  // Continue) or a newer native turn that completed after the failed one supersedes it.
+  const failedTurnId = label(record(root.runtime).turnId), lastTurn = record(turns[turns.length - 1]);
+  const superseded = Boolean(failedTurnId) && Boolean(label(lastTurn.id)) && label(lastTurn.id) !== failedTurnId
+    && itemStatus(lastTurn) === 'completed';
+  const taskFailure: TaskFailure | null = !running && !superseded && id && label(task.id) && ['failed', 'needs_user'].includes(string(task.state)) ? {
     taskId: string(task.id), message: string(task.message), prompt: string(record(root.request).prompt),
     turnStarted: task.turnStarted === true || record(root.runtime).turnStarted === true,
   } : null;
@@ -281,7 +297,7 @@ export function projectSession(value: unknown): SessionView {
     id, title: label(thread.name) || label(thread.preview), blocks,
     questions: list(native.requests).map(record).filter(q => label(q.key) && id && record(q.params).threadId === id)
       .map(q => ({key: string(q.key), method: string(q.method), params: record(q.params)})),
-    running: Boolean(activeTurnId) || blocks.some(b => b.active) || queued, activeTurnId, ready: native.ready === true,
+    running, activeTurnId, ready: native.ready === true,
     error: string(native.error), historyComplete: complete, knownEmpty,
     historyStatus: complete ? 'complete' : root.historyStatus === 'partial' || blocks.length ? 'partial' : 'unknown',
     totalTurns: typeof root.totalTurns === 'number' ? root.totalTurns : turns.length,

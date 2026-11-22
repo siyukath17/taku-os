@@ -47,10 +47,14 @@ internal object TaskRequests {
      * one ({@code continuation.ofTaskId}). It carries no user text, so the user's request is never
      * resent and no second user message appears; the broker's ACP runtime loads the interrupted
      * agent session and asks it to continue (other runtimes get the continuation instruction).
+     * [receipt] records the new task as the conversation's current task (the `task-<thread>`
+     * receipt that readSession reports) before it is published, so the chat page stops showing
+     * the old failure the moment the continuation exists.
      */
     @JvmStatic
+    @JvmOverloads
     @Throws(Exception::class)
-    fun continueTask(thread: String, taskId: String): JSONObject {
+    fun continueTask(thread: String, taskId: String, receipt: (String) -> Unit = {}): JSONObject {
         if (!conversationId.matches(thread)) throw IOException("Invalid conversation identifier")
         if (!Regex("[0-9]{1,19}").matches(taskId)) throw IOException("INVALID_ARGUMENT")
         val failed = File(TaskRuntime.TASKS, taskId)
@@ -86,6 +90,7 @@ internal object TaskRequests {
                 .put("prompt", "")
                 .put("message", "Queued for background execution")
                 .toString())
+            receipt(id)
             write(File(TaskRuntime.ROOT, "latest.id"), id)
             write(File(directory, "ready"), "1")
             JSONObject().put("threadId", thread).put("taskId", id).put("continuationOf", taskId)

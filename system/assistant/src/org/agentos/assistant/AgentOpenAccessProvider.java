@@ -196,7 +196,12 @@ public final class AgentOpenAccessProvider extends ContentProvider {
                 result = method.equals("interrupt")
                         ? TaskRequests.interrupt(thread, validated.getString("turnId"))
                         : method.equals("continueTask")
-                        ? TaskRequests.continueTask(thread, validated.getString("taskId"))
+                        ? TaskRequests.continueTask(thread, validated.getString("taskId"), task -> {
+                            // Same receipt as the gateway: readSession reports the continuation, not the old failure.
+                            if (!context.getSharedPreferences("agent-settings", Context.MODE_PRIVATE).edit().putString("task-" + thread, task).commit())
+                                throw new IllegalStateException("RECEIPT_SAVE_FAILED");
+                            return kotlin.Unit.INSTANCE;
+                        })
                         : TaskRequests.cancelQueued(thread, validated.getString("taskId"));
             } else if (SYSTEM_AI.contains(method)) {
                 result = SystemAiUiBridge.execute(context, method, AgentGatewayProtocol.request(method, arg));

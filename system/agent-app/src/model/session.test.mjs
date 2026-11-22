@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {projectSession, projectThreads, projectWorkspaces, failedTaskDraft, itemStatus} from './session.ts';
+import {projectSession, projectThreads, projectWorkspaces, failedTaskDraft, itemStatus, continuedSessionRoot} from './session.ts';
 
 // Run with the project's tsx test runner (or Node 22.18+ type stripping).
 
@@ -233,6 +233,27 @@ test('only a failed task with an identity exposes the gateway-scoped request', (
   assert.equal(projectSession({task: {id: '123', state: 'failed'}, request: base.request}).taskFailure, null);
   const noRequest = projectSession({...base, request: undefined, task: {id: '123', state: 'failed', prompt: 'Do not use this state field'}});
   assert.equal(noRequest.taskFailure.prompt, '');
+});
+
+test('Continue hides the failure card at once and a running turn never shows it', () => {
+  const failedTurn = {id: 'turn-1', status: 'failed', items: [{id: 'u', type: 'userMessage', content: [{type: 'text', text: 'Original request'}]}]};
+  const failed = {thread: {id: 't', turns: [failedTurn]}, native: {ready: true},
+    task: {id: '123', state: 'failed', published: true, message: 'Request failed'}, request: {prompt: 'Original request'}, runtime: {turnId: 'turn-1', turnStarted: true}};
+  assert.equal(projectSession(failed).taskFailure.taskId, '123');
+  // Tapping Continue: the accepted continuation replaces the failed task immediately.
+  const continued = projectSession(continuedSessionRoot(failed, '124'));
+  assert.equal(continued.taskFailure, null);
+  assert.equal(continued.running, true);
+  assert.equal(continued.taskId, '124');
+  // Field case: the stale receipt still reports the old failed task while the new turn runs.
+  const working = {...failed, thread: {id: 't', turns: [failedTurn, {id: 'turn-2', status: 'inProgress', items: []}]}, native: {ready: true, activeTurnId: 'turn-2'}};
+  assert.equal(projectSession(working).taskFailure, null);
+  assert.equal(projectSession(working).running, true);
+  // A newer turn that completed after the failed one supersedes the failure too.
+  const succeeded = {...failed, thread: {id: 't', turns: [failedTurn, {id: 'turn-2', status: 'completed', items: []}]}};
+  assert.equal(projectSession(succeeded).taskFailure, null);
+  // Idle on the failure (the failed turn is still the latest): the card stays.
+  assert.equal(projectSession({...failed, native: {ready: true, activeTurnId: ''}}).taskFailure.taskId, '123');
 });
 
 test('restoring a failure prepares only a draft and preserves a newer draft', () => {

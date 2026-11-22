@@ -289,7 +289,9 @@ class AgentGatewayProvider : ContentProvider() {
                 override fun published(taskId: String): Boolean = java.util.regex.Pattern.matches("[0-9]+", taskId) && File(File(TaskRuntime.TASKS, taskId), "ready").isFile
             })
             "cancelQueued" -> return TaskRequests.cancelQueued(thread, input.getString("taskId"))
-            "continueTask" -> return TaskRequests.continueTask(thread, input.getString("taskId"))
+            "continueTask" -> return TaskRequests.continueTask(thread, input.getString("taskId")) { task ->
+                if (!preferences().edit().putString("task-$thread", task).commit()) throw IOException("RECEIPT_SAVE_FAILED")
+            }
             "interrupt" -> return TaskRequests.interrupt(thread, input.getString("turnId"))
             AgentGatewayProtocol.LIVE_TASK_READ, AgentGatewayProtocol.LIVE_TASK_REPLACE, AgentGatewayProtocol.LIVE_TASK_CANCEL ->
                 return TaskRequests.liveTask(submissions, input, action)

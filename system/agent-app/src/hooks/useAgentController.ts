@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {useLocales} from 'expo-localization';
 import {callAgent, closeAgent, consumePanelLaunch, isPanelLaunchConsumed, launchPanelTarget, launchThreadId, newRequestId, onOpenThread, selectConversation, subscribeSession, watchConversationVisible, AgentGatewayError, type PanelTarget} from '../native/agent';
 import {onComposerAttachment, pickComposerAttachment, type ComposerPickerKind} from '../native/composerPicker';
-import {projectSession, projectThreads, projectWorkspaces, record, string, type Json, type SessionView, type ThreadSummary, type WorkspaceView} from '../model/session';
+import {continuedSessionRoot, projectSession, projectThreads, projectWorkspaces, record, string, type Json, type SessionView, type ThreadSummary, type WorkspaceView} from '../model/session';
 import {isAcceptedReceipt, isNotSentReceipt, pendingKey, preserveAndReleaseUnconfirmed, unconfirmedArchivePrefix, type PendingSubmission} from './submission';
 import {ComposerDraft, isDraftRevisionConflict, parseComposerSnapshot, type ComposerSnapshot, type ComposerSubmission} from './composerDraft';
 import {readCurrent, restoreConversation} from './readLifecycle';
@@ -736,7 +736,15 @@ export function useAgentController() {
     const threadId = selectedRef.current;
     if (!threadId || sessionRef.current?.id !== threadId || sessionRef.current.taskFailure?.taskId !== taskId)
       throw new AgentGatewayError('Task changed', 'TASK_FAILURE_CHANGED');
-    await callAgent('continueTask', {threadId, taskId});
+    const accepted = record(await callAgent('continueTask', {threadId, taskId}));
+    // Hide the old failure at once: the continuation is the conversation's task from now on.
+    const continuation = string(accepted.taskId);
+    if (continuation && selectedRef.current === threadId) {
+      sidebandRef.current = continuedSessionRoot(sidebandRef.current, continuation);
+      taskRef.current = record(sidebandRef.current.task);
+      const next = retainSessionBlocks(projectSession(sessionRootForDisplay(streamRef.current.state, sidebandRef.current)), sessionRef.current);
+      sessionRef.current = next; setSession(next);
+    }
     setRefreshRevision(v => v + 1);
   }), [run]);
 
