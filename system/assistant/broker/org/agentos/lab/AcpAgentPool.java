@@ -475,9 +475,13 @@ final class AcpAgentPool {
         if (victim != null) retire(victim, victim.alive() ? "idle-ttl" : "exited");
     }
 
-    /** True with no process idle, warming or checked out by a turn: a prewarm would start one. */
+    /**
+     * True with no live process idle, none warming and none checked out by a turn: a prewarm would
+     * start one. An idle process that already died counts as empty (prewarm replaces it), so a crash
+     * between reaper passes does not stop the next reopen from warming.
+     */
     synchronized boolean empty() {
-        return idle == null && !warming && checkedOut == 0;
+        return (idle == null || !idle.alive()) && !warming && checkedOut == 0;
     }
 
     synchronized boolean hasIdle() {

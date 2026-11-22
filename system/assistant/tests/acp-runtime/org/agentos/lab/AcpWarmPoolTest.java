@@ -99,7 +99,7 @@ public final class AcpWarmPoolTest {
         Env env = new Env(new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL), TimeUnit.MINUTES.toMillis(5));
         File t1 = env.run("701", "first");
         check("completed".equals(read(t1, "done")) && "cold".equals(info(t1).getString("agentProcess")), "turn 1: cold start completes");
-        check(env.pool.hasIdle() && env.pool.checkedOut() == 0, "turn 1: the idle agent is kept warm");
+        check(env.pool.hasIdle() && env.pool.checkedOut() == 0 && !env.pool.empty(), "turn 1: the idle agent is kept warm (pool not empty)");
         File t2 = env.run("702", "second");
         check("completed".equals(read(t2, "done")), "turn 2: completes on the warm process");
         check(env.agent.launches.size() == 1 && env.agent.methods("initialize").size() == 1,
@@ -196,6 +196,9 @@ public final class AcpWarmPoolTest {
         Env env = new Env(new FakeAcpAgent(FakeAcpAgent.Scenario.NORMAL), TimeUnit.MINUTES.toMillis(5));
         env.run("741", "one");
         env.agent.processes.get(0).destroy(0);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!env.pool.empty() && System.nanoTime() < until) Thread.sleep(10);
+        check(env.pool.empty(), "a dead idle process counts as an empty pool (a reopen may warm again)");
         File t2 = env.run("742", "two");
         check("completed".equals(read(t2, "done")) && "cold".equals(info(t2).getString("agentProcess")) && env.agent.launches.size() == 2,
                 "a dead warm process is replaced by a cold start");
