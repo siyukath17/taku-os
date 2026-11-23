@@ -4,6 +4,7 @@ import {EnrichedMarkdownText, type MarkdownStyle} from 'react-native-enriched-ma
 import {containsChinese} from '../theme';
 import {chatColors, getChatAppearance, themed, themedStyles} from '../chat/chatTheme';
 import {advanceMarkdown} from './MarkdownStream';
+import {isWebUrl} from './MarkdownLinks';
 
 /** Readable syntax colours on the ink-green page: muted inks, malachite for keywords (Renma code slips). */
 const syntax = themed(() => getChatAppearance() === 'dark'
@@ -58,7 +59,7 @@ const streamingConfig = {tableMode: 'progressive', codeBlockMode: 'progressive'}
 const selectionMenuConfig = {copyAsMarkdown: {enabled: false}};
 const flags = {latexMath: false};
 const openLink = ({url}: {url: string}) => {
-  if (/^https?:\/\//i.test(url)) void Linking.openURL(url).catch(() => {});
+  if (isWebUrl(url)) void Linking.openURL(url.trim()).catch(() => {});
 };
 
 const MarkdownChunk = memo(function MarkdownChunk({text, active, trailing, chinese, size}: {text: string; active: boolean; trailing: boolean; chinese: boolean; size: MarkdownSize}) {

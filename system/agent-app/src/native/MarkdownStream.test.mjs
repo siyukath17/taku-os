@@ -87,3 +87,15 @@ test('Unicode, CRLF and item-local state preserve the authoritative source', () 
   assert.equal(right.raw, 'other **item');
   assert.equal(right.tail.text, 'other **item**');
 });
+
+test('frozen, live and final chunks show web links as short labels and drop unsafe ones (BUG-0032)', () => {
+  const url = 'https://example.com/docs/a/very/long/reference/path?utm_source=agent&x=1';
+  const live = advanceMarkdown(undefined, `参考 ${url}\n\n[坏链接](javascript:alert(1)) 与 [标题](https://a.com/x y)\n`, true);
+  assert.equal(live.frozen.map(c => c.text).join(''), `参考 [example.com/docs/…](<${url}>)\n\n`);
+  assert.equal(live.tail.text, '坏链接 与 [标题](<https://a.com/x%20y>)\n');
+  const next = advanceMarkdown(live, `${live.raw}\nMore`, true);
+  assert.strictEqual(next.frozen[0], live.frozen[0]);
+  const final = advanceMarkdown(next, next.raw, false);
+  assert.equal(final.raw, next.raw);
+  assert.equal(final.tail.text, `参考 [example.com/docs/…](<${url}>)\n\n坏链接 与 [标题](<https://a.com/x%20y>)\n\nMore`);
+});

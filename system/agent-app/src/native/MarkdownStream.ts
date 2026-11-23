@@ -2,6 +2,7 @@ import {fromMarkdown} from 'mdast-util-from-markdown';
 import {gfmTableFromMarkdown} from 'mdast-util-gfm-table';
 import {gfmTable} from 'micromark-extension-gfm-table';
 import remend from 'remend';
+import {presentMarkdownLinks} from './MarkdownLinks.ts';
 
 export interface MarkdownChunk {id: string; text: string}
 export interface MarkdownStream {
@@ -70,7 +71,11 @@ export function repairMarkdownTail(raw: string): string {
   });
 }
 
-/** Frozen chunks retain identity; append-only updates parse just the remaining tail. */
+/**
+ * Frozen chunks retain identity; append-only updates parse just the remaining tail. Chunk text is
+ * what the native view shows: offsets index `raw`, and every chunk's web links are presented as short
+ * labels (non-web links as plain words) once, when the chunk is made.
+ */
 export function advanceMarkdown(previous: MarkdownStream | undefined, raw: string, active: boolean): MarkdownStream {
   if (previous?.raw === raw && previous.active === active) return previous;
   const reset = !!previous && (!raw.startsWith(previous.raw) || active && !previous.active);
@@ -78,14 +83,14 @@ export function advanceMarkdown(previous: MarkdownStream | undefined, raw: strin
   // A new final native view also works around enriched 1.1.1's unchanged-text
   // streaming completion bug (#1007). Raw text is never padded or repaired here.
   if (!active) return {raw, active, generation, frozen: [], offset: 0,
-    tail: {id: `${generation}/final`, text: raw}};
+    tail: {id: `${generation}/final`, text: presentMarkdownLinks(raw)}};
   const frozen = previous?.active && !reset ? previous.frozen : [];
   const offset = previous?.active && !reset ? previous.offset : 0;
   const remaining = raw.slice(offset);
   const boundary = completedMarkdownBoundary(remaining);
   const nextOffset = offset + boundary;
   return {raw, active, generation,
-    frozen: boundary ? [...frozen, {id: `${generation}/${offset}`, text: remaining.slice(0, boundary)}] : frozen,
+    frozen: boundary ? [...frozen, {id: `${generation}/${offset}`, text: presentMarkdownLinks(remaining.slice(0, boundary))}] : frozen,
     offset: nextOffset,
-    tail: {id: `${generation}/${nextOffset}`, text: repairMarkdownTail(raw.slice(nextOffset))}};
+    tail: {id: `${generation}/${nextOffset}`, text: presentMarkdownLinks(repairMarkdownTail(raw.slice(nextOffset)))}};
 }
