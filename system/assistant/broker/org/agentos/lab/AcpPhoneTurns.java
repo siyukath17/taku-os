@@ -13,12 +13,22 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@link Hooks} start the turn's gesture owner and release its background screen, as
  * {@code turn/started}..{@code turn/completed} does for a Codex turn. The phone MCP host resolves a
  * tool call's turn through {@link #current}, never through the turn its relay was started for.
+ *
+ * <p>Ending a turn always closes that turn's own gesture owner, but only the thread's current turn
+ * releases thread-scoped state (its background screen): a late or repeated end of an older turn must
+ * never take the screen of a newer turn that already began. Begin and end are serialized so a turn's
+ * hooks never interleave with the next turn's.
  */
 final class AcpPhoneTurns {
     interface Hooks {
         void started(String thread, String turn) throws Exception;
 
-        void ended(String thread, String turn) throws Exception;
+        /**
+         * {@code turn} ended. {@code current} is true only when it was still the thread's current turn
+         * (false for a repeated end, or for an older turn ending after a newer one began): only then may
+         * thread-scoped state such as the background screen be released.
+         */
+        void ended(String thread, String turn, boolean current) throws Exception;
     }
 
     private static final Map<String, String> CURRENT = new ConcurrentHashMap<>();
@@ -27,7 +37,7 @@ final class AcpPhoneTurns {
 
     private AcpPhoneTurns() {}
 
-    static void begin(String thread, String turn) {
+    static synchronized void begin(String thread, String turn) {
         if (thread == null || thread.isEmpty() || turn == null || turn.isEmpty()) return;
         CURRENT.put(thread, turn);
         Hooks h = hooks;
@@ -39,12 +49,12 @@ final class AcpPhoneTurns {
     }
 
     /** Ends {@code turn}; a later turn of the same thread that already began is left current. */
-    static void end(String thread, String turn) {
+    static synchronized void end(String thread, String turn) {
         if (thread == null || thread.isEmpty() || turn == null || turn.isEmpty()) return;
-        CURRENT.remove(thread, turn);
+        boolean current = CURRENT.remove(thread, turn);
         Hooks h = hooks;
         if (h != null) try {
-            h.ended(thread, turn);
+            h.ended(thread, turn, current);
         } catch (Exception | LinkageError failure) {
             System.err.println("acp phone turn end: " + failure.getMessage());
         }

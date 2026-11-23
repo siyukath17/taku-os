@@ -48,6 +48,13 @@ task_sources=(
  system/assistant/src/org/agentos/assistant/AcpIslandProjection.java
 )
 "$JDK/bin/javac" --release 17 -cp "$ANDROID_JAR" -d "$task_out/android-check" "${task_sources[@]}"
+# The real gesture pointer behind ACP turn boundaries (AcpPhoneTurnBoundaryTest). Built on its own:
+# its lint policy is the execution-screens suite's (lock-holder try resources), not this one's.
+mkdir -p "$task_out/gesture"
+"$JDK/bin/javac" --release 17 -d "$task_out/gesture" \
+ system/assistant/broker/org/agentos/lab/PhoneGestureSession.java \
+ system/assistant/broker/org/agentos/lab/CleanupWork.java
+task_app_cp="$task_app_cp:$task_out/gesture"
 "$JDK/bin/javac" --release 17 -Xlint:all -Werror -Xlint:-serial -cp "$task_json:$task_app_cp" -d "$task_out/classes" \
  "${task_sources[@]}" \
  system/assistant/tests/acp-runtime/org/agentos/lab/FakeAcpAgent.java \
@@ -75,6 +82,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/BrokerLogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TaskWakeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/GestureOwnersTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpPhoneTurnBoundaryTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/PhoneTurnLog.java \
  system/assistant/tests/acp-runtime/org/agentos/assistant/AcpChatProjectionTest.java \
  system/assistant/src/org/agentos/assistant/AgentConversation.java \
@@ -85,7 +93,7 @@ task_sources=(
 # BrokerLogTest also writes real broker.log output (BrokerLog + Timings.summary) for the report script's test.
 export ACP_TTFT_SAMPLE_DIR="$task_out/ttft-sample"
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpPoolEdgesTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpPoolEdgesTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest AcpPhoneTurnBoundaryTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json:$task_app_cp" "$main"
 done | tee "$task_out/result.txt"

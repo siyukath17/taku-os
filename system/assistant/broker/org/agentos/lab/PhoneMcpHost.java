@@ -146,9 +146,10 @@ final class PhoneMcpHost {
             PhoneGestures.startTurn(thread, turn);
         }
 
-        @Override public void ended(String thread, String turn) throws Exception {
+        @Override public void ended(String thread, String turn, boolean current) throws Exception {
             PhoneGestures.endTurn(thread, turn);
-            DedicatedScreensOnDevice.shared().turnEnded(thread);
+            // The screen is the thread's: a stale or repeated end must not release a newer turn's.
+            if (current) DedicatedScreensOnDevice.shared().turnEnded(thread);
         }
     };
 

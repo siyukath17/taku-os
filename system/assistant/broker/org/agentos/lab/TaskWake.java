@@ -20,11 +20,18 @@ final class TaskWake {
     static final long STEP_MILLIS = 5, FRESH_SECONDS = 10;
 
     private final File tasks;
+    private final long freshNanos;
     /** New task directory name -> when it was reported (nanoTime). */
     private final Map<String, Long> fresh = new LinkedHashMap<>();
 
     TaskWake(File tasks) {
+        this(tasks, TimeUnit.SECONDS.toMillis(FRESH_SECONDS));
+    }
+
+    /** {@code freshMillis}: how long a reported directory without its ready mark is remembered (tests). */
+    TaskWake(File tasks, long freshMillis) {
         this.tasks = tasks;
+        this.freshNanos = TimeUnit.MILLISECONDS.toNanos(freshMillis);
     }
 
     /** A directory appeared in {@code tasks/} (an inotify event's name; null and dot names are ignored). */
@@ -49,7 +56,7 @@ final class TaskWake {
                 if (new File(new File(tasks, entry.getKey()), "ready").exists()) {
                     it.remove();
                     ready = true;
-                } else if (now - entry.getValue() > TimeUnit.SECONDS.toNanos(FRESH_SECONDS)) it.remove();
+                } else if (now - entry.getValue() > freshNanos) it.remove();
             }
             if (ready) return;
             long left = TimeUnit.NANOSECONDS.toMillis(deadline - now);

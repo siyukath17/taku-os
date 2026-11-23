@@ -208,6 +208,11 @@ public final class AcpRuntimeTest {
         check(cancels.size() == 1 && "s-1".equals(cancels.get(0).getJSONObject("params").getString("sessionId"))
                 && !cancels.get(0).has("id"), "cancel: one session/cancel notification for the session");
         check(agent.processes.get(0).destroyed, "cancel: process reclaimed");
+        String thread = AcpRuntime.phoneThread("", "105");
+        check(PhoneTurnLog.events().stream().filter(("end " + thread + " acp-task-105")::equals).count() == 1
+                        && !PhoneTurnLog.events().contains("end-stale " + thread + " acp-task-105")
+                        && AcpPhoneTurns.current(thread) == null,
+                "cancel: the phone turn is ended exactly once, as the current turn: " + PhoneTurnLog.events());
     }
 
     static void cancelIgnoredIsReclaimed() throws Exception {
@@ -233,6 +238,9 @@ public final class AcpRuntimeTest {
         FakeAcpAgent agent = new FakeAcpAgent();
         new AcpRuntime(options(), agent, null, null).run(dir, request("107", "full", null));
         check("cancelled".equals(read(dir, "done")) && agent.launches.isEmpty(), "cancel before start: no process is started");
+        String thread = AcpRuntime.phoneThread("", "107");
+        check(PhoneTurnLog.events().stream().noneMatch(e -> e.endsWith(thread + " acp-task-107")) && AcpPhoneTurns.current(thread) == null,
+                "cancel before start: no phone turn is opened: " + PhoneTurnLog.events());
     }
 
     static void turnBudget() throws Exception {
