@@ -259,7 +259,7 @@ Mac mini, TV boxes and other machines running `taku-runtime` that the on-device 
 `connect.json` beside it. Tokens never come back (only `hasToken`).
 
 ```sh
-taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,routes:[{label,kind,url}],enabled,hasToken,appearance}]}
+taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,routes:[{label,kind,url}],enabled,hasToken,appearance,demo?,demoStatus?}]}
 taku_call "$D" connect/probe '{"id":"taku_macmini"}'
 # {status:"online"|"unauthorized"|"offline",online,url,network,latencyMs,capabilities:{device,os,arch,mode,engine,
 #  tools:[{name,description}],reservedTools,exec:{enabled,allowedRoots,defaultTimeoutMs,maxTimeoutMs,maxOutputBytes},appearance},
@@ -285,6 +285,16 @@ Icons resolve in three tiers on every client: custom `icon` (phone override, the
 `capabilities.appearance.icon`) → built-in drawing for `deviceType` → `generic`. `icon` accepts
 `builtin:<type>`, `http(s)://…`, `data:image/(png|jpeg|webp|gif|svg+xml);base64,…` (≤ 256 KiB) or an absolute
 `.png/.jpg/.webp/.svg` path; `deviceType` is one of `mac_mini laptop desktop tv server phone tablet speaker car generic`.
+`appearance` also takes `shortName` (≤ 16 chars): the orbit label under the bubble (e.g. `Tesla` for `Tesla Model Y`).
+
+Demo nodes: a `connect.json` entry keyed `demo_<slug>` with `"demo":true` (plus `appearance`,
+optional `enabled` and `demoStatus` ≤ 48 chars, e.g. `"82% · 410 km"`) is listed with `demo:true`,
+no url/routes/token. It is a showcase only: it is never in runtime.json `mcpServers`, so the agent
+has no tools for it. `probe` answers locally (`online` while switched on); `setEnabled` stores
+`enabled`, `appearance` and `remove` edit/delete the entry, `routes` fails `DEMO_NODE`. The page gives
+demo `car`/`tv` nodes a device card (3D car stage, TV screen, local-only control chips; "Dispatch task"
+only says it is a preview); real nodes always keep the live card. Delete the entry to remove it:
+`{"demo_tesla":{"demo":true,"demoStatus":"82% · 410 km","appearance":{"displayName":"Tesla Model Y","shortName":"Tesla","deviceType":"car"}}}`.
 
 Routes (`connect/routes`, optional `routes` on `add`): 1–8 `{label?, kind?, url}` in preference order
 (lan → ipv6 → tailscale → relay). `kind` ∈ `lan ipv6 tailscale relay internet` (`relay` = frp or a LAN

@@ -38,9 +38,15 @@ import java.util.regex.Pattern;
  * lives in {@code connect.json} next to it:
  *
  * <pre>{"schema":"taku.connect/1","nodes":{"taku_macmini":{
- *    "appearance":{"displayName":"…","deviceType":"mac_mini","icon":"builtin:mac_mini|https://…|data:image/…"},
+ *    "appearance":{"displayName":"…","shortName":"…","deviceType":"mac_mini","icon":"builtin:mac_mini|https://…|data:image/…"},
  *    "routes":[{"label":"…","kind":"lan|ipv6|tailscale|relay|internet","url":"http://192.168.1.205:7878"},…],
  *    "disabled":{…the mcpServers entry while switched off…}}}}</pre>
+ *
+ * <p>Demo nodes: a connect.json entry keyed {@code demo_*} with {@code "demo":true} (plus
+ * {@code appearance}, optional {@code enabled} and {@code demoStatus}) is listed for the page as a
+ * showcase device (e.g. a car or TV card). It has no runtime.json entry, so the agent never gets
+ * tools for it; only {@code setEnabled} (stored as {@code enabled}), {@code appearance} and
+ * {@code remove} apply, and deleting the entry from connect.json removes it.
  *
  * <p>Routes: the runtime url list is authoritative for <em>which</em> routes exist and their order
  * (preference: lan → ipv6 → tailscale → relay); stored labels/kinds only decorate them. The taku client
@@ -57,6 +63,8 @@ final class TakuConnect {
     static final Set<String> DEVICE_TYPES = Set.of("mac_mini", "laptop", "desktop", "tv", "server", "phone", "tablet", "speaker", "car", "generic");
     static final int MAX_ICON_BYTES = 256 * 1024, MAX_NAME_CHARS = 64, MAX_TOKEN_CHARS = 512, MAX_NODES = 32;
     static final Pattern ID = Pattern.compile("taku_[a-z0-9_]{1,40}");
+    static final Pattern DEMO_ID = Pattern.compile("demo_[a-z0-9_]{1,40}");
+    static final int MAX_DEMO_STATUS_CHARS = 48, MAX_SHORT_NAME_CHARS = 16;
     static final String DEFAULT_CLIENT = "/data/local/agentos/acp/bin/taku";
     static final String TOKEN_FILE_PREFIX = "/data/local/agentos/";
     static final int CONNECT_TIMEOUT_MS = 2500, READ_TIMEOUT_MS = 4000;
@@ -94,6 +102,7 @@ final class TakuConnect {
             String file;
             synchronized (this) {
                 node = node(input.getString("id"));
+                if (node.optBoolean("demo")) return demoProbe(node);
                 file = tokenFile(node.getString("id"));
             }
             return probe(node, file);
@@ -188,7 +197,35 @@ final class TakuConnect {
             if (parsed == null || !seen.add(id)) continue;
             out.put(view(parsed, false, entry));
         }
+        for (Iterator<String> it = saved.keys(); it.hasNext(); ) {
+            String id = it.next();
+            JSONObject entry = saved.optJSONObject(id);
+            if (entry != null && isDemo(id, entry) && seen.add(id)) out.put(demoView(id, entry));
+        }
         return new JSONObject().put("schema", SCHEMA).put("nodes", out);
+    }
+
+    static boolean isDemo(String id, JSONObject entry) {
+        return DEMO_ID.matcher(id).matches() && entry.optBoolean("demo");
+    }
+
+    /** A showcase node: no url, routes or token; never in runtime.json. */
+    static JSONObject demoView(String id, JSONObject entry) throws Exception {
+        JSONObject appearance = entry.optJSONObject("appearance");
+        String status = entry.optString("demoStatus", "").trim();
+        if (status.length() > MAX_DEMO_STATUS_CHARS) status = status.substring(0, MAX_DEMO_STATUS_CHARS);
+        JSONObject view = new JSONObject().put("id", id).put("url", "").put("host", "").put("network", "internet")
+                .put("routes", new JSONArray()).put("enabled", entry.optBoolean("enabled", true)).put("hasToken", false)
+                .put("demo", true).put("appearance", appearance == null ? new JSONObject() : appearance);
+        if (!status.isEmpty()) view.put("demoStatus", status);
+        return view;
+    }
+
+    /** Demo nodes answer "online" while switched on, without any network I/O. */
+    static JSONObject demoProbe(JSONObject node) throws Exception {
+        boolean on = node.getBoolean("enabled");
+        return new JSONObject().put("id", node.getString("id")).put("demo", true).put("enabled", on)
+                .put("status", on ? "online" : "offline").put("online", on).put("checkedAt", System.currentTimeMillis());
     }
 
     JSONObject view(JSONObject parsed, boolean enabled, JSONObject saved) throws Exception {
@@ -557,6 +594,13 @@ final class TakuConnect {
         return name;
     }
 
+    /** The orbit label (e.g. "Tesla" for "Tesla Model Y"): a display name of at most 16 characters. */
+    static String shortName(Object value) throws Invalid {
+        String name = displayName(value);
+        if (name.length() > MAX_SHORT_NAME_CHARS) throw new Invalid("INVALID_NAME");
+        return name;
+    }
+
     /** builtin:<type> | http(s) URL | data:image/… ; an absolute image path is inlined as a data: URI. */
     static String icon(Object value) throws Exception {
         if (!(value instanceof String)) throw new Invalid("INVALID_ICON");
@@ -661,7 +705,12 @@ final class TakuConnect {
     }
 
     JSONObject remove(String id) throws Exception {
-        node(id);
+        if (node(id).optBoolean("demo")) {
+            JSONObject stored = loadStore();
+            stored.getJSONObject("nodes").remove(id);
+            writeStore(stored);
+            return new JSONObject().put("removed", id);
+        }
         JSONObject runtime = loadRuntime(), stored = loadStore();
         JSONArray kept = withoutServer(servers(runtime), id);
         String file = tokenFile(id);
@@ -678,6 +727,12 @@ final class TakuConnect {
     JSONObject setEnabled(String id, boolean enabled) throws Exception {
         JSONObject current = node(id);
         if (current.getBoolean("enabled") == enabled) return new JSONObject().put("node", current);
+        if (current.optBoolean("demo")) {
+            JSONObject stored = loadStore();
+            stored.getJSONObject("nodes").getJSONObject(id).put("enabled", enabled);
+            writeStore(stored);
+            return new JSONObject().put("node", node(id));
+        }
         JSONObject runtime = loadRuntime(), stored = loadStore(), saved = stored.getJSONObject("nodes");
         JSONObject entry = saved.optJSONObject(id);
         if (entry == null) saved.put(id, entry = new JSONObject());
@@ -711,12 +766,13 @@ final class TakuConnect {
         JSONObject appearance = entry.optJSONObject("appearance");
         if (appearance == null) entry.put("appearance", appearance = new JSONObject());
         boolean changed = false;
-        for (String key : new String[]{"displayName", "deviceType", "icon"}) {
+        for (String key : new String[]{"displayName", "shortName", "deviceType", "icon"}) {
             if (!input.has(key)) continue;
             changed = true;
             Object value = input.get(key);
             if (value == JSONObject.NULL || "".equals(value)) { appearance.remove(key); continue; }
-            appearance.put(key, key.equals("displayName") ? displayName(value) : key.equals("deviceType") ? deviceType(value) : icon(value));
+            appearance.put(key, key.equals("displayName") ? displayName(value) : key.equals("shortName") ? shortName(value)
+                    : key.equals("deviceType") ? deviceType(value) : icon(value));
         }
         if (!changed) throw new Invalid("NOTHING_TO_UPDATE");
         writeStore(stored);
@@ -730,7 +786,7 @@ final class TakuConnect {
      */
     JSONObject routes(JSONObject input) throws Exception {
         String id = input.getString("id");
-        node(id);
+        if (node(id).optBoolean("demo")) throw new Invalid("DEMO_NODE");
         JSONArray routes = routesInput(input.opt("routes"));
         JSONObject runtime = loadRuntime(), stored = loadStore(), saved = stored.getJSONObject("nodes");
         JSONObject entry = saved.optJSONObject(id);

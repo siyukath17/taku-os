@@ -13,19 +13,21 @@ import {
 import {useLocales} from 'expo-localization';
 import {useRouter} from 'expo-router';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
-import Svg, {Circle, Line} from 'react-native-svg';
+import Svg, {Circle, Ellipse, Line} from 'react-native-svg';
 import {IconButton} from './Icon';
 import {DeviceIcon} from './connect/DeviceIcon';
+import {CarPanel, TvPanel} from './connect/DeviceCards';
 import {languageFor, type Language} from '../i18n';
 import {callAgent, type AgentGatewayError} from '../native/agent';
 import {SecretField, type SecretFieldHandle} from '../native/SecretField';
 import {
-  capabilityChips, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, forEachLimited, hostPort, isLive,
-  isTransientProbeError, nodeState, orbitLayout, PROBE_CONCURRENCY,
+  capabilityChips, cardKind, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, forEachLimited, hostPort, isLive,
+  isTransientProbeError, nodeState, orbitLayout, orbitName, PROBE_CONCURRENCY, probeFor,
   resolveIcon, routeRows, stateTone, statusLine, validateAddForm, type ConnectNode, type ConnectProbe, type NodeState, type RouteRow,
   type RouteTone, type StateTone,
 } from '../model/connect';
 import {queueConnectDispatch} from '../model/connectHandoff';
+import {demoDispatchNote} from '../model/deviceCards';
 import {colors, containsChinese, typography, type TypeRole} from '../theme';
 import {useTakuFonts} from '../theme/useTakuFonts';
 
@@ -104,7 +106,8 @@ export function ConnectScreen() {
     probing.current = true;
     try {
       for (let round: ConnectNode[] | null = list; round && mounted.current; round = queued.current, queued.current = null) {
-        await forEachLimited(round, PROBE_CONCURRENCY, async node => {
+        // Demo nodes are answered locally (probeFor): no gateway call, no network.
+        await forEachLimited(round.filter(n => !n.demo), PROBE_CONCURRENCY, async node => {
           for (let attempt = 0; ; attempt++) {
             try {
               const probe = await callAgent<ConnectProbe>('connect/probe', {id: node.id});
@@ -164,7 +167,7 @@ export function ConnectScreen() {
   }, [sheet]);
 
   const node = nodes?.find(n => n.id === selected) ?? null;
-  const probe = node ? probes[node.id] : undefined;
+  const probe = node ? probeFor(node, probes) : undefined;
 
   const toggle = useCallback(async (target: ConnectNode) => {
     setToggling(true);
@@ -180,11 +183,12 @@ export function ConnectScreen() {
   }, [language]);
 
   const dispatch = useCallback((target: ConnectNode) => {
-    queueConnectDispatch(dispatchDraft(target, probes[target.id], language));
+    queueConnectDispatch(dispatchDraft(target, probeFor(target, probes), language));
     router.replace('/');
   }, [language, probes, router]);
 
-  const visibleHeight = Math.max(0, canvas.height - sheetHeight + 24);
+  // The orbit (bubbles and their labels) ends above the sheet; nothing may hide behind its top edge.
+  const visibleHeight = Math.max(0, canvas.height - sheetHeight - 4);
   const layout = useMemo(() => {
     const top = insets.top + 56;
     const area = Math.max(0, visibleHeight - top);
@@ -197,16 +201,16 @@ export function ConnectScreen() {
   return <View style={styles.root} onLayout={e => setCanvas({width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height})}>
     {canvas.width > 0 && <Orbit layout={layout} nodes={nodes ?? []} probes={probes} selected={selected}/>}
     {canvas.width > 0 && <PhoneOrb x={layout.center.x} y={layout.center.y} label={t.phone} selected={selected === 'phone'} type={type}
-      live={(nodes ?? []).some(n => isLive(nodeState(n, probes[n.id])))} onPress={() => { setSelected('phone'); setSheet('node'); }}/>}
+      live={(nodes ?? []).some(n => isLive(nodeState(n, probeFor(n, probes))))} onPress={() => { setSelected('phone'); setSheet('node'); }}/>}
     {canvas.width > 0 && (nodes ?? []).map((n, i) => {
       const slot = layout.slots[i];
       if (!slot) return null;
-      const p = probes[n.id];
-      return <NodeBubble key={n.id} x={slot.x} y={slot.y} node={n} probe={p} selected={selected === n.id} type={type}
-        state={nodeState(n, p)} name={displayName(n, p)} onPress={() => { setSelected(n.id); setSheet('node'); }}/>;
+      const p = probeFor(n, probes);
+      return <NodeBubble key={n.id} x={slot.x} y={slot.y} node={n} probe={p} selected={selected === n.id} type={type} labelHalf={layout.labelHalf}
+        state={nodeState(n, p)} name={orbitName(n, p)} onPress={() => { setSelected(n.id); setSheet('node'); }}/>;
     })}
     {canvas.width > 0 && nodes && layout.slots[nodes.length] && <AddBubble x={layout.slots[nodes.length].x} y={layout.slots[nodes.length].y}
-      label={t.add} type={type} active={sheet === 'add'} onPress={() => setSheet('add')}/>}
+      label={t.add} type={type} labelHalf={layout.labelHalf} active={sheet === 'add'} onPress={() => setSheet('add')}/>}
 
     <View style={[styles.header, {paddingTop: insets.top}]} pointerEvents="box-none">
       <IconButton name="arrow_left" label={t.back} onPress={close}/>
@@ -221,7 +225,7 @@ export function ConnectScreen() {
           : sheet === 'add' ? <AddSheet t={t} type={type} language={language} onCancel={() => setSheet('node')}
             onSaved={async id => { await load(); if (mounted.current) { setSelected(id); setSheet('node'); } }}/>
           : sheet === 'permissions' && node ? <PermissionsSheet t={t} type={type} language={language} node={node} probe={probe} onBack={() => setSheet('node')}/>
-          : node ? <NodeSheet t={t} type={type} language={language} node={node} probe={probe} toggling={toggling} error={loadError}
+          : node ? <NodeSheet key={node.id} t={t} type={type} language={language} node={node} probe={probe} toggling={toggling} error={loadError}
             onToggle={() => { void toggle(node); }} onDispatch={() => dispatch(node)} onPermissions={() => setSheet('permissions')}/>
           : <PhoneSheet t={t} type={type} count={nodes.length} error={loadError}/>}
       </View>
@@ -234,21 +238,21 @@ export function ConnectScreen() {
 function Orbit({layout, nodes, probes, selected}: {
   layout: ReturnType<typeof orbitLayout>; nodes: ConnectNode[]; probes: Record<string, ConnectProbe>; selected: string | null;
 }) {
-  const {center, radii, slots} = layout;
+  const {center, radii, slots, aspect} = layout;
   // Star-track dots: fixed pseudo-random positions on and between the rings.
   const stars = useMemo(() => Array.from({length: 28}, (_, i) => {
     const angle = (i * 137.5 * Math.PI) / 180;
     const r = radii[0] * 0.55 + ((i * 53) % 100) / 100 * (radii[1] * 1.25 - radii[0] * 0.55);
-    return {x: center.x + r * Math.cos(angle), y: center.y + r * Math.sin(angle), r: i % 3 === 0 ? 1.6 : 1};
-  }), [center.x, center.y, radii]);
+    return {x: center.x + r * aspect * Math.cos(angle), y: center.y + r * Math.sin(angle), r: i % 3 === 0 ? 1.6 : 1};
+  }), [aspect, center.x, center.y, radii]);
   return <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-    <Circle cx={center.x} cy={center.y} r={radii[0]} stroke={colors.border} strokeWidth={1} fill="none"/>
-    <Circle cx={center.x} cy={center.y} r={radii[1]} stroke={colors.border} strokeWidth={1} strokeDasharray="2 6" fill="none"/>
-    <Circle cx={center.x} cy={center.y} r={radii[1] * 1.32} stroke={colors.subtle} strokeWidth={1} fill="none"/>
+    <Ellipse cx={center.x} cy={center.y} rx={radii[0] * aspect} ry={radii[0]} stroke={colors.border} strokeWidth={1} fill="none"/>
+    <Ellipse cx={center.x} cy={center.y} rx={radii[1] * aspect} ry={radii[1]} stroke={colors.border} strokeWidth={1} strokeDasharray="2 6" fill="none"/>
+    <Ellipse cx={center.x} cy={center.y} rx={radii[1] * 1.32 * aspect} ry={radii[1] * 1.32} stroke={colors.subtle} strokeWidth={1} fill="none"/>
     {stars.map((s, i) => <Circle key={i} cx={s.x} cy={s.y} r={s.r} fill={colors.switchOff}/>)}
     {nodes.map((n, i) => {
       const slot = slots[i];
-      const state = nodeState(n, probes[n.id]);
+      const state = nodeState(n, probeFor(n, probes));
       if (!slot || !isLive(state)) return null;
       return <Line key={n.id} x1={center.x} y1={center.y} x2={slot.x} y2={slot.y} stroke={colors.brand}
         strokeWidth={selected === n.id ? 1.8 : 1.2} strokeDasharray={selected === n.id ? undefined : '3 5'} strokeLinecap="round" opacity={selected === n.id ? 0.9 : 0.55}/>;
@@ -282,8 +286,8 @@ function PhoneOrb({x, y, label, selected, live, type, onPress}: {x: number; y: n
   </View>;
 }
 
-function NodeBubble({x, y, node, probe, state, name, selected, type, onPress}: {
-  x: number; y: number; node: ConnectNode; probe?: ConnectProbe; state: NodeState; name: string; selected: boolean; type: TypeFor; onPress: () => void;
+function NodeBubble({x, y, node, probe, state, name, selected, type, labelHalf, onPress}: {
+  x: number; y: number; node: ConnectNode; probe?: ConnectProbe; state: NodeState; name: string; selected: boolean; type: TypeFor; labelHalf: number; onPress: () => void;
 }) {
   return <View style={[styles.anchor, {left: x, top: y}]} pointerEvents="box-none">
     <Pulse size={BUBBLE} active={selected && isLive(state)}/>
@@ -292,17 +296,23 @@ function NodeBubble({x, y, node, probe, state, name, selected, type, onPress}: {
       <DeviceIcon source={resolveIcon(node, probe)} fallback={effectiveDeviceType(node, probe)} size={30}/>
       <View style={[styles.statusDot, {backgroundColor: toneColor(stateTone(state))}]}/>
     </Pressable>
-    <View style={styles.bubbleLabel} pointerEvents="none"><Text numberOfLines={1} style={[type('meta', name), styles.labelPill]}>{name}</Text></View>
+    <View style={[styles.bubbleLabel, {width: labelHalf * 2, left: -labelHalf}]} pointerEvents="none">
+      <Text numberOfLines={1} style={[type('meta', name), styles.labelPill, {maxWidth: labelHalf * 2}]}>{name}</Text>
+    </View>
   </View>;
 }
 
-function AddBubble({x, y, label, type, active, onPress}: {x: number; y: number; label: string; type: TypeFor; active: boolean; onPress: () => void}) {
+function AddBubble({x, y, label, type, labelHalf, active, onPress}: {
+  x: number; y: number; label: string; type: TypeFor; labelHalf: number; active: boolean; onPress: () => void;
+}) {
   return <View style={[styles.anchor, {left: x, top: y}]} pointerEvents="box-none">
     <Pressable testID="connect-add" accessibilityRole="button" accessibilityLabel={label} onPress={onPress}
       style={({pressed}) => [styles.bubble, styles.addBubble, active && styles.addActive, pressed && styles.pressed]}>
       <Text style={styles.plus}>+</Text>
     </Pressable>
-    <View style={styles.bubbleLabel} pointerEvents="none"><Text numberOfLines={1} style={[type('meta', label), styles.labelPill, styles.secondary]}>{label}</Text></View>
+    <View style={[styles.bubbleLabel, {width: labelHalf * 2, left: -labelHalf}]} pointerEvents="none">
+      <Text numberOfLines={1} style={[type('meta', label), styles.labelPill, styles.secondary, {maxWidth: labelHalf * 2}]}>{label}</Text>
+    </View>
   </View>;
 }
 
@@ -354,15 +364,28 @@ function NodeSheet({t, type, language, node, probe, toggling, error, onToggle, o
   const detail = [hostPort(state === 'online' && probe?.route ? probe.route.url : node.url),
     caps?.os && caps.arch ? `${caps.os}/${caps.arch}` : '', caps?.runtime && caps.version ? `${caps.runtime} ${caps.version}` : ''].filter(Boolean).join(' · ');
   const problem = state === 'unauthorized' || state === 'offline' ? connectError(state === 'unauthorized' ? 'NODE_UNAUTHORIZED' : 'NODE_UNREACHABLE', language) : '';
-  return <View style={styles.sheetBody}>
-    <View style={styles.nodeHead}>
+  const kind = cardKind(node, probe);
+  const [note, setNote] = useState('');
+  const head = <View style={styles.nodeHead}>
       <View style={styles.tile}><DeviceIcon source={resolveIcon(node, probe)} fallback={effectiveDeviceType(node, probe)} size={28}/></View>
       <View style={styles.flex}>
         <Text numberOfLines={1} style={type('context', name)}>{name}</Text>
         <StatusRow text={statusLine(node, probe, language)} tone={stateTone(state)} type={type}/>
       </View>
       <TakuSwitch value={node.enabled} disabled={toggling} label={t.enabled} onToggle={onToggle}/>
-    </View>
+    </View>;
+  if (kind !== 'standard') {
+    // Device card (demo node): its own panel; "Dispatch task" explains instead of handing the agent a device it has no tools for.
+    const off = state !== 'online';
+    return <View style={styles.sheetBody}>
+      {head}
+      {kind === 'car' ? <CarPanel language={language} type={type} disabled={off}/> : <TvPanel language={language} type={type} disabled={off}/>}
+      {!!(note || error) && <Text style={[type('meta'), error ? styles.error : styles.secondary]}>{error || note}</Text>}
+      <Button testID="connect-dispatch" label={t.dispatch} tone="ink" type={type} disabled={off} onPress={() => setNote(demoDispatchNote(language))}/>
+    </View>;
+  }
+  return <View style={styles.sheetBody}>
+    {head}
     <Chips labels={chips} type={type}/>
     {!!detail && <Text style={[type('caption'), styles.secondary]}>{detail}</Text>}
     {!!(problem || error) && <Text style={[type('meta'), styles.error]}>{error || problem}</Text>}

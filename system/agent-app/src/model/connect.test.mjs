@@ -163,11 +163,11 @@ test('orbit layout: 5–6 slots share one ring, bubbles and labels never overlap
   }
 });
 
-test('orbit layout staggers two rings around the centre', () => {
-  const {center, radii, slots} = orbitLayout(8, 400, 500);
+test('orbit layout: up to 4 slots on the inner ring around the centre', () => {
+  const {center, radii, slots} = orbitLayout(4, 400, 500);
   assert.deepEqual(center, {x: 200, y: 250});
-  assert.equal(slots.length, 8);
-  assert.deepEqual(slots.map(s => s.ring), [0, 0, 0, 0, 1, 1, 1, 1]);
+  assert.equal(slots.length, 4);
+  assert.deepEqual(slots.map(s => s.ring), [0, 0, 0, 0]);
   for (const slot of slots) {
     const r = Math.hypot(slot.x - center.x, slot.y - center.y);
     assert.ok(Math.abs(r - radii[slot.ring]) < 1e-6);
@@ -199,4 +199,52 @@ test('probe rounds stay under the gateway limit; BUSY is not offline', async () 
 test('error codes become readable messages', () => {
   assert.equal(connectError('NODE_UNAUTHORIZED', 'zh'), '密钥不正确');
   assert.equal(connectError('WEIRD', 'en'), 'Failed (WEIRD)');
+});
+
+// ---- demo nodes, device cards and the 7-node orbit ----
+
+const tesla = {id: 'demo_tesla', url: '', host: '', network: 'internet', routes: [], enabled: true, hasToken: false, demo: true, demoStatus: '82% · 410 km',
+  appearance: {displayName: 'Tesla Model Y', shortName: 'Tesla', deviceType: 'car'}};
+const xiaomi = {...tesla, id: 'demo_xiaomi_tv', demoStatus: '4K HDR', appearance: {displayName: 'Xiaomi TV', shortName: 'Xiaomi TV', deviceType: 'tv'}};
+
+test('demo nodes: answered locally, short orbit names, status detail from connect.json', async () => {
+  const {demoProbe, orbitName, probeFor} = await import('./connect.ts');
+  assert.equal(orbitName(tesla), 'Tesla');
+  assert.equal(displayName(tesla), 'Tesla Model Y');
+  assert.equal(orbitName(mac, online), 'HaiPro 的 Mac mini', 'no shortName: the display name');
+  assert.deepEqual(demoProbe(tesla), {id: 'demo_tesla', status: 'online', online: true, enabled: true});
+  assert.equal(probeFor({...tesla, enabled: false}, {}).status, 'offline');
+  assert.equal(probeFor(mac, {taku_macmini: online}), online, 'real nodes keep their gateway probe');
+  assert.equal(probeFor(mac, {}), undefined);
+  assert.equal(statusLine(tesla, demoProbe(tesla), 'en'), 'Online · 82% · 410 km');
+  assert.equal(statusLine(xiaomi, demoProbe(xiaomi), 'en'), 'Online · 4K HDR');
+  assert.equal(statusLine({...tesla, enabled: false}, demoProbe({...tesla, enabled: false}), 'en'), 'Off');
+});
+
+test('device cards: only demo car/TV nodes get them; real nodes keep the standard card', async () => {
+  const {cardKind} = await import('./connect.ts');
+  assert.equal(cardKind(tesla), 'car');
+  assert.equal(cardKind(xiaomi), 'tv');
+  assert.equal(cardKind({...xiaomi, demo: false}), 'standard', 'a real TV box keeps its live capabilities and routes');
+  assert.equal(cardKind({...tesla, appearance: {deviceType: 'mac_mini'}}), 'standard');
+  assert.equal(cardKind(mac, online), 'standard');
+});
+
+test('orbit layout: 7–8 slots (5 real + 2 demo nodes + add) keep every bubble and label apart', async () => {
+  const {orbitClearance, ORBIT_DENSE_LABEL_HALF} = await import('./connect.ts');
+  // 410: the orbit area above the car card on a Pixel 9 (411 dp wide); 560: a short card.
+  for (const [count, height] of [[7, 410], [8, 410], [8, 470], [8, 560], [7, 560]]) {
+    const layout = orbitLayout(count, 411, height);
+    assert.equal(layout.slots.length, count);
+    assert.equal(layout.labelHalf, ORBIT_DENSE_LABEL_HALF);
+    assert.ok(orbitClearance(layout) > 4, `${count}@${height}: clearance ${orbitClearance(layout)}`);
+    for (const s of layout.slots) {
+      assert.ok(s.x - layout.labelHalf >= 0 && s.x + layout.labelHalf <= 411, `${count}@${height}: label off-canvas at x ${s.x}`);
+      assert.ok(s.y - 32 >= 0 && s.y + 60 <= height, `${count}@${height}: off-canvas at y ${s.y}`);
+      const dx = (s.x - layout.center.x) / layout.aspect, dy = s.y - layout.center.y;
+      assert.ok(Math.abs(Math.hypot(dx, dy) - layout.radii[1]) < 1e-6, 'slots sit on the drawn ellipse');
+    }
+  }
+  // Short names fit the dense label (112 dp at 14 sp): the longest fleet name is 13 characters.
+  assert.ok(['Mac mini', 'MacBook Air', 'Redmi Note 12', 'Cloud VPS', 'Relay Node', 'Tesla', 'Xiaomi TV', 'Add device'].every(n => n.length * 7 + 16 <= ORBIT_DENSE_LABEL_HALF * 2));
 });

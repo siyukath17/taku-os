@@ -284,6 +284,35 @@ public final class TakuConnectTest {
             check(desk.getJSONArray("routes").length() == 2 && "家里".equals(desk.getJSONArray("routes").getJSONObject(0).getString("label"))
                     && url.equals(added.getJSONObject("probe").getJSONObject("route").getString("url")), "add with routes: " + added);
             connect.control(new JSONObject().put("action", "remove").put("id", desk.getString("id")));
+
+            // Demo nodes: listed from connect.json only, never written to runtime.json.
+            String runtimeBefore = Files.readString(runtime.toPath());
+            JSONObject storeJson = new JSONObject(Files.readString(store.toPath()));
+            storeJson.getJSONObject("nodes").put("demo_tesla", new JSONObject().put("demo", true).put("demoStatus", "82% · 410 km")
+                    .put("appearance", new JSONObject().put("displayName", "Tesla Model Y").put("shortName", "Tesla").put("deviceType", "car")));
+            storeJson.getJSONObject("nodes").put("taku_fake", new JSONObject().put("demo", true));
+            Files.writeString(store.toPath(), storeJson.toString());
+            JSONObject tesla = null;
+            JSONArray withDemo = connect.control(new JSONObject()).getJSONArray("nodes");
+            for (int i = 0; i < withDemo.length(); i++) {
+                String id = withDemo.getJSONObject(i).getString("id");
+                if (id.equals("demo_tesla")) tesla = withDemo.getJSONObject(i);
+                check(!id.equals("taku_fake"), "demo flag only counts on demo_* ids");
+            }
+            check(tesla != null && tesla.getBoolean("demo") && tesla.getBoolean("enabled") && !tesla.getBoolean("hasToken")
+                    && "82% · 410 km".equals(tesla.getString("demoStatus")) && "Tesla".equals(tesla.getJSONObject("appearance").getString("shortName")), "demo node listed: " + tesla);
+            JSONObject demoProbe = connect.control(new JSONObject().put("action", "probe").put("id", "demo_tesla"));
+            check("online".equals(demoProbe.getString("status")) && demoProbe.getBoolean("demo"), "demo probe: " + demoProbe);
+            JSONObject demoOff = connect.control(new JSONObject().put("action", "setEnabled").put("id", "demo_tesla").put("enabled", false)).getJSONObject("node");
+            check(!demoOff.getBoolean("enabled") && "offline".equals(connect.control(new JSONObject().put("action", "probe").put("id", "demo_tesla")).getString("status")), "demo switch off: " + demoOff);
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"demo_tesla\",\"routes\":[{\"url\":\"a\"}]}", "DEMO_NODE");
+            JSONObject renamed = connect.control(new JSONObject().put("action", "appearance").put("id", "demo_tesla").put("shortName", "Model Y")).getJSONObject("node");
+            check("Model Y".equals(renamed.getJSONObject("appearance").getString("shortName")), "shortName via appearance: " + renamed);
+            rejects(connect, "{\"action\":\"appearance\",\"id\":\"demo_tesla\",\"shortName\":\"" + "x".repeat(17) + "\"}", "INVALID_NAME");
+            check(runtimeBefore.equals(Files.readString(runtime.toPath())), "demo actions never touch runtime.json");
+            connect.control(new JSONObject().put("action", "remove").put("id", "demo_tesla"));
+            check(!new JSONObject(Files.readString(store.toPath())).getJSONObject("nodes").has("demo_tesla")
+                    && runtimeBefore.equals(Files.readString(runtime.toPath())), "demo remove: connect.json only");
         } finally {
             slow.stop(0);
             fast.stop(0);

@@ -9,12 +9,16 @@ export const deviceTypes = ['mac_mini', 'laptop', 'desktop', 'tv', 'server', 'ph
 export type DeviceType = typeof deviceTypes[number];
 
 /** Phone-side (connect.json) or device-advertised (`capabilities.appearance`) presentation. */
-export interface ConnectAppearance {deviceType?: string; displayName?: string; icon?: string}
+export interface ConnectAppearance {deviceType?: string; displayName?: string; shortName?: string; icon?: string}
 
 /** `connect/list` → `nodes[]`. Tokens never reach the app: only `hasToken`. `url` is the first route. */
 export interface ConnectNode {
   id: string; url: string; host: string; network: Network; enabled: boolean; hasToken: boolean; appearance: ConnectAppearance;
   routes?: ConnectRoute[];
+  /** A showcase node from connect.json (`demo_*`): no runtime entry, so the agent has no tools for it. */
+  demo?: boolean;
+  /** Its status detail, e.g. `82% · 410 km`. */
+  demoStatus?: string;
 }
 export type Network = 'lan' | 'ipv6' | 'tailscale' | 'loopback' | 'internet';
 
@@ -115,6 +119,36 @@ export function displayName(node: Pick<ConnectNode, 'id' | 'appearance'>, probe?
   return bare || node.id;
 }
 
+/** The name under a bubble on the orbit: the short name when set (`Tesla` for `Tesla Model Y`). */
+export function orbitName(node: Pick<ConnectNode, 'id' | 'appearance'>, probe?: ConnectProbe | null): string {
+  const short = node.appearance?.shortName;
+  return typeof short === 'string' && short.trim() ? short.trim() : displayName(node, probe);
+}
+
+// ---- demo nodes and device cards ----
+
+/** A demo node never touches the network: it is online exactly while switched on (as the broker answers). */
+export function demoProbe(node: Pick<ConnectNode, 'id' | 'enabled'>): ConnectProbe {
+  return {id: node.id, status: node.enabled ? 'online' : 'offline', online: node.enabled, enabled: node.enabled};
+}
+
+/** The probe the page uses for a node: demo nodes are answered locally, real ones by `connect/probe`. */
+export const probeFor = (node: ConnectNode, probes: Record<string, ConnectProbe>): ConnectProbe | undefined =>
+  node.demo ? demoProbe(node) : probes[node.id];
+
+export type CardKind = 'car' | 'tv' | 'standard';
+
+/**
+ * Which bottom-sheet card a node gets. Device cards (car, TV) carry controls the agent cannot
+ * perform on a real node yet, so only demo nodes get them; every real node keeps the standard card
+ * with its live capabilities and routes.
+ */
+export function cardKind(node: Pick<ConnectNode, 'demo' | 'appearance'>, probe?: ConnectProbe | null): CardKind {
+  if (!node.demo) return 'standard';
+  const type = effectiveDeviceType(node, probe);
+  return type === 'car' ? 'car' : type === 'tv' ? 'tv' : 'standard';
+}
+
 // ---- node state ----
 
 export type NodeState = 'checking' | 'online' | 'unauthorized' | 'offline' | 'disabled';
@@ -178,9 +212,9 @@ export function latencyLabel(probe: ConnectProbe | null | undefined, language: L
 }
 
 /** `已连接 · 局域网 2ms`, `离线`, … */
-export function statusLine(node: Pick<ConnectNode, 'enabled'>, probe: ConnectProbe | null | undefined, language: Language): string {
+export function statusLine(node: Pick<ConnectNode, 'enabled' | 'demoStatus'>, probe: ConnectProbe | null | undefined, language: Language): string {
   const state = nodeState(node, probe);
-  const latency = state === 'online' ? latencyLabel(probe, language) : '';
+  const latency = state === 'online' ? (node.demoStatus?.trim() || latencyLabel(probe, language)) : '';
   return latency ? `${connectLabel(language, state)} · ${latency}` : connectLabel(language, state);
 }
 
@@ -300,9 +334,65 @@ export const ORBIT_LABEL_HALF = 75;
  * Positions around the centre (Taku Phone); the add bubble is always last. Up to 4 slots sit on the
  * inner ring. 5–6 slots share one evenly spaced ring: the two rings are only ~1.3× apart, so a bubble
  * on each (plus its name label below) would overlap. The single ring's radius keeps the side labels
- * on the canvas. Beyond 6 the inner ring takes 4 and the outer the rest, rotated to interleave.
+ * on the canvas. 7+ slots use one elliptical ring ({@link denseOrbit}) with narrower labels.
  */
-export function orbitLayout(count: number, width: number, height: number): {center: {x: number; y: number}; radii: [number, number]; slots: OrbitSlot[]} {
+export interface OrbitLayout {
+  center: {x: number; y: number}; radii: [number, number]; slots: OrbitSlot[];
+  /** Horizontal stretch of the rings (rx = r × aspect); 1 = circles. */
+  aspect: number;
+  /** Half width a bubble's name label may take (the label's max width / 2). */
+  labelHalf: number;
+}
+
+/** Labels on a dense orbit (7+ slots) are capped narrower so neighbours never touch. */
+export const ORBIT_DENSE_LABEL_HALF = 56;
+const BUBBLE_R = 32, LABEL_TOP = 38, LABEL_BOTTOM = 60, ORB_R = 42, ORB_LABEL = {half: 56, top: 50, bottom: 74};
+
+interface Box {x0: number; x1: number; y0: number; y1: number}
+/** A node's footprint: its bubble and the one-line label under it. */
+export function slotBoxes(x: number, y: number, labelHalf: number): Box[] {
+  return [{x0: x - BUBBLE_R, x1: x + BUBBLE_R, y0: y - BUBBLE_R, y1: y + BUBBLE_R}, {x0: x - labelHalf, x1: x + labelHalf, y0: y + LABEL_TOP, y1: y + LABEL_BOTTOM}];
+}
+/** The centre orb and its "Taku Phone" label (~96 dp wide). */
+export function orbBoxes(x: number, y: number): Box[] {
+  return [{x0: x - ORB_R, x1: x + ORB_R, y0: y - ORB_R, y1: y + ORB_R}, {x0: x - ORB_LABEL.half, x1: x + ORB_LABEL.half, y0: y + ORB_LABEL.top, y1: y + ORB_LABEL.bottom}];
+}
+/** Clearance between two boxes along the most separating axis; ≤ 0 means they overlap. */
+export const boxGap = (a: Box, b: Box) => Math.max(a.x0 - b.x1, b.x0 - a.x1, a.y0 - b.y1, b.y0 - a.y1);
+/** The smallest clearance among all slots, the centre orb and each other. */
+export function orbitClearance(layout: Pick<OrbitLayout, 'center' | 'slots' | 'labelHalf'>): number {
+  const groups = [orbBoxes(layout.center.x, layout.center.y), ...layout.slots.map(s => slotBoxes(s.x, s.y, layout.labelHalf))];
+  let min = Infinity;
+  for (let i = 0; i < groups.length; i++) for (let j = i + 1; j < groups.length; j++)
+    for (const a of groups[i]) for (const b of groups[j]) min = Math.min(min, boxGap(a, b));
+  return min;
+}
+
+/**
+ * 7+ slots: one evenly spaced elliptical ring filling the free area (taller than wide is fine),
+ * rotated to the start angle that leaves the most room between every bubble, label and the centre.
+ */
+function denseOrbit(count: number, width: number, height: number): OrbitLayout {
+  const center = {x: width / 2, y: height / 2};
+  const labelHalf = ORBIT_DENSE_LABEL_HALF;
+  const ry = Math.max(0, Math.min(height / 2 - LABEL_BOTTOM - 4, height / 2 - BUBBLE_R - 4));
+  const step = (2 * Math.PI) / count;
+  let best: OrbitLayout | null = null, bestGap = -Infinity;
+  for (let k = 0; k < 48; k++) {
+    const offset = (step * k) / 48;
+    const angles = Array.from({length: count}, (_, i) => -Math.PI / 2 + offset + step * i);
+    const widest = Math.max(...angles.map(a => Math.abs(Math.cos(a))));
+    const rx = Math.max(0, Math.min((width / 2 - labelHalf - 4) / widest, width / 2 - BUBBLE_R - 4));
+    const slots = angles.map(a => ({x: center.x + rx * Math.cos(a), y: center.y + ry * Math.sin(a), ring: 1 as const}));
+    const layout: OrbitLayout = {center, radii: [ry * 0.62, ry], slots, aspect: ry > 0 ? rx / ry : 1, labelHalf};
+    const gap = orbitClearance(layout);
+    if (gap > bestGap + 1e-9) { best = layout; bestGap = gap; }
+  }
+  return best!;
+}
+
+export function orbitLayout(count: number, width: number, height: number): OrbitLayout {
+  if (count >= 7) return denseOrbit(count, width, height);
   const center = {x: width / 2, y: height / 2};
   const span = Math.max(0, Math.min(width, height));
   // Inner ring clear of the centre orb and its pulse; outer ring kept inside the canvas width.
@@ -320,7 +410,7 @@ export function orbitLayout(count: number, width: number, height: number): {cent
       const angle = -Math.PI / 2 + step * i;
       slots.push({x: center.x + ring * Math.cos(angle), y: center.y + ring * Math.sin(angle), ring: 1});
     }
-    return {center, radii, slots};
+    return {center, radii, slots, aspect: 1, labelHalf: ORBIT_LABEL_HALF};
   }
   const inner = Math.min(count, 4);
   const rest = count - inner;
@@ -332,7 +422,7 @@ export function orbitLayout(count: number, width: number, height: number): {cent
     const angle = -Math.PI / 2 + Math.PI / 7 + (2 * Math.PI * i) / Math.max(rest, 1);
     slots.push({x: center.x + radii[1] * Math.cos(angle), y: center.y + radii[1] * Math.sin(angle), ring: 1});
   }
-  return {center, radii, slots};
+  return {center, radii, slots, aspect: 1, labelHalf: ORBIT_LABEL_HALF};
 }
 
 /** User-facing message for a gateway/broker error code. */
