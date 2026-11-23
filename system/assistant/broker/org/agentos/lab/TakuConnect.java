@@ -46,7 +46,9 @@ import java.util.regex.Pattern;
  * {@code appearance}, optional {@code enabled} and {@code demoStatus}) is listed for the page as a
  * showcase device (e.g. a car or TV card). It has no runtime.json entry, so the agent never gets
  * tools for it; only {@code setEnabled} (stored as {@code enabled}), {@code appearance} and
- * {@code remove} apply, and deleting the entry from connect.json removes it.
+ * {@code remove} apply, and deleting the entry from connect.json removes it. The {@code demo_} namespace
+ * and {@code "demo":true} entries are never runtime nodes ({@link #reservedForDemo}): a parked
+ * {@code disabled} copy on such an entry is ignored, so no action can move a demo into mcpServers.
  *
  * <p>Routes: the runtime url list is authoritative for <em>which</em> routes exist and their order
  * (preference: lan → ipv6 → tailscale → relay); stored labels/kinds only decorate them. The taku client
@@ -186,15 +188,17 @@ final class TakuConnect {
         for (int i = 0; i < servers.length(); i++) {
             JSONObject server = servers.optJSONObject(i);
             JSONObject parsed = server == null ? null : parseServer(server);
-            if (parsed == null || !seen.add(parsed.getString("id"))) continue;
+            if (parsed == null || reservedForDemo(parsed.getString("id"), null) || !seen.add(parsed.getString("id"))) continue;
             out.put(view(parsed, true, saved.optJSONObject(parsed.getString("id"))));
         }
         for (Iterator<String> it = saved.keys(); it.hasNext(); ) {
             String id = it.next();
-            JSONObject entry = saved.getJSONObject(id);
-            JSONObject disabled = entry.optJSONObject("disabled");
+            JSONObject entry = saved.optJSONObject(id);
+            JSONObject disabled = entry == null ? null : entry.optJSONObject("disabled");
             JSONObject parsed = disabled == null ? null : parseServer(disabled);
-            if (parsed == null || !seen.add(id)) continue;
+            // A parked copy is re-enabled into runtime.json verbatim, so a demo (or demo-named) entry
+            // carrying one must never become a switchable node: demo nodes never reach mcpServers.
+            if (parsed == null || reservedForDemo(id, entry) || reservedForDemo(parsed.getString("id"), null) || !seen.add(id)) continue;
             out.put(view(parsed, false, entry));
         }
         for (Iterator<String> it = saved.keys(); it.hasNext(); ) {
@@ -207,6 +211,11 @@ final class TakuConnect {
 
     static boolean isDemo(String id, JSONObject entry) {
         return DEMO_ID.matcher(id).matches() && entry.optBoolean("demo");
+    }
+
+    /** The {@code demo_} namespace and {@code "demo":true} entries are showcase-only, never runtime nodes. */
+    static boolean reservedForDemo(String id, JSONObject entry) {
+        return id.startsWith("demo_") || entry != null && entry.optBoolean("demo");
     }
 
     /** A showcase node: no url, routes or token; never in runtime.json. */

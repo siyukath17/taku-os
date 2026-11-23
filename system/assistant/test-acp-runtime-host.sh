@@ -51,6 +51,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/PhoneMcpBridgeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpRuntimeSettingsTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TakuConnectTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/TakuConnectInvariantsTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpAuthHelperTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpIslandProjectionTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/RemoteT3RuntimeTest.java \
@@ -75,7 +76,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json" "$main"
 done | tee "$task_out/result.txt"
