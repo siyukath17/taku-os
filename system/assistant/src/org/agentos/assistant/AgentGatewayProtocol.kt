@@ -57,7 +57,7 @@ internal class AgentGatewayProtocol private constructor() {
             COMPOSER_HANDOFF, COMPOSER_RESTORE, COMPOSER_RESTORE_TASK, COMPOSER_CREATE_THREAD, COMPOSER_PRESERVE_DRAFT,
             LIVE_TASK_READ, LIVE_TASK_REPLACE, LIVE_TASK_CANCEL,
             "connectChatGpt", "cancelChatGpt", "readJev", "connectJev", "enableJev", "prewarmAgent",
-            "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance")
+            "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/routes")
         /** `prewarmAgent` surfaces (the broker's prewarm reasons): app back in front, overlay shown, composer focused. */
         @JvmField val PREWARM_SURFACES: Set<String> = java.util.Set.of("onResume", "overlay", "focus")
         @JvmField val QUESTIONS: Set<String> = java.util.Set.of("phone/askUser", "phone/confirmAction",
@@ -230,7 +230,7 @@ internal class AgentGatewayProtocol private constructor() {
                 "workspaces/pause", "workspaces/takeControl", "workspaces/input", "workspaces/returnAndResume", "workspaces/addRequirement", "workspaces/executionStatus" -> return input
                 "capture/read", "capture/accept", "capture/dismiss", "capture/request", "capture/openConversation",
                 "accounts/read", "accounts/refresh", "accounts/login", "accounts/cancel", "accounts/openMagpie", "accounts/keys", "accounts/removeKey", "accounts/saveKey" -> return input
-                "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance" -> return input
+                "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/routes" -> return input
                 "manageAssistant", "requests/list", "requests/read", "requests/respond", "requests/submit", "requests/cancel" -> return input
                 "pluginManager" -> java.util.Set.of("operation", "argument", "name", "arguments")
                 "decide" -> java.util.Set.of("state", "questions")

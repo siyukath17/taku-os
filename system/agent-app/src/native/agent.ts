@@ -58,7 +58,7 @@ export type AgentAction =
   | 'capture/read' | 'capture/accept' | 'capture/dismiss' | 'capture/request' | 'capture/openConversation' | 'manageAssistant'
   | 'accounts/read' | 'accounts/refresh' | 'accounts/login' | 'accounts/cancel' | 'accounts/keys' | 'accounts/saveKey' | 'accounts/removeKey'
   | 'decide' | 'generateUi' | 'panels' | 'cardView'
-  | 'connect/list' | 'connect/probe' | 'connect/test' | 'connect/add' | 'connect/remove' | 'connect/setEnabled' | 'connect/appearance'
+  | 'connect/list' | 'connect/probe' | 'connect/test' | 'connect/add' | 'connect/remove' | 'connect/setEnabled' | 'connect/appearance' | 'connect/routes'
   | 'mainReply' | 'readMatter' | 'subscribeMatter' | 'unsubscribeMatter' | 'dispatchMatter' | 'analyzeCameraFrame'
   | 'audioCapabilities' | 'audioCommand'
   | 'readSystemAi' | 'setSystemAi' | 'bindSystemAi' | 'bindSystemAiModel' | 'reorderSystemAi' | 'restoreSystemAi' | 'deleteSystemAiGroup' | 'openMagpieManagement' | 'pluginManager'

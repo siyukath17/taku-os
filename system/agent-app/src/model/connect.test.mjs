@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {Buffer} from 'node:buffer';
 import {
-  capabilityChips, connectError, customIcon, dispatchDraft, displayName, effectiveDeviceType, isLive, latencyLabel,
-  nodeState, normalizeUrl, orbitLayout, resolveIcon, stateTone, statusLine, validateAddForm,
+  capabilityChips, connectError, customIcon, dispatchDraft, displayName, effectiveDeviceType, hostPort, isLive, latencyLabel,
+  nodeState, normalizeUrl, orbitLayout, resolveIcon, routeKindLabel, routeLabel, routeRows, stateTone, statusLine, validateAddForm,
 } from './connect.ts';
 
 const mac = {id: 'taku_macmini', url: 'http://192.168.1.205:7878', host: '192.168.1.205', network: 'lan', enabled: true, hasToken: true, appearance: {}};
@@ -63,9 +63,57 @@ test('latency and status lines', () => {
   assert.equal(latencyLabel(online, 'zh'), '局域网 2ms');
   assert.equal(latencyLabel({...online, network: 'tailscale', latencyMs: 14}, 'en'), 'Tailscale 14ms');
   assert.equal(latencyLabel({status: 'offline', online: false}, 'zh'), '');
-  assert.equal(statusLine(mac, online, 'zh'), '在线 · 局域网 2ms');
+  assert.equal(statusLine(mac, online, 'zh'), '已连接 · 局域网 2ms');
   assert.equal(statusLine(mac, {status: 'offline', online: false}, 'zh'), '离线');
   assert.equal(statusLine({enabled: false}, online, 'en'), 'Off');
+});
+
+const routes = [
+  {label: '书房', kind: 'lan', url: 'http://192.168.1.205:7878'},
+  {kind: 'ipv6', url: 'http://[fd7a::1]:7878'},
+  {label: 'Mac mini 转发', kind: 'relay', url: 'http://192.168.1.10:17878'},
+];
+const multi = {...mac, routes};
+const routed = {
+  ...online, url: routes[2].url, latencyMs: 45,
+  route: {...routes[2], status: 'online', latencyMs: 45, selected: true},
+  routes: [
+    {...routes[0], status: 'offline', error: 'UNREACHABLE', selected: false},
+    {...routes[1], status: 'online', latencyMs: 80, selected: false},
+    {...routes[2], status: 'online', latencyMs: 45, selected: true},
+  ],
+};
+
+test('route kind labels in both languages', () => {
+  assert.deepEqual(['lan', 'ipv6', 'tailscale', 'relay', 'internet'].map(kind => routeKindLabel(kind, 'zh')), ['局域网', 'IPv6', 'Tailscale', '中转', '公网']);
+  assert.deepEqual(['lan', 'ipv6', 'tailscale', 'relay', 'internet'].map(kind => routeKindLabel(kind, 'en')), ['LAN', 'IPv6', 'Tailscale', 'Relay', 'Internet']);
+  assert.equal(routeKindLabel('moon', 'en'), 'Internet');
+  assert.equal(routeLabel(routes[0], 'en'), '书房', 'the user label names the route in the list');
+  assert.equal(routeLabel({label: '  ', kind: 'relay'}, 'zh'), '中转');
+});
+
+test('status line shows only the selected route, by its kind', () => {
+  assert.equal(statusLine(multi, routed, 'en'), 'Online · Relay 45ms', 'kind, not the user label, for consistency');
+  assert.equal(statusLine(multi, routed, 'zh'), '已连接 · 中转 45ms');
+  assert.equal(statusLine(multi, {...routed, route: {...routed.route, kind: 'lan', latencyMs: 7.6}}, 'zh'), '已连接 · 局域网 8ms');
+  assert.equal(latencyLabel({...online, network: 'ipv6'}, 'en'), 'IPv6 2ms', 'older probes without route use the network');
+  assert.equal(statusLine(multi, {status: 'offline', online: false, routes: routed.routes.map(r => ({...r, status: 'offline', selected: false}))}, 'en'), 'Offline');
+});
+
+test('routes list: selected first with latency, backups in order, offline ones quiet', () => {
+  const rows = routeRows(multi, routed, 'zh');
+  assert.deepEqual(rows.map(r => [r.label, r.tone, r.latency, r.selected]), [
+    ['Mac mini 转发', 'selected', '45ms', true],
+    ['书房', 'offline', '', false],
+    ['IPv6', 'standby', '80ms', false],
+  ]);
+  assert.deepEqual(routeRows(multi, null, 'en').map(r => [r.label, r.tone]), [['书房', 'unknown'], ['IPv6', 'unknown'], ['Mac mini 转发', 'unknown']],
+    'before a probe: configured order, no status');
+  assert.deepEqual(routeRows(mac, null, 'en').map(r => [r.label, r.url]), [['LAN', 'http://192.168.1.205:7878']], 'legacy single-url node');
+  assert.equal(routeRows({...multi, enabled: false}, routed, 'en').some(r => r.selected), false, 'a switched-off node has no active route');
+  const rejected = {...routed, status: 'unauthorized', routes: routed.routes.map(r => r.selected ? {...r, status: 'unauthorized'} : r)};
+  assert.equal(routeRows(multi, rejected, 'en')[0].tone, 'attention');
+  assert.equal(hostPort('http://[fd7a::1]:7878'), '[fd7a::1]:7878');
 });
 
 test('capability chips show only what the node offers now', () => {

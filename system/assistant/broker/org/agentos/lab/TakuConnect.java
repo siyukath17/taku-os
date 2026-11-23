@@ -16,10 +16,15 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
@@ -27,13 +32,21 @@ import java.util.regex.Pattern;
  * Agents, through one path (NativeBridge op {@code connect}, gateway/open-access {@code connect/*}).
  *
  * <p>Source of truth for <em>which</em> nodes exist is {@code runtime.json} {@code acp.mcpServers}:
- * a node is an entry that runs {@code taku mcp-stdio --url <url> --token-file <file>} — exactly what
- * the on-device agent uses, so the page can never show a device the agent cannot reach (or hide one
- * it can). Phone-side presentation lives in {@code connect.json} next to it:
+ * a node is an entry that runs {@code taku mcp-stdio --url <url> --token-file <file>} (or
+ * {@code --urls <u1,u2,…>}: ordered candidate routes) — exactly what the on-device agent uses, so the
+ * page can never show a device the agent cannot reach (or hide one it can). Phone-side presentation
+ * lives in {@code connect.json} next to it:
  *
  * <pre>{"schema":"taku.connect/1","nodes":{"taku_macmini":{
  *    "appearance":{"displayName":"…","deviceType":"mac_mini","icon":"builtin:mac_mini|https://…|data:image/…"},
+ *    "routes":[{"label":"…","kind":"lan|ipv6|tailscale|relay|internet","url":"http://192.168.1.205:7878"},…],
  *    "disabled":{…the mcpServers entry while switched off…}}}}</pre>
+ *
+ * <p>Routes: the runtime url list is authoritative for <em>which</em> routes exist and their order
+ * (preference: lan → ipv6 → tailscale → relay); stored labels/kinds only decorate them. The taku client
+ * probes every route's {@code /healthz} concurrently and takes the earliest-listed live route within
+ * {@link #ROUTE_GRACE_MS} of the fastest ({@link #select}); probes here apply the same rule, so the page
+ * shows the route the agent will use.
  *
  * <p>Tokens never leave the broker: they are written root-only under {@code secrets/} and every
  * answer carries only {@code hasToken}. Probes measure {@code GET /healthz} round trips and read
@@ -47,6 +60,10 @@ final class TakuConnect {
     static final String DEFAULT_CLIENT = "/data/local/agentos/acp/bin/taku";
     static final String TOKEN_FILE_PREFIX = "/data/local/agentos/";
     static final int CONNECT_TIMEOUT_MS = 2500, READ_TIMEOUT_MS = 4000;
+    /** Route probing (mirrors the taku client): per-request health timeout, whole-probe budget, selection grace. */
+    static final int HEALTH_TIMEOUT_MS = 1500, PROBE_BUDGET_MS = 2500, ROUTE_GRACE_MS = 25;
+    static final int MAX_ROUTES = 8, MAX_ROUTE_LABEL_CHARS = 32;
+    static final Set<String> ROUTE_KINDS = Set.of("lan", "ipv6", "tailscale", "relay", "internet");
 
     /** Validation failure; the message is a stable public error code. */
     static final class Invalid extends IOException {
@@ -63,7 +80,10 @@ final class TakuConnect {
         this.client = client;
     }
 
-    /** Actions: list, probe {id}, test {url, token|tokenFile}, add, remove {id}, setEnabled {id, enabled}, appearance {id, …}. */
+    /**
+     * Actions: list, probe {id}, test {url|urls, token|tokenFile}, add, remove {id}, setEnabled {id, enabled},
+     * appearance {id, …}, routes {id, routes:[{label,kind,url}]}.
+     */
     synchronized JSONObject control(JSONObject input) throws Exception {
         String action = input.optString("action", "list");
         switch (action) {
@@ -74,6 +94,7 @@ final class TakuConnect {
             case "remove": return remove(input.getString("id"));
             case "setEnabled": return setEnabled(input.getString("id"), input.getBoolean("enabled"));
             case "appearance": return appearance(input);
+            case "routes": return routes(input);
             default: throw new Invalid("UNKNOWN_ACTION");
         }
     }
@@ -87,22 +108,31 @@ final class TakuConnect {
         if (!base.equals("taku") && !base.equals("taku-runtime") && !base.startsWith("taku-android")) return null;
         JSONArray args = server.optJSONArray("args");
         if (args == null || args.length() == 0 || !"mcp-stdio".equals(args.optString(0))) return null;
-        String url = "", tokenFile = "";
+        Set<String> urls = new LinkedHashSet<>();
+        String tokenFile = "";
         for (int i = 1; i < args.length(); i++) {
             String arg = args.optString(i);
             String next = i + 1 < args.length() ? args.optString(i + 1) : "";
-            if (arg.equals("--url")) { url = next; i++; }
-            else if (arg.startsWith("--url=")) url = arg.substring(6);
+            if (arg.equals("--url") || arg.equals("--urls")) { splitUrls(next, urls); i++; }
+            else if (arg.startsWith("--url=")) splitUrls(arg.substring(6), urls);
+            else if (arg.startsWith("--urls=")) splitUrls(arg.substring(7), urls);
             else if (arg.equals("--token-file")) { tokenFile = next; i++; }
             else if (arg.startsWith("--token-file=")) tokenFile = arg.substring(13);
         }
         JSONArray env = server.optJSONArray("env");
         if (env != null) for (int i = 0; i < env.length(); i++) {
             JSONObject item = env.optJSONObject(i);
-            if (item != null && url.isEmpty() && "TAKU_URL".equals(item.optString("name"))) url = item.optString("value");
+            if (item != null && urls.isEmpty() && "TAKU_URL".equals(item.optString("name"))) splitUrls(item.optString("value"), urls);
         }
-        if (url.isEmpty()) return null;
-        return new JSONObject().put("id", server.optString("name")).put("url", url).put("tokenFile", tokenFile);
+        if (urls.isEmpty()) return null;
+        JSONArray list = new JSONArray();
+        for (String url : urls) list.put(url);
+        return new JSONObject().put("id", server.optString("name")).put("url", list.getString(0)).put("urls", list).put("tokenFile", tokenFile);
+    }
+
+    /** {@code a,b , c} → ordered, de-duplicated, blanks dropped (same as the taku client's --urls). */
+    static void splitUrls(String value, Set<String> into) {
+        for (String part : value.split(",")) if (!part.trim().isEmpty()) into.add(part.trim());
     }
 
     JSONObject loadStore() throws Exception {
@@ -148,12 +178,59 @@ final class TakuConnect {
 
     JSONObject view(JSONObject parsed, boolean enabled, JSONObject saved) throws Exception {
         String tokenFile = parsed.optString("tokenFile");
-        URI uri = new URI(parsed.getString("url"));
+        String host = host(parsed.getString("url"));
         JSONObject appearance = saved == null ? null : saved.optJSONObject("appearance");
         return new JSONObject().put("id", parsed.getString("id")).put("url", parsed.getString("url"))
-                .put("host", uri.getHost() == null ? "" : uri.getHost()).put("network", network(uri.getHost()))
+                .put("host", host).put("network", network(host))
+                .put("routes", reconcile(parsed.getJSONArray("urls"), saved == null ? null : saved.optJSONArray("routes")))
                 .put("enabled", enabled).put("hasToken", !tokenFile.isEmpty() && new File(tokenFile).isFile())
                 .put("appearance", appearance == null ? new JSONObject() : appearance);
+    }
+
+    /** Host of a url without IPv6 brackets; "" when unparsable. */
+    static String host(String url) {
+        try {
+            String host = new URI(url).getHost();
+            if (host == null) return "";
+            return host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
+        } catch (Exception malformed) {
+            return "";
+        }
+    }
+
+    /** Comparable form of a route url (normalized when valid, as-is otherwise). */
+    static String routeKey(String url) {
+        try {
+            return url(url);
+        } catch (Invalid invalid) {
+            return url.trim();
+        }
+    }
+
+    /** lan | ipv6 | tailscale | relay | internet inferred from the host (loopback counts as lan). */
+    static String routeKind(String url) {
+        String network = network(host(url));
+        return network.equals("loopback") ? "lan" : network;
+    }
+
+    /**
+     * The node's routes: runtime urls decide which routes exist and their order; a stored route with the
+     * same (normalized) url lends its label and kind; anything else gets a kind derived from its host.
+     */
+    static JSONArray reconcile(JSONArray urls, JSONArray stored) throws Exception {
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < urls.length(); i++) {
+            String url = urls.getString(i), key = routeKey(url);
+            JSONObject match = null;
+            if (stored != null) for (int j = 0; j < stored.length() && match == null; j++) {
+                JSONObject candidate = stored.optJSONObject(j);
+                if (candidate != null && key.equals(routeKey(candidate.optString("url")))) match = candidate;
+            }
+            String kind = match == null ? "" : match.optString("kind");
+            out.put(new JSONObject().put("label", match == null ? "" : match.optString("label"))
+                    .put("kind", ROUTE_KINDS.contains(kind) ? kind : routeKind(url)).put("url", url));
+        }
+        return out;
     }
 
     JSONObject node(String id) throws Exception {
@@ -180,41 +257,128 @@ final class TakuConnect {
     JSONObject probe(JSONObject node) throws Exception {
         String file = tokenFile(node.getString("id"));
         String token = file.isEmpty() ? "" : readToken(new File(file));
-        return probe(node.getString("url"), token).put("id", node.getString("id")).put("enabled", node.getBoolean("enabled"));
+        return probe(node.getJSONArray("routes"), token).put("id", node.getString("id")).put("enabled", node.getBoolean("enabled"));
     }
 
     JSONObject test(JSONObject input) throws Exception {
-        String url = url(input.optString("url"));
-        return probe(url, token(input));
+        JSONArray routes = new JSONArray();
+        for (String url : candidateUrls(input)) routes.put(new JSONObject().put("label", "").put("kind", routeKind(url)).put("url", url));
+        return probe(routes, token(input));
     }
 
-    /** {@code status}: online | unauthorized | offline. Latency is the best of two /healthz round trips. */
-    static JSONObject probe(String url, String token) throws Exception {
-        URI uri = new URI(url);
-        JSONObject out = new JSONObject().put("url", url).put("network", network(uri.getHost())).put("checkedAt", System.currentTimeMillis());
-        long best = Long.MAX_VALUE;
-        String failure = "";
-        for (int i = 0; i < 2; i++) {
-            long started = System.nanoTime();
-            try {
-                Response health = get(url + "/healthz", "");
-                if (health.code != 200) { failure = "HTTP_" + health.code; break; }
-                best = Math.min(best, (System.nanoTime() - started) / 1_000_000L);
-            } catch (IOException unreachable) {
-                failure = "UNREACHABLE";
-                break;
-            }
+    /** {@code url} (may hold commas) and/or {@code urls} (array or comma list) → normalized, ordered, de-duplicated. */
+    static List<String> candidateUrls(JSONObject input) throws Exception {
+        Set<String> raw = new LinkedHashSet<>();
+        splitUrls(input.optString("url", ""), raw);
+        Object urls = input.opt("urls");
+        if (urls instanceof JSONArray) for (int i = 0; i < ((JSONArray) urls).length(); i++) {
+            Object item = ((JSONArray) urls).get(i);
+            if (!(item instanceof String)) throw new Invalid("INVALID_URL");
+            splitUrls((String) item, raw);
+        } else if (urls instanceof String) splitUrls((String) urls, raw);
+        else if (urls != null) throw new Invalid("INVALID_URL");
+        Set<String> out = new LinkedHashSet<>();
+        for (String url : raw) out.add(url(url));
+        if (out.isEmpty()) throw new Invalid("INVALID_URL");
+        if (out.size() > MAX_ROUTES) throw new Invalid("TOO_MANY_ROUTES");
+        return new ArrayList<>(out);
+    }
+
+    /**
+     * The route the taku client takes: among live routes (latency ≥ 0), the earliest-listed one whose
+     * latency is within {@link #ROUTE_GRACE_MS} of the fastest; -1 when none is live.
+     */
+    static int select(long[] latencies) {
+        long fastest = Long.MAX_VALUE;
+        for (long latency : latencies) if (latency >= 0) fastest = Math.min(fastest, latency);
+        if (fastest == Long.MAX_VALUE) return -1;
+        for (int i = 0; i < latencies.length; i++) if (latencies[i] >= 0 && latencies[i] <= fastest + ROUTE_GRACE_MS) return i;
+        return -1;
+    }
+
+    /** Best of two /healthz round trips per route, all routes at once, bounded by {@link #PROBE_BUDGET_MS}. */
+    static long[] health(List<String> urls, String[] errors) throws InterruptedException {
+        int n = urls.size();
+        long[] latencies = new long[n];
+        java.util.Arrays.fill(latencies, -1);
+        java.util.Arrays.fill(errors, "TIMEOUT");
+        CountDownLatch done = new CountDownLatch(n);
+        for (int r = 0; r < n; r++) {
+            final int route = r;
+            Thread worker = new Thread(() -> {
+                try {
+                    for (int attempt = 0; attempt < 2; attempt++) {
+                        long started = System.nanoTime();
+                        String failure = "";
+                        try {
+                            Response health = get(urls.get(route) + "/healthz", "", HEALTH_TIMEOUT_MS, HEALTH_TIMEOUT_MS);
+                            if (health.code != 200) failure = "HTTP_" + health.code;
+                        } catch (IOException unreachable) {
+                            failure = "UNREACHABLE";
+                        }
+                        long elapsed = (System.nanoTime() - started) / 1_000_000L;
+                        synchronized (latencies) {
+                            if (failure.isEmpty()) {
+                                latencies[route] = latencies[route] < 0 ? elapsed : Math.min(latencies[route], elapsed);
+                                errors[route] = "";
+                            } else if (latencies[route] < 0) errors[route] = failure;
+                        }
+                        if (!failure.isEmpty()) break;
+                    }
+                } finally {
+                    done.countDown();
+                }
+            }, "taku-connect-probe");
+            worker.setDaemon(true);
+            worker.start();
         }
-        if (best == Long.MAX_VALUE) return out.put("status", "offline").put("online", false).put("error", failure.isEmpty() ? "UNREACHABLE" : failure);
-        out.put("online", true).put("latencyMs", best);
-        if (token.isEmpty()) return out.put("status", "unauthorized").put("error", "TOKEN_MISSING");
+        done.await(PROBE_BUDGET_MS, TimeUnit.MILLISECONDS);
+        synchronized (latencies) {
+            return latencies.clone();
+        }
+    }
+
+    /**
+     * {@code status}: online | unauthorized | offline. Every route is health-probed concurrently, the
+     * client's rule picks one ({@link #select}) and {@code /v1/capabilities} is read through it.
+     * {@code url}/{@code network}/{@code latencyMs} describe the selected route (the first one when none
+     * is live); {@code route} is the selected route and {@code routes} all of them in configured order.
+     */
+    static JSONObject probe(JSONArray configured, String token) throws Exception {
+        List<String> urls = new ArrayList<>();
+        for (int i = 0; i < configured.length(); i++) urls.add(configured.getJSONObject(i).getString("url"));
+        String[] errors = new String[urls.size()];
+        long[] latencies = health(urls, errors);
+        int chosen = select(latencies);
+        JSONArray routes = new JSONArray();
+        for (int i = 0; i < urls.size(); i++) {
+            JSONObject source = configured.getJSONObject(i);
+            JSONObject route = new JSONObject().put("label", source.optString("label")).put("kind", source.optString("kind", routeKind(urls.get(i))))
+                    .put("url", urls.get(i)).put("status", latencies[i] >= 0 ? "online" : "offline").put("selected", i == chosen);
+            if (latencies[i] >= 0) route.put("latencyMs", latencies[i]);
+            else route.put("error", errors[i]);
+            routes.put(route);
+        }
+        String url = urls.get(chosen < 0 ? 0 : chosen);
+        JSONObject out = new JSONObject().put("url", url).put("network", network(host(url))).put("checkedAt", System.currentTimeMillis()).put("routes", routes);
+        if (chosen < 0) return out.put("status", "offline").put("online", false).put("error", errors[0].isEmpty() ? "UNREACHABLE" : errors[0]);
+        JSONObject route = routes.getJSONObject(chosen);
+        out.put("online", true).put("latencyMs", latencies[chosen]).put("route", route);
+        if (token.isEmpty()) {
+            route.put("status", "unauthorized");
+            return out.put("status", "unauthorized").put("error", "TOKEN_MISSING");
+        }
         Response caps;
         try {
             caps = get(url + "/v1/capabilities", token);
         } catch (IOException failed) {
+            route.put("status", "offline").put("error", "UNREACHABLE");
             return out.put("status", "offline").put("online", false).put("error", "UNREACHABLE");
         }
-        if (caps.code == 401) return out.put("status", "unauthorized").put("error", "UNAUTHORIZED");
+        if (caps.code == 401) {
+            route.put("status", "unauthorized");
+            return out.put("status", "unauthorized").put("error", "UNAUTHORIZED");
+        }
         if (caps.code != 200) return out.put("status", "offline").put("error", "HTTP_" + caps.code);
         return out.put("status", "online").put("capabilities", summary(new JSONObject(caps.body)));
     }
@@ -251,12 +415,16 @@ final class TakuConnect {
     }
 
     static Response get(String url, String token) throws IOException {
+        return get(url, token, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS);
+    }
+
+    static Response get(String url, String token, int connectTimeoutMs, int readTimeoutMs) throws IOException {
         URL target = new URL(url);
-        // LAN / Tailscale peers are never reached through the phone's proxy (as NO_PROXY for the agent).
-        HttpURLConnection http = (HttpURLConnection) (direct(target.getHost()) ? target.openConnection(Proxy.NO_PROXY) : target.openConnection());
+        // LAN / IPv6 / Tailscale peers are never reached through the phone's proxy (as NO_PROXY for the agent).
+        HttpURLConnection http = (HttpURLConnection) (direct(host(url)) ? target.openConnection(Proxy.NO_PROXY) : target.openConnection());
         try {
-            http.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            http.setReadTimeout(READ_TIMEOUT_MS);
+            http.setConnectTimeout(connectTimeoutMs);
+            http.setReadTimeout(readTimeoutMs);
             http.setInstanceFollowRedirects(false);
             if (!token.isEmpty()) http.setRequestProperty("Authorization", "Bearer " + token);
             int code = http.getResponseCode();
@@ -267,10 +435,12 @@ final class TakuConnect {
         }
     }
 
-    /** lan | tailscale | loopback | internet, from the host alone (no DNS for names). */
+    /** lan | ipv6 | tailscale | loopback | internet, from the host alone (no DNS for names). */
     static String network(String host) {
         if (host == null || host.isEmpty()) return "internet";
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
         if (host.equals("localhost")) return "loopback";
+        if (host.indexOf(':') >= 0) return ipv6Network(host.toLowerCase(Locale.ROOT));
         if (host.endsWith(".local")) return "lan";
         if (host.endsWith(".ts.net")) return "tailscale";
         int[] ip = ipv4(host);
@@ -281,6 +451,16 @@ final class TakuConnect {
         return "internet";
     }
 
+    /** IPv6 literals: ::1 loopback, Tailscale's fd7a:115c:a1e0::/48, everything else (ULA, link-local, global) ipv6. */
+    static String ipv6Network(String host) {
+        int zone = host.indexOf('%');
+        String address = zone >= 0 ? host.substring(0, zone) : host;
+        if (address.equals("::1")) return "loopback";
+        if (address.startsWith("fd7a:115c:a1e0:")) return "tailscale";
+        return "ipv6";
+    }
+
+    /** Hosts that bypass the phone's proxy: everything but public names/IPv4 (a relay on the LAN is lan). */
     static boolean direct(String host) {
         return !"internet".equals(network(host));
     }
@@ -410,10 +590,20 @@ final class TakuConnect {
 
     JSONObject add(JSONObject input) throws Exception {
         String name = displayName(input.opt("name"));
-        String url = url(input.optString("url"));
+        // Either one url or an ordered routes list (then url may be omitted; it must be one of them).
+        JSONArray routes = input.has("routes") ? routesInput(input.opt("routes")) : null;
+        if (routes == null) {
+            String only = url(input.optString("url"));
+            routes = new JSONArray().put(new JSONObject().put("label", "").put("kind", routeKind(only)).put("url", only));
+        } else if (!input.optString("url", "").isEmpty()) {
+            String given = url(input.optString("url"));
+            boolean listed = false;
+            for (int i = 0; i < routes.length(); i++) listed |= given.equals(routes.getJSONObject(i).getString("url"));
+            if (!listed) throw new Invalid("INVALID_ROUTES");
+        }
         String token = token(input);
         if (token.isEmpty()) throw new Invalid("TOKEN_REQUIRED");
-        JSONObject check = probe(url, token);
+        JSONObject check = probe(routes, token);
         if (!"online".equals(check.getString("status"))) throw new Invalid("unauthorized".equals(check.getString("status")) ? "NODE_UNAUTHORIZED" : "NODE_UNREACHABLE");
         JSONObject runtime = loadRuntime(), stored = loadStore(), saved = stored.getJSONObject("nodes");
         if (list().getJSONArray("nodes").length() >= MAX_NODES) throw new Invalid("TOO_MANY_NODES");
@@ -425,10 +615,9 @@ final class TakuConnect {
             tokenFile = new File(secrets, id + ".token");
             writePrivate(tokenFile, (token + "\n").getBytes(StandardCharsets.UTF_8));
         }
-        String host = new URI(url).getHost();
         JSONObject server = new JSONObject().put("name", id).put("command", client)
-                .put("args", new JSONArray().put("mcp-stdio").put("--url").put(url).put("--token-file").put(tokenFile.getPath()))
-                .put("env", new JSONArray().put(new JSONObject().put("name", "NO_PROXY").put("value", host)));
+                .put("args", new JSONArray().put("mcp-stdio").put("--token-file").put(tokenFile.getPath())).put("env", new JSONArray());
+        withRoutes(server, routes);
         JSONObject appearance = new JSONObject().put("displayName", name);
         if (input.has("deviceType")) appearance.put("deviceType", deviceType(input.get("deviceType")));
         else {
@@ -437,7 +626,7 @@ final class TakuConnect {
             if (DEVICE_TYPES.contains(advertised)) appearance.put("deviceType", advertised);
         }
         if (input.has("icon") && !icon(input.get("icon")).isEmpty()) appearance.put("icon", icon(input.get("icon")));
-        saved.put(id, new JSONObject().put("appearance", appearance));
+        saved.put(id, new JSONObject().put("appearance", appearance).put("routes", routes));
         writeStore(stored);
         writeServers(runtime, servers(runtime).put(server));
         return new JSONObject().put("node", node(id)).put("probe", check.put("id", id).put("enabled", true));
@@ -504,6 +693,120 @@ final class TakuConnect {
         if (!changed) throw new Invalid("NOTHING_TO_UPDATE");
         writeStore(stored);
         return new JSONObject().put("node", node(id));
+    }
+
+    /**
+     * Replace a node's routes: validated, stored in connect.json, and written into its mcpServers entry
+     * (runtime.json when enabled, the switched-off copy otherwise) as {@code --urls a,b} ({@code --url}
+     * for one route), so the agent's taku client and this page use the same ordered candidates.
+     */
+    JSONObject routes(JSONObject input) throws Exception {
+        String id = input.getString("id");
+        node(id);
+        JSONArray routes = routesInput(input.opt("routes"));
+        JSONObject runtime = loadRuntime(), stored = loadStore(), saved = stored.getJSONObject("nodes");
+        JSONObject entry = saved.optJSONObject(id);
+        if (entry == null) saved.put(id, entry = new JSONObject());
+        JSONArray servers = servers(runtime);
+        JSONObject enabled = null;
+        for (int i = 0; i < servers.length(); i++) {
+            JSONObject s = servers.optJSONObject(i);
+            if (s != null && id.equals(s.optString("name")) && parseServer(s) != null) enabled = s;
+        }
+        entry.put("routes", routes);
+        if (enabled != null) {
+            withRoutes(enabled, routes);
+            writeStore(stored);
+            writeServers(runtime, servers);
+        } else {
+            JSONObject disabled = entry.optJSONObject("disabled");
+            if (disabled == null || parseServer(disabled) == null) throw new Invalid("NODE_NOT_FOUND");
+            withRoutes(disabled, routes);
+            writeStore(stored);
+        }
+        return new JSONObject().put("node", node(id));
+    }
+
+    /** {@code [{label?,kind?,url}]} → 1…8 validated routes with normalized, unique urls and a kind each. */
+    static JSONArray routesInput(Object value) throws Invalid {
+        if (!(value instanceof JSONArray) || ((JSONArray) value).length() == 0) throw new Invalid("INVALID_ROUTES");
+        JSONArray given = (JSONArray) value;
+        if (given.length() > MAX_ROUTES) throw new Invalid("TOO_MANY_ROUTES");
+        JSONArray out = new JSONArray();
+        Set<String> seen = new java.util.HashSet<>();
+        for (int i = 0; i < given.length(); i++) {
+            Object item = given.opt(i);
+            if (!(item instanceof JSONObject)) throw new Invalid("INVALID_ROUTES");
+            JSONObject route = (JSONObject) item;
+            for (Iterator<String> it = route.keys(); it.hasNext(); ) {
+                String key = it.next();
+                if (!key.equals("label") && !key.equals("kind") && !key.equals("url")) throw new Invalid("INVALID_ROUTES");
+            }
+            Object rawUrl = route.opt("url");
+            if (!(rawUrl instanceof String)) throw new Invalid("INVALID_URL");
+            String url = url((String) rawUrl);
+            if (!seen.add(url)) throw new Invalid("DUPLICATE_ROUTE");
+            Object rawKind = route.opt("kind");
+            String kind;
+            if (rawKind == null || rawKind == JSONObject.NULL || "".equals(rawKind)) kind = routeKind(url);
+            else if (rawKind instanceof String && ROUTE_KINDS.contains(rawKind)) kind = (String) rawKind;
+            else throw new Invalid("INVALID_ROUTE_KIND");
+            Object rawLabel = route.opt("label");
+            String label = "";
+            if (rawLabel != null && rawLabel != JSONObject.NULL) {
+                if (!(rawLabel instanceof String)) throw new Invalid("INVALID_ROUTE_LABEL");
+                label = ((String) rawLabel).trim();
+                if (label.length() > MAX_ROUTE_LABEL_CHARS) throw new Invalid("INVALID_ROUTE_LABEL");
+                for (int c = 0; c < label.length(); c++) if (Character.isISOControl(label.charAt(c))) throw new Invalid("INVALID_ROUTE_LABEL");
+            }
+            try {
+                out.put(new JSONObject().put("label", label).put("kind", kind).put("url", url));
+            } catch (Exception impossible) {
+                throw new Invalid("INVALID_ROUTES");
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Point an mcpServers entry at {@code routes}: {@code mcp-stdio --url u} or {@code --urls a,b}
+     * first, its other arguments (token file, flags) kept as they were; a TAKU_URL env is dropped (the
+     * arguments win) and the routes' direct hosts join NO_PROXY.
+     */
+    static void withRoutes(JSONObject server, JSONArray routes) throws Exception {
+        JSONArray args = server.optJSONArray("args");
+        StringBuilder list = new StringBuilder();
+        Set<String> noProxy = new LinkedHashSet<>();
+        for (int i = 0; i < routes.length(); i++) {
+            String url = routes.getJSONObject(i).getString("url");
+            if (list.length() > 0) list.append(',');
+            list.append(url);
+            String host = host(url);
+            if (i == 0 || direct(host)) noProxy.add(host);
+        }
+        JSONArray rewritten = new JSONArray().put("mcp-stdio").put(routes.length() == 1 ? "--url" : "--urls").put(list.toString());
+        if (args != null) for (int i = 1; i < args.length(); i++) {
+            String arg = args.optString(i);
+            if (arg.equals("--url") || arg.equals("--urls")) i++;
+            else if (!arg.startsWith("--url=") && !arg.startsWith("--urls=")) rewritten.put(args.get(i));
+        }
+        server.put("args", rewritten);
+        JSONArray env = server.optJSONArray("env"), kept = new JSONArray();
+        if (env != null) for (int i = 0; i < env.length(); i++) {
+            JSONObject item = env.optJSONObject(i);
+            String name = item == null ? "" : item.optString("name");
+            if (name.equals("TAKU_URL")) continue;
+            if (name.equals("NO_PROXY")) {
+                Set<String> merged = new LinkedHashSet<>();
+                splitUrls(item.optString("value"), merged);
+                merged.addAll(noProxy);
+                noProxy = merged;
+                continue;
+            }
+            kept.put(env.get(i));
+        }
+        if (!noProxy.isEmpty()) kept.put(new JSONObject().put("name", "NO_PROXY").put("value", String.join(",", noProxy)));
+        server.put("env", kept);
     }
 
     static JSONArray withoutServer(JSONArray servers, String id) throws Exception {

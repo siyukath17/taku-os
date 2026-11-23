@@ -11,11 +11,19 @@ export type DeviceType = typeof deviceTypes[number];
 /** Phone-side (connect.json) or device-advertised (`capabilities.appearance`) presentation. */
 export interface ConnectAppearance {deviceType?: string; displayName?: string; icon?: string}
 
-/** `connect/list` → `nodes[]`. Tokens never reach the app: only `hasToken`. */
+/** `connect/list` → `nodes[]`. Tokens never reach the app: only `hasToken`. `url` is the first route. */
 export interface ConnectNode {
   id: string; url: string; host: string; network: Network; enabled: boolean; hasToken: boolean; appearance: ConnectAppearance;
+  routes?: ConnectRoute[];
 }
-export type Network = 'lan' | 'tailscale' | 'loopback' | 'internet';
+export type Network = 'lan' | 'ipv6' | 'tailscale' | 'loopback' | 'internet';
+
+/** A candidate route, in preference order (lan → ipv6 → tailscale → relay). `relay`: frp or a LAN forwarder. */
+export const routeKinds = ['lan', 'ipv6', 'tailscale', 'relay', 'internet'] as const;
+export type RouteKind = typeof routeKinds[number];
+export interface ConnectRoute {label?: string; kind: RouteKind; url: string}
+/** One route in a probe: the broker picks the route the taku client will use (`selected`). */
+export interface RouteProbe extends ConnectRoute {status: 'online' | 'offline' | 'unauthorized'; latencyMs?: number; error?: string; selected: boolean}
 
 export interface ConnectCapabilities {
   runtime?: string; version?: string; device?: string; os?: string; arch?: string; mode?: string;
@@ -26,10 +34,11 @@ export interface ConnectCapabilities {
   exec?: {enabled: boolean; allowedRoots: string[]; defaultTimeoutMs: number; maxTimeoutMs: number; maxOutputBytes: number};
 }
 
-/** `connect/probe` / `connect/test`. */
+/** `connect/probe` / `connect/test`. `url`/`network`/`latencyMs` describe the selected `route`. */
 export interface ConnectProbe {
   id?: string; url?: string; status: 'online' | 'unauthorized' | 'offline'; online: boolean; latencyMs?: number;
   network?: Network; error?: string; checkedAt?: number; enabled?: boolean; capabilities?: ConnectCapabilities;
+  route?: RouteProbe; routes?: RouteProbe[];
 }
 
 // ---- three-tier icon resolution ----
@@ -128,14 +137,16 @@ export const isLive = (state: NodeState) => state === 'online';
 
 const text = {
   en: {
-    lan: 'LAN', tailscale: 'Tailscale', loopback: 'This device', internet: 'Internet',
+    lan: 'LAN', ipv6: 'IPv6', tailscale: 'Tailscale', relay: 'Relay', loopback: 'This device', internet: 'Internet',
+    routes: 'Routes', routesAuto: 'Automatically picks the fastest route',
     online: 'Online', checking: 'Checking…', unauthorized: 'Token rejected', offline: 'Offline', disabled: 'Off',
     ai: 'Local AI', terminal: 'Terminal', files: 'Files', screen: 'Screen', remote: 'Remote control', system: 'System info',
     dispatch: 'On {name} ({id}), please: ',
   },
   zh: {
-    lan: '局域网', tailscale: 'Tailscale', loopback: '本机', internet: '公网',
-    online: '在线', checking: '正在检测…', unauthorized: '密钥无效', offline: '离线', disabled: '已关闭',
+    lan: '局域网', ipv6: 'IPv6', tailscale: 'Tailscale', relay: '中转', loopback: '本机', internet: '公网',
+    routes: '路线', routesAuto: '会自动匹配最优路线',
+    online: '已连接', checking: '正在检测…', unauthorized: '密钥无效', offline: '离线', disabled: '已关闭',
     ai: '本地 AI', terminal: '终端', files: '文件', screen: '屏幕', remote: '遥控', system: '系统信息',
     dispatch: '请在「{name}」（{id}）上：',
   },
@@ -143,19 +154,60 @@ const text = {
 type Key = keyof typeof text.en;
 export const connectLabel = (language: Language, key: Key) => text[language][key];
 
-/** `局域网 2ms` / `Tailscale 14ms`; '' without a latency. */
-export function latencyLabel(probe: ConnectProbe | null | undefined, language: Language): string {
-  if (!probe?.online || typeof probe.latencyMs !== 'number' || !Number.isFinite(probe.latencyMs)) return '';
-  const network = probe.network && probe.network in text.en ? probe.network : 'internet';
-  return `${connectLabel(language, network)} ${Math.max(0, Math.round(probe.latencyMs))}ms`;
+const isRouteKind = (value: unknown): value is RouteKind => typeof value === 'string' && (routeKinds as readonly string[]).includes(value);
+
+/** `局域网` / `LAN`, `中转` / `Relay`, …; unknown kinds read as Internet. */
+export const routeKindLabel = (kind: unknown, language: Language) => connectLabel(language, isRouteKind(kind) ? kind : 'internet');
+
+/** A route's name in the routes list: the user's label when set, else its kind. */
+export function routeLabel(route: Pick<ConnectRoute, 'label' | 'kind'>, language: Language): string {
+  return route.label?.trim() || routeKindLabel(route.kind, language);
 }
 
-/** `在线 · 局域网 2ms`, `离线`, … */
+const ms = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? `${Math.max(0, Math.round(value))}ms` : '';
+
+/** `局域网 2ms` / `Relay 45ms` for the selected route (its kind, for a consistent status line); '' without a latency. */
+export function latencyLabel(probe: ConnectProbe | null | undefined, language: Language): string {
+  if (!probe?.online) return '';
+  const latency = ms(probe.route?.latencyMs ?? probe.latencyMs);
+  if (!latency) return '';
+  const name = probe.route ? routeKindLabel(probe.route.kind, language)
+    : connectLabel(language, probe.network && probe.network in text.en ? probe.network : 'internet');
+  return `${name} ${latency}`;
+}
+
+/** `已连接 · 局域网 2ms`, `离线`, … */
 export function statusLine(node: Pick<ConnectNode, 'enabled'>, probe: ConnectProbe | null | undefined, language: Language): string {
   const state = nodeState(node, probe);
   const latency = state === 'online' ? latencyLabel(probe, language) : '';
   return latency ? `${connectLabel(language, state)} · ${latency}` : connectLabel(language, state);
 }
+
+export type RouteTone = 'selected' | 'standby' | 'offline' | 'attention' | 'unknown';
+export interface RouteRow {url: string; label: string; kind: RouteKind; latency: string; selected: boolean; tone: RouteTone}
+
+/**
+ * The routes list of a node: the selected route first, the backups after it in their configured
+ * order. Rows come from the last probe when it carries routes, otherwise from the node's routes
+ * (not yet probed: tone `unknown`), else its single url.
+ */
+export function routeRows(node: Pick<ConnectNode, 'url' | 'network' | 'routes' | 'enabled'>, probe: ConnectProbe | null | undefined, language: Language): RouteRow[] {
+  const fallback: RouteKind = node.network === 'loopback' ? 'lan' : isRouteKind(node.network) ? node.network : 'internet';
+  const configured: ConnectRoute[] = node.routes?.length ? node.routes : [{kind: fallback, url: node.url}];
+  const probed = probe?.routes?.length ? probe.routes : null;
+  const rows = (probed ?? configured).map((route): RouteRow => {
+    const result = probed ? route as RouteProbe : null;
+    const selected = Boolean(result?.selected) && node.enabled;
+    const tone: RouteTone = !result ? 'unknown' : result.status === 'offline' ? 'offline'
+      : selected ? (result.status === 'unauthorized' ? 'attention' : 'selected') : 'standby';
+    return {url: route.url, label: routeLabel(route, language), kind: isRouteKind(route.kind) ? route.kind : 'internet',
+      latency: result && result.status !== 'offline' ? ms(result.latencyMs) : '', selected, tone};
+  });
+  return [...rows.filter(row => row.selected), ...rows.filter(row => !row.selected)];
+}
+
+/** `192.168.1.205:7878`, `[fd7a::1]:7878`: a url without its scheme. */
+export const hostPort = (url: string) => url.replace(/^[a-z]+:\/\//i, '');
 
 export type CapabilityChip = 'ai' | 'terminal' | 'files' | 'screen' | 'remote' | 'system';
 

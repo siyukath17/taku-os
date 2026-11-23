@@ -24,7 +24,7 @@ public final class AppPermissionPolicyTest {
                 "capture/read", "capture/request", "capture/accept", "capture/dismiss",
                 "capture/openConversation", "capture/futureOperation", "interrupt", "cancelQueued", "continueTask", "readTaskDetail",
                 "requests/futureMutation", "accounts/futureMutation", "composer/futureMutation",
-                "connect/add", "connect/test", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/futureOperation"}) {
+                "connect/add", "connect/test", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/routes", "connect/futureOperation"}) {
             check("PERMISSION_DENIED".equals(AgentOpenAccessPolicy.denial(method, scope -> {
                 try { return store.check(app, scope).getBoolean("allowed"); }
                 catch (Exception failure) { throw new AssertionError(failure); }

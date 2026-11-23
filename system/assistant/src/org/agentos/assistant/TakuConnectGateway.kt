@@ -16,18 +16,19 @@ import org.json.JSONObject
  */
 internal object TakuConnectGateway {
     @JvmField val ACTIONS: Set<String> = setOf(
-        "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance")
+        "connect/list", "connect/probe", "connect/test", "connect/add", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/routes")
     /** Actions that change runtime.json or presentation (the rest only read or probe). */
-    @JvmField val WRITES: Set<String> = setOf("connect/add", "connect/remove", "connect/setEnabled", "connect/appearance")
+    @JvmField val WRITES: Set<String> = setOf("connect/add", "connect/remove", "connect/setEnabled", "connect/appearance", "connect/routes")
 
     private val FIELDS: Map<String, Set<String>> = mapOf(
         "connect/list" to emptySet(),
         "connect/probe" to setOf("id"),
-        "connect/test" to setOf("url", "token", "tokenFile"),
-        "connect/add" to setOf("name", "url", "token", "tokenFile", "deviceType", "icon"),
+        "connect/test" to setOf("url", "urls", "token", "tokenFile"),
+        "connect/add" to setOf("name", "url", "routes", "token", "tokenFile", "deviceType", "icon"),
         "connect/remove" to setOf("id"),
         "connect/setEnabled" to setOf("id", "enabled"),
         "connect/appearance" to setOf("id", "displayName", "deviceType", "icon"),
+        "connect/routes" to setOf("id", "routes"),
     )
 
     @JvmStatic
@@ -36,6 +37,7 @@ internal object TakuConnectGateway {
         PanelProtocol.exact(input, fields)
         if ("id" in fields && !input.has("id")) throw IOException("INVALID_ARGUMENT")
         if (method == "connect/setEnabled" && input.opt("enabled") !is Boolean) throw IOException("INVALID_ARGUMENT")
+        if (method == "connect/routes" && input.opt("routes") !is org.json.JSONArray) throw IOException("INVALID_ARGUMENT")
         val request = JSONObject(input.toString())
         if (method == "connect/test" || method == "connect/add") {
             val supplied = AssistantAccounts.credentialText(extras)

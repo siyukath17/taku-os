@@ -254,20 +254,26 @@ same island progress card; `needs_user` means the remote host rejected or lacks 
 
 Mac mini, TV boxes and other machines running `taku-runtime` that the on-device agent can drive
 (GUI: Agent app → Taku Home → Taku Connect, or `taku-agent://connect`). The node list *is*
-`runtime.json` `acp.mcpServers` entries of the form `taku mcp-stdio --url <url> --token-file <file>`;
-phone-side names/icons live in `connect.json` beside it. Tokens never come back (only `hasToken`).
+`runtime.json` `acp.mcpServers` entries of the form `taku mcp-stdio --url <url> --token-file <file>`
+(or `--urls <u1,u2,…>`: ordered candidate routes); phone-side names/icons/route labels live in
+`connect.json` beside it. Tokens never come back (only `hasToken`).
 
 ```sh
-taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,enabled,hasToken,appearance}]}
+taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,routes:[{label,kind,url}],enabled,hasToken,appearance}]}
 taku_call "$D" connect/probe '{"id":"taku_macmini"}'
-# {status:"online"|"unauthorized"|"offline",online,latencyMs,network,capabilities:{device,os,arch,mode,engine,
-#  tools:[{name,description}],reservedTools,exec:{enabled,allowedRoots,defaultTimeoutMs,maxTimeoutMs,maxOutputBytes},appearance}}
+# {status:"online"|"unauthorized"|"offline",online,url,network,latencyMs,capabilities:{device,os,arch,mode,engine,
+#  tools:[{name,description}],reservedTools,exec:{enabled,allowedRoots,defaultTimeoutMs,maxTimeoutMs,maxOutputBytes},appearance},
+#  route:{…the selected one…}, routes:[{label,kind,url,status:"online"|"offline"|"unauthorized",latencyMs?,error?,selected}]}
+taku_call "$D" connect/routes '{"id":"taku_macmini","routes":[{"label":"局域网","kind":"lan","url":"192.168.1.205:7878"},
+  {"kind":"ipv6","url":"http://[240e:3a1::5]:7878"},{"kind":"tailscale","url":"100.101.1.2:7878"},
+  {"label":"Mac mini 转发","kind":"relay","url":"192.168.1.10:17878"}]}'   # → {node}; rewrites --urls in mcpServers
 taku_call "$D" connect/appearance '{"id":"taku_macmini","displayName":"书房 Mac mini","deviceType":"mac_mini","icon":"builtin:mac_mini"}'
 taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":"/data/local/tmp/mini.png"}'   # inlined as data:image/png;base64
 taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":null}'                          # clear: next icon tier applies
 taku_call "$D" connect/setEnabled '{"id":"taku_macmini","enabled":false}'   # leaves mcpServers (agent stops using it), kept in connect.json
-taku_call "$D" connect/test '{"url":"192.168.1.30:7878","token":"…"}'       # probe without saving
+taku_call "$D" connect/test '{"url":"192.168.1.30:7878","token":"…"}'       # probe without saving; or "urls":["…","…"]
 taku_call "$D" connect/add '{"name":"客厅电视","url":"192.168.1.30:7878","token":"…","deviceType":"tv"}'
+taku_call "$D" connect/add '{"name":"Mac mini","token":"…","routes":[{"label":"局域网","url":"192.168.1.205:7878"},{"kind":"relay","url":"frp.example.com:7000"}]}'
 taku_call "$D" connect/remove '{"id":"taku_living_room_tv"}'
 ```
 
@@ -279,9 +285,23 @@ Icons resolve in three tiers on every client: custom `icon` (phone override, the
 `capabilities.appearance.icon`) → built-in drawing for `deviceType` → `generic`. `icon` accepts
 `builtin:<type>`, `http(s)://…`, `data:image/(png|jpeg|webp|gif|svg+xml);base64,…` (≤ 256 KiB) or an absolute
 `.png/.jpg/.webp/.svg` path; `deviceType` is one of `mac_mini laptop desktop tv server phone tablet speaker car generic`.
+
+Routes (`connect/routes`, optional `routes` on `add`): 1–8 `{label?, kind?, url}` in preference order
+(lan → ipv6 → tailscale → relay). `kind` ∈ `lan ipv6 tailscale relay internet` (`relay` = frp or a LAN
+forwarder such as a Mac mini port-forward); omitted, it is inferred from the host (private IPv4/`.local`
+→ lan, IPv6 literal → ipv6, `100.64/10`/`*.ts.net`/`fd7a:115c:a1e0::/48` → tailscale, else internet).
+`label` ≤ 32 chars; urls are normalized like `url` (IPv6 hosts in brackets: `http://[fd7a::1]:7878`).
+The action replaces the list in `connect.json` and rewrites the node's entry (runtime.json when enabled,
+the parked copy when switched off) to `mcp-stdio --urls <a,b,…> --token-file <same>` (`--url` for one
+route; direct route hosts join `NO_PROXY`). The url set and order always come from runtime.json; stored
+labels/kinds only decorate it. Route choice is the taku client's: all `/healthz` probed concurrently
+(≈1.5 s each, 2.5 s total), then the earliest-listed live route within 25 ms of the fastest; `probe`
+applies the same rule and reads `/v1/capabilities` through that route, so the page shows the route the
+agent will use.
 Errors: `NODE_NOT_FOUND`, `NODE_UNREACHABLE`, `NODE_UNAUTHORIZED`, `TOKEN_REQUIRED`, `INVALID_URL`, `INVALID_NAME`,
 `INVALID_TOKEN`, `TOKEN_FILE_NOT_FOUND`, `TOKEN_FILE_LOCATION_NOT_ALLOWED`, `INVALID_ICON`, `ICON_TOO_LARGE`,
-`ICON_TYPE_NOT_SUPPORTED`, `ICON_FILE_NOT_FOUND`, `INVALID_DEVICE_TYPE`, `NOTHING_TO_UPDATE`, `TOO_MANY_NODES`, `REVISION_CONFLICT`.
+`ICON_TYPE_NOT_SUPPORTED`, `ICON_FILE_NOT_FOUND`, `INVALID_DEVICE_TYPE`, `NOTHING_TO_UPDATE`, `TOO_MANY_NODES`, `REVISION_CONFLICT`,
+`INVALID_ROUTES`, `TOO_MANY_ROUTES`, `DUPLICATE_ROUTE`, `INVALID_ROUTE_KIND`, `INVALID_ROUTE_LABEL`.
 Changing `mcpServers` retires the warm ACP agent (pool stamp = runtime.json size+mtime); the next turn sees the new set.
 
 ## Screen suggestions

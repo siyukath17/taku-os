@@ -127,10 +127,142 @@ public final class TakuConnectTest {
 
             check("lan".equals(TakuConnect.network("192.168.1.205")) && "tailscale".equals(TakuConnect.network("100.101.1.2"))
                     && "internet".equals(TakuConnect.network("8.8.8.8")) && "lan".equals(TakuConnect.network("mini.local")), "network classes");
+
+            routes(connect, runtime, store, macToken, url, token);
         } finally {
             server.stop(0);
         }
         System.out.println("TakuConnectTest: " + checks + " checks passed");
+    }
+
+    /** Multi-route nodes: --urls parsing, the client's selection rule, the routes action, IPv6 routes. */
+    private static void routes(TakuConnect connect, File runtime, File store, File macToken, String url, String token) throws Exception {
+        // Parsing: --urls, --urls=, a comma-holding --url; order kept, duplicates and blanks dropped.
+        String[][] forms = {{"--urls", "http://a:1,http://b:2"}, {"--urls=http://a:1, http://b:2,"}, {"--url", "http://a:1,http://b:2,http://a:1"}};
+        for (String[] form : forms) {
+            JSONArray args = new JSONArray().put("mcp-stdio");
+            for (String part : form) args.put(part);
+            JSONObject parsed = TakuConnect.parseServer(new JSONObject().put("name", "taku_x").put("command", "taku")
+                    .put("args", args.put("--token-file").put("/data/local/agentos/t")));
+            check("http://a:1".equals(parsed.getString("url")) && parsed.getJSONArray("urls").length() == 2
+                    && "http://b:2".equals(parsed.getJSONArray("urls").getString(1)) && "/data/local/agentos/t".equals(parsed.getString("tokenFile")),
+                    "parsed " + String.join(" ", form) + ": " + parsed);
+        }
+
+        // Selection: earliest-listed live route within 25 ms of the fastest, else the fastest; offline skipped.
+        check(TakuConnect.select(new long[]{30, 6}) == 0, "first route within grace wins over a faster later one");
+        check(TakuConnect.select(new long[]{31, 6}) == 0 && TakuConnect.select(new long[]{32, 6}) == 1 && TakuConnect.select(new long[]{40, 5, 9}) == 1, "grace is inclusive; beyond it the fastest wins (earliest among those within grace of it)");
+        check(TakuConnect.select(new long[]{-1, 50, 12}) == 2 && TakuConnect.select(new long[]{-1, 50, 70}) == 1, "first offline: next by the same rule");
+        check(TakuConnect.select(new long[]{-1, -1}) == -1 && TakuConnect.select(new long[0]) == -1, "nothing live");
+
+        // IPv6 literals: kind ipv6 (Tailscale's ULA prefix stays tailscale), bracketed urls normalize, proxy bypassed.
+        check("ipv6".equals(TakuConnect.network("fd7a::1")) && "ipv6".equals(TakuConnect.network("[2408:8207::5]"))
+                && "tailscale".equals(TakuConnect.network("fd7a:115c:a1e0::9")) && "loopback".equals(TakuConnect.network("::1")), "ipv6 network classes");
+        check("http://[fd7a::1]:7878".equals(TakuConnect.url("[fd7a::1]")) && "https://[fd7a::1]:9000".equals(TakuConnect.url("https://[fd7a::1]:9000/")),
+                "ipv6 urls normalize");
+        check("ipv6".equals(TakuConnect.routeKind("http://[fd7a::1]:7878")) && TakuConnect.direct("fd7a::1") && "fd7a::1".equals(TakuConnect.host("http://[fd7a::1]:7878")),
+                "ipv6 route kind, direct, host");
+        check("lan".equals(TakuConnect.routeKind(url)) && "internet".equals(TakuConnect.routeKind("http://frp.example.com:7000")), "kinds from hosts");
+
+        // A second, slow runtime: same token, /healthz takes 120 ms.
+        HttpServer slow = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        slow.createContext("/healthz", exchange -> {
+            try { Thread.sleep(120); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            reply(exchange, 200, "{\"ok\":true}");
+        });
+        slow.start();
+        HttpServer fast = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        fast.createContext("/healthz", exchange -> reply(exchange, 200, "{\"ok\":true}"));
+        fast.createContext("/v1/capabilities", exchange -> reply(exchange, 200, "{\"runtime\":\"taku-runtime\",\"tools\":[]}"));
+        fast.start();
+        String slowUrl = "http://127.0.0.1:" + slow.getAddress().getPort(), fastUrl = "http://127.0.0.1:" + fast.getAddress().getPort();
+        try {
+            // routes: validated, stored, and written into the node's runtime.json entry as --urls.
+            JSONObject updated = connect.control(new JSONObject().put("action", "routes").put("id", "taku_macmini").put("routes", new JSONArray()
+                    .put(new JSONObject().put("label", "局域网").put("kind", "lan").put("url", "http://127.0.0.1:1"))
+                    .put(new JSONObject().put("label", "Mac mini 转发").put("kind", "relay").put("url", url + "/"))
+                    .put(new JSONObject().put("url", slowUrl)))).getJSONObject("node");
+            JSONArray args = mac(runtime).getJSONArray("args");
+            check(args.length() == 5 && "mcp-stdio".equals(args.getString(0)) && "--urls".equals(args.getString(1))
+                    && ("http://127.0.0.1:1," + url + "," + slowUrl).equals(args.getString(2))
+                    && "--token-file".equals(args.getString(3)) && macToken.getPath().equals(args.getString(4)), "args rewritten: " + args);
+            check("http://127.0.0.1:1".equals(updated.getString("url")), "view url is the first route");
+            JSONArray viewRoutes = updated.getJSONArray("routes");
+            check(viewRoutes.length() == 3 && "局域网".equals(viewRoutes.getJSONObject(0).getString("label"))
+                    && "relay".equals(viewRoutes.getJSONObject(1).getString("kind")) && "lan".equals(viewRoutes.getJSONObject(2).getString("kind"))
+                    && "".equals(viewRoutes.getJSONObject(2).getString("label")), "view routes decorated and derived: " + viewRoutes);
+            check(new JSONObject(Files.readString(store.toPath())).getJSONObject("nodes").getJSONObject("taku_macmini").getJSONArray("routes").length() == 3,
+                    "routes stored in connect.json");
+            check(!Files.readString(runtime.toPath()).contains(token), "token still absent from runtime.json");
+
+            // Probe: concurrent, first route offline, the fast relay beats the slow one beyond the grace.
+            long started = System.nanoTime();
+            JSONObject probe = connect.control(new JSONObject().put("action", "probe").put("id", "taku_macmini"));
+            long elapsed = (System.nanoTime() - started) / 1_000_000L;
+            JSONArray probed = probe.getJSONArray("routes");
+            check("online".equals(probe.getString("status")) && url.equals(probe.getString("url")) && probe.getJSONObject("route").getBoolean("selected")
+                    && url.equals(probe.getJSONObject("route").getString("url")) && probe.has("capabilities"), "selected relay: " + probe);
+            check(probed.length() == 3 && "offline".equals(probed.getJSONObject(0).getString("status")) && !probed.getJSONObject(0).getBoolean("selected")
+                    && !probed.getJSONObject(0).has("latencyMs") && probed.getJSONObject(1).getBoolean("selected")
+                    && "online".equals(probed.getJSONObject(2).getString("status")) && probed.getJSONObject(2).getLong("latencyMs") >= 100
+                    && !probed.getJSONObject(2).getBoolean("selected") && "Mac mini 转发".equals(probed.getJSONObject(1).getString("label")), "per-route results: " + probed);
+            check(probe.getLong("latencyMs") == probed.getJSONObject(1).getLong("latencyMs"), "top-level latency is the selected route's");
+            check(elapsed < TakuConnect.PROBE_BUDGET_MS + 1500, "routes probed concurrently within budget: " + elapsed + "ms");
+
+            // Earliest within grace: two fast routes → the first listed one.
+            JSONObject tested = connect.control(new JSONObject().put("action", "test").put("urls", new JSONArray().put(fastUrl).put(url)).put("token", token));
+            check(fastUrl.equals(tested.getJSONObject("route").getString("url")) && tested.getJSONArray("routes").length() == 2, "earliest within grace: " + tested);
+            JSONObject comma = connect.control(new JSONObject().put("action", "test").put("url", slowUrl + "," + url).put("token", token));
+            check(url.equals(comma.getJSONObject("route").getString("url")), "comma url: slow first route loses beyond grace: " + comma);
+
+            // One route → --url; a disabled node's routes rewrite its parked copy, not runtime.json.
+            connect.control(new JSONObject().put("action", "routes").put("id", "taku_macmini").put("routes", new JSONArray().put(new JSONObject().put("url", url))));
+            args = mac(runtime).getJSONArray("args");
+            check("--url".equals(args.getString(1)) && url.equals(args.getString(2)) && args.length() == 5, "single route keeps --url: " + args);
+            connect.control(new JSONObject().put("action", "setEnabled").put("id", "taku_macmini").put("enabled", false));
+            String parkedRuntime = Files.readString(runtime.toPath());
+            connect.control(new JSONObject().put("action", "routes").put("id", "taku_macmini").put("routes", new JSONArray()
+                    .put(new JSONObject().put("url", "[fd7a::1]")).put(new JSONObject().put("label", "Tailscale").put("url", url))));
+            check(parkedRuntime.equals(Files.readString(runtime.toPath())), "disabled node: runtime.json untouched");
+            JSONObject parked = new JSONObject(Files.readString(store.toPath())).getJSONObject("nodes").getJSONObject("taku_macmini").getJSONObject("disabled");
+            check(("http://[fd7a::1]:7878," + url).equals(parked.getJSONArray("args").getString(2)), "parked copy rewritten: " + parked);
+            JSONObject off = connect.control(new JSONObject()).getJSONArray("nodes").getJSONObject(0);
+            check("ipv6".equals(off.getJSONArray("routes").getJSONObject(0).getString("kind")) && "ipv6".equals(off.getString("network"))
+                    && "fd7a::1".equals(off.getString("host")), "ipv6 first route: " + off);
+            connect.control(new JSONObject().put("action", "setEnabled").put("id", "taku_macmini").put("enabled", true));
+            check(mac(runtime).getJSONArray("args").getString(2).startsWith("http://[fd7a::1]:7878,"), "re-enabled with its routes");
+            String noProxy = mac(runtime).getJSONArray("env").getJSONObject(0).getString("value");
+            check(noProxy.contains("fd7a::1") && noProxy.contains("127.0.0.1"), "direct route hosts join NO_PROXY: " + noProxy);
+
+            // Validation.
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[]}", "INVALID_ROUTES");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[{\"url\":\"a\",\"kind\":\"moon\"}]}", "INVALID_ROUTE_KIND");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[{\"url\":\"a\",\"label\":\"" + "x".repeat(33) + "\"}]}", "INVALID_ROUTE_LABEL");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[{\"url\":\"a\"},{\"url\":\"http://a:7878/\"}]}", "DUPLICATE_ROUTE");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[{\"url\":\"ftp://a\"}]}", "INVALID_URL");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[{\"url\":\"a\",\"token\":\"x\"}]}", "INVALID_ROUTES");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_nobody\",\"routes\":[{\"url\":\"a\"}]}", "NODE_NOT_FOUND");
+            StringBuilder nine = new StringBuilder();
+            for (int i = 1; i <= 9; i++) nine.append(i > 1 ? "," : "").append("{\"url\":\"h").append(i).append("\"}");
+            rejects(connect, "{\"action\":\"routes\",\"id\":\"taku_macmini\",\"routes\":[" + nine + "]}", "TOO_MANY_ROUTES");
+
+            // add with routes: probes them all, stores them, writes --urls.
+            JSONObject added = connect.control(new JSONObject().put("action", "add").put("name", "Desk").put("token", token)
+                    .put("routes", new JSONArray().put(new JSONObject().put("label", "家里").put("url", url)).put(new JSONObject().put("kind", "relay").put("url", fastUrl))));
+            JSONObject desk = added.getJSONObject("node");
+            check(desk.getJSONArray("routes").length() == 2 && "家里".equals(desk.getJSONArray("routes").getJSONObject(0).getString("label"))
+                    && url.equals(added.getJSONObject("probe").getJSONObject("route").getString("url")), "add with routes: " + added);
+            connect.control(new JSONObject().put("action", "remove").put("id", desk.getString("id")));
+        } finally {
+            slow.stop(0);
+            fast.stop(0);
+        }
+    }
+
+    private static JSONObject mac(File runtime) throws Exception {
+        JSONArray servers = new JSONObject(Files.readString(runtime.toPath())).getJSONObject("acp").getJSONArray("mcpServers");
+        for (int i = 0; i < servers.length(); i++) if ("taku_macmini".equals(servers.getJSONObject(i).getString("name"))) return servers.getJSONObject(i);
+        throw new AssertionError("taku_macmini not in runtime.json");
     }
 
     private static void reply(com.sun.net.httpserver.HttpExchange exchange, int code, String body) throws java.io.IOException {

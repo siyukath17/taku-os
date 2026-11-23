@@ -20,8 +20,9 @@ import {languageFor, type Language} from '../i18n';
 import {callAgent, type AgentGatewayError} from '../native/agent';
 import {SecretField, type SecretFieldHandle} from '../native/SecretField';
 import {
-  capabilityChips, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, isLive, nodeState, orbitLayout,
-  resolveIcon, stateTone, statusLine, validateAddForm, type ConnectNode, type ConnectProbe, type NodeState, type StateTone,
+  capabilityChips, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, hostPort, isLive, nodeState, orbitLayout,
+  resolveIcon, routeRows, stateTone, statusLine, validateAddForm, type ConnectNode, type ConnectProbe, type NodeState, type RouteRow,
+  type RouteTone, type StateTone,
 } from '../model/connect';
 import {queueConnectDispatch} from '../model/connectHandoff';
 import {colors, containsChinese, typography, type TypeRole} from '../theme';
@@ -36,7 +37,7 @@ const copy = {
   zh: {
     title: 'Taku 互联', back: '返回', refresh: '刷新', phone: 'Taku Phone', add: '添加设备', thisPhone: '本机 · 主控',
     phoneHint: '已接入 {n} 台设备。点按设备查看状态，或添加新的 taku-runtime 设备。', dispatch: '派发任务', permissions: '权限',
-    enabled: '允许 Agent 使用', permissionsTitle: '权限与配置', address: '连接地址', network: '网络', token: '密钥',
+    enabled: '允许 Agent 使用', permissionsTitle: '权限与配置', token: '密钥',
     tokenStored: '已保存在系统中，App 不可读取', tokenMissing: '未配置', exec: '命令执行', execOn: '已开启', execOff: '已关闭',
     roots: '允许目录', timeout: '超时', timeoutValue: '默认 {d}，最长 {m}', output: '单次输出上限', tools: '可用工具', reserved: '预留能力',
     platform: '系统', runtime: '运行时', none: '无', notReported: '连接后可见', name: '名称', namePlaceholder: '例如 客厅电视',
@@ -50,7 +51,7 @@ const copy = {
   en: {
     title: 'Taku Connect', back: 'Back', refresh: 'Refresh', phone: 'Taku Phone', add: 'Add device', thisPhone: 'This phone · controller',
     phoneHint: '{n} devices connected. Tap one to see its status, or add another taku-runtime device.', dispatch: 'Dispatch task',
-    permissions: 'Permissions', enabled: 'Let the Agent use it', permissionsTitle: 'Permissions & setup', address: 'Address', network: 'Network',
+    permissions: 'Permissions', enabled: 'Let the Agent use it', permissionsTitle: 'Permissions & setup',
     token: 'Token', tokenStored: 'Stored by the system; not readable by apps', tokenMissing: 'Not set', exec: 'Commands', execOn: 'Allowed',
     execOff: 'Disabled', roots: 'Allowed folders', timeout: 'Timeout', timeoutValue: '{d} default, {m} max', output: 'Output limit',
     tools: 'Tools', reserved: 'Reserved', platform: 'System', runtime: 'Runtime', none: 'None', notReported: 'Visible once connected',
@@ -327,7 +328,8 @@ function NodeSheet({t, type, language, node, probe, toggling, error, onToggle, o
   const name = displayName(node, probe);
   const caps = probe?.capabilities;
   const chips = capabilityChips(probe).map(chip => connectLabel(language, chip));
-  const detail = [`${node.host}${node.url.match(/:(\d+)$/) ? `:${node.url.match(/:(\d+)$/)?.[1]}` : ''}`,
+  // The address the agent is using right now: the selected route, else the first one.
+  const detail = [hostPort(state === 'online' && probe?.route ? probe.route.url : node.url),
     caps?.os && caps.arch ? `${caps.os}/${caps.arch}` : '', caps?.runtime && caps.version ? `${caps.runtime} ${caps.version}` : ''].filter(Boolean).join(' · ');
   const problem = state === 'unauthorized' || state === 'offline' ? connectError(state === 'unauthorized' ? 'NODE_UNAUTHORIZED' : 'NODE_UNREACHABLE', language) : '';
   return <View style={styles.sheetBody}>
@@ -370,6 +372,34 @@ function InfoRow({label, value, type}: {label: string; value: string; type: Type
   </View>;
 }
 
+const routeDot = (tone: RouteTone) =>
+  tone === 'selected' ? colors.successDot : tone === 'attention' ? colors.attention : tone === 'standby' ? colors.secondary : colors.switchOff;
+
+/**
+ * Routes, read-only: the route in use first (green dot, latency), backups quietly below, offline
+ * ones grey without error text, one footnote. Editing is the Agent's (`connect/routes`).
+ */
+function RoutesRow({rows, language, type}: {rows: RouteRow[]; language: Language; type: TypeFor}) {
+  const label = connectLabel(language, 'routes');
+  return <View style={styles.infoRow}>
+    <Text style={[type('meta', label), styles.secondary, styles.infoLabel]}>{label}</Text>
+    <View style={[styles.infoValue, styles.routes]}>
+      {rows.map(row => {
+        const quiet = !row.selected;
+        return <View key={row.url} style={styles.route} accessible accessibilityLabel={[row.label, hostPort(row.url), row.latency].filter(Boolean).join(', ')}>
+          <View style={[styles.routeDot, {backgroundColor: routeDot(row.tone)}]}/>
+          <View style={styles.flex}>
+            <Text numberOfLines={1} style={[type('meta', row.label), quiet && styles.secondary, row.tone === 'offline' && styles.muted]}>{row.label}</Text>
+            <Text numberOfLines={1} selectable style={[type('caption'), styles.muted]}>{hostPort(row.url)}</Text>
+          </View>
+          {!!row.latency && <Text style={[type('meta'), quiet ? styles.muted : styles.secondary]}>{row.latency}</Text>}
+        </View>;
+      })}
+      {rows.length > 1 && <Text style={[type('caption', connectLabel(language, 'routesAuto')), styles.muted]}>{connectLabel(language, 'routesAuto')}</Text>}
+    </View>
+  </View>;
+}
+
 function PermissionsSheet({t, type, language, node, probe, onBack}: {
   t: Copy; type: TypeFor; language: Language; node: ConnectNode; probe?: ConnectProbe; onBack: () => void;
 }) {
@@ -382,8 +412,7 @@ function PermissionsSheet({t, type, language, node, probe, onBack}: {
       <Text style={[type('context', t.permissionsTitle), styles.flex]}>{t.permissionsTitle}</Text>
     </View>
     <ScrollView style={styles.permissionList} contentContainerStyle={styles.permissionContent}>
-      <InfoRow type={type} label={t.address} value={node.url}/>
-      <InfoRow type={type} label={t.network} value={connectLabel(language, node.network)}/>
+      <RoutesRow type={type} language={language} rows={routeRows(node, probe, language)}/>
       <InfoRow type={type} label={t.token} value={node.hasToken ? t.tokenStored : t.tokenMissing}/>
       <InfoRow type={type} label={t.mode} value={caps?.mode ? (caps.mode === 'autonomous' ? t.autonomous : t.endpoint) : pending}/>
       <InfoRow type={type} label={t.exec} value={exec ? (exec.enabled ? t.execOn : t.execOff) : pending}/>
@@ -529,12 +558,16 @@ const styles = StyleSheet.create({
   buttonInk: {backgroundColor: colors.ink},
   inverse: {color: colors.white},
   secondary: {color: colors.secondary},
+  muted: {color: colors.muted},
   error: {color: colors.error},
   dim: {opacity: 0.45},
   pressed: {opacity: 0.7},
   infoRow: {flexDirection: 'row', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border},
   infoLabel: {width: 96},
   infoValue: {flex: 1},
+  routes: {gap: 8},
+  route: {flexDirection: 'row', alignItems: 'center', gap: 8},
+  routeDot: {width: 6, height: 6, borderRadius: 3},
   permissionList: {maxHeight: 360},
   permissionContent: {paddingBottom: 4},
   field: {gap: 6},
