@@ -1,7 +1,8 @@
 #!/bin/bash
 # One-command local regression gate for the haipro/personal line: broker/ACP host suites (with the
 # Python TTFT report tests), the agent gateway and builtin skill host suites, the TakuMemory host
-# checks (ROM native-library packaging contract, embedder fallback), the taku-agent-bridge Gradle unit
+# checks (ROM native-library packaging contract, embedder fallback), the read-only Pixel 9 health
+# check against a fake adb (scripts/test-check-pixel9-health.py), the taku-agent-bridge Gradle unit
 # tests and the agent app's test / typecheck / lint.
 #
 # Device-free by construction: an `adb` shim that refuses and records any call is first on PATH and
@@ -19,7 +20,7 @@ fast=0
 for arg in "$@"; do
   case "$arg" in
     --fast) fast=1 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg (use --fast or --help)" >&2; exit 2 ;;
   esac
 done
@@ -85,6 +86,7 @@ run_step acp-runtime-host bash system/assistant/test-acp-runtime-host.sh
 run_step agent-gateway-host bash system/assistant/test-agent-gateway-host.sh
 run_step builtin-skill-host bash system/assistant/test-builtin-skill-host.sh
 run_step memory-host bash system/memory/test-host.sh
+run_step pixel9-health-mock python3 scripts/test-check-pixel9-health.py
 if [ "$fast" -eq 1 ]; then skip_step taku-agent-bridge-gradle "--fast"
 else run_step taku-agent-bridge-gradle gradle_bridge_tests
 fi
