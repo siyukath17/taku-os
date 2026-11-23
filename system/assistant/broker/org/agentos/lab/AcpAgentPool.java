@@ -14,7 +14,10 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -53,6 +56,26 @@ final class AcpAgentPool {
     /** How long a turn waits for a warm-up already in flight before it starts cold instead. */
     static final long WARMING_WAIT_MILLIS = TimeUnit.SECONDS.toMillis(20);
     private static final int MAX_LINE_CHARS = 8 * 1024 * 1024;
+    /**
+     * Longest one message write to the agent's stdin may block. A pipe write blocks once the agent stops
+     * reading (wedged, or stopped by a debugger) and the pipe buffer is full; a prompt carrying a
+     * screenshot or an image attachment (megabytes of base64) fills it at once. A blocked write is
+     * uninterruptible and would hold the turn thread, and with it the broker's task loop, past cancel
+     * and the turn budget: the write watchdog kills the process instead, which fails the write.
+     */
+    static final long DEFAULT_WRITE_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(20);
+    /** Kills an agent whose stdin write outlived {@link Agent#writeTimeoutMillis}. One daemon thread, shared. */
+    private static final ScheduledThreadPoolExecutor WRITE_WATCHDOG = writeWatchdog();
+
+    private static ScheduledThreadPoolExecutor writeWatchdog() {
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, task -> {
+            Thread thread = new Thread(task, "acp-write-watchdog");
+            thread.setDaemon(true);
+            return thread;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
 
     /** End of the agent's stdout in {@link Agent#inbox}. */
     static final Object EOF = new Object();
@@ -76,6 +99,8 @@ final class AcpAgentPool {
         /** The {@code initialize} result once the handshake is done (warm processes arrive with it). */
         volatile JSONObject init;
         volatile boolean eof, warmedUp;
+        /** See {@link #DEFAULT_WRITE_TIMEOUT_MILLIS}; the runtime applies its configured value. */
+        volatile long writeTimeoutMillis = DEFAULT_WRITE_TIMEOUT_MILLIS;
         volatile long idleSince;
         int turns;
         /**
@@ -138,14 +163,28 @@ final class AcpAgentPool {
             } catch (Exception impossible) {
                 throw new IOException("unserializable message");
             }
+            // 0 writing, 1 written, 2 killed by the watchdog: whichever claims it first decides.
+            AtomicInteger write = new AtomicInteger();
+            ScheduledFuture<?> watchdog = WRITE_WATCHDOG.schedule(() -> {
+                // Kill without the stdin close a graceful destroy starts with: closing a stream whose
+                // write is blocked waits on that very write.
+                if (write.compareAndSet(0, 2)) connection.destroy(0);
+            }, Math.max(1, writeTimeoutMillis), TimeUnit.MILLISECONDS);
             try {
                 synchronized (out) {
                     out.write(line);
                     out.flush();
                 }
             } catch (IOException broken) {
-                throw new AcpRuntime.AgentExited("agent stdin closed");
+                throw new AcpRuntime.AgentExited(write.get() == 2 ? stoppedReading() : "agent stdin closed");
+            } finally {
+                watchdog.cancel(false);
             }
+            if (!write.compareAndSet(0, 1)) throw new AcpRuntime.AgentExited(stoppedReading());
+        }
+
+        private String stoppedReading() {
+            return "agent stopped reading its input (a write blocked for more than " + writeTimeoutMillis + "ms)";
         }
 
         /**

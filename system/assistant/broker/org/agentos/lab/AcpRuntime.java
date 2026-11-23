@@ -102,6 +102,8 @@ final class AcpRuntime implements TaskRuntime {
         long turnLimitMillis = TimeUnit.MINUTES.toMillis(15);
         long cancelGraceMillis = TimeUnit.SECONDS.toMillis(10);
         long requestTimeoutMillis = TimeUnit.SECONDS.toMillis(60);
+        /** Longest one write to the agent's stdin may block before the process is killed (see AcpAgentPool). */
+        long writeTimeoutMillis = AcpAgentPool.DEFAULT_WRITE_TIMEOUT_MILLIS;
         long progressIntervalMillis = 500;
         /**
          * Start the agent with {@code --dangerously-skip-permissions} for {@code permissionMode: full}
@@ -165,6 +167,7 @@ final class AcpRuntime implements TaskRuntime {
             o.turnLimitMillis = c.optLong("turnLimitMillis", o.turnLimitMillis);
             o.cancelGraceMillis = c.optLong("cancelGraceMillis", o.cancelGraceMillis);
             o.requestTimeoutMillis = c.optLong("requestTimeoutMillis", o.requestTimeoutMillis);
+            o.writeTimeoutMillis = Math.max(1, c.optLong("writeTimeoutMillis", o.writeTimeoutMillis));
             o.progressIntervalMillis = c.optLong("progressIntervalMillis", o.progressIntervalMillis);
             o.autoApprove = c.optBoolean("autoApprove", o.autoApprove);
             o.subagentSettleMillis = c.optLong("subagentSettleMillis", o.subagentSettleMillis);
@@ -363,6 +366,7 @@ final class AcpRuntime implements TaskRuntime {
                 timings.pingMs = agent.pingMillis;
             } else agent = pool.startCold(launch);
         } else agent = new AcpAgentPool.Agent(transport.start(launch), "", "");
+        agent.writeTimeoutMillis = options.writeTimeoutMillis;
         if (timings.poolState.isEmpty()) timings.poolState = Timings.COLD_START;
         timings.warmWaitMs = Timings.millisSince(begin);
         return agent;
@@ -492,6 +496,7 @@ final class AcpRuntime implements TaskRuntime {
                     if (pool != null) pool.invalidate("transient-failure");
                     agent = pool != null ? pool.startCold(launch(attemptRequest))
                             : new AcpAgentPool.Agent(transport.start(launch(attemptRequest)), "", "");
+                    agent.writeTimeoutMillis = options.writeTimeoutMillis;
                 } catch (IOException startFailed) {
                     diagnostic(directory, "start-failed", startFailed.getMessage(), "");
                     finish(directory, request, "failed", "The on-device agent could not start. Check its installation, then retry.", null);

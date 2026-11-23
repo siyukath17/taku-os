@@ -46,7 +46,11 @@ interface AcpProcessTransport {
         /** Exit code once the agent has exited, else null. */
         Integer exitCode();
 
-        /** Close stdin, wait up to {@code graceMillis}, then kill. Idempotent. */
+        /**
+         * Close stdin, wait up to {@code graceMillis}, then kill. Idempotent. With {@code graceMillis <= 0}
+         * it kills at once and never touches stdin first, so it is safe while another thread is blocked
+         * writing to it (closing that stream would wait for the blocked write).
+         */
         void destroy(long graceMillis);
     }
 
@@ -63,6 +67,12 @@ interface AcpProcessTransport {
                 @Override public boolean alive() { return process.isAlive(); }
                 @Override public Integer exitCode() { return process.isAlive() ? null : process.exitValue(); }
                 @Override public void destroy(long graceMillis) {
+                    if (graceMillis <= 0) {
+                        // Killed first: stdin is closed by the next graceful destroy (the pool's retire),
+                        // once the write it may be blocking has failed.
+                        process.destroyForcibly();
+                        return;
+                    }
                     try { process.getOutputStream().close(); } catch (IOException ignored) {}
                     try {
                         if (process.waitFor(graceMillis, TimeUnit.MILLISECONDS)) return;

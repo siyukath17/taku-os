@@ -297,33 +297,116 @@ final class AcpToolLabels {
     /**
      * Agent-internal locations: the agent home and app data ({@code …/acp/home/…}, {@code .gemini/…}),
      * the agent's work directory and the rest of {@code /data/local/agentos}, as absolute,
-     * {@code file://} or relative ({@code ../acp/home/…}) paths.
+     * {@code file://} or relative ({@code ../acp/home/…}) paths. As a regular expression (the
+     * definition {@link #internalPathStart} implements; AcpFaultInjectionTest checks them against
+     * each other):
+     * <pre>
+     * (?:file://)?(?:(?:\.\./)+|/)?(?:data/local/agentos/[^D]*|(?:[^D/]+/)*(?:acp/home|\.gemini)/[^D]*)
+     * </pre>
+     * with {@code D} the delimiters {@code \s ) ] " ' ` < >}. A regex engine runs this in quadratic
+     * time on a long run without delimiters (the segment loop rescans the run from every start; 40K
+     * characters of CJK text or base64 took over a second on a desktop JVM, a capped 1M-character reply
+     * minutes), which held the turn thread, and with it the broker, as a long reply finished.
+     * {@link #INTERNAL_LINK} stays a regex: it runs only on text with {@code "]("} and a marker, and
+     * each link candidate is bounded by its 200-character text and its target's first {@code )} or
+     * blank (only a long blank-free run packed with {@code "]("} would make it slow).
      */
-    private static final Pattern INTERNAL_PATH = Pattern.compile(
-            "(?:file://)?(?:(?:\\.\\./)+|/)?(?:data/local/agentos/[^\\s)\\]\"'`<>]*|(?:[^\\s)\\]\"'`<>/]+/)*(?:acp/home|\\.gemini)/[^\\s)\\]\"'`<>]*)");
+    private static final String AGENT_DATA = "data/local/agentos/";
+    private static final String[] SEGMENT_MARKERS = {"acp/home/", ".gemini/"};
     private static final Pattern INTERNAL_LINK = Pattern.compile(
             "\\[([^\\]\\n]{0,200})\\]\\((?:conversation://[^)\\s]*|(?:file://)?(?:(?:\\.\\./)+|/)?(?:data/local/agentos/|[^)\\s]*(?:acp/home|\\.gemini)/)[^)\\s]*)\\)");
 
     /**
      * Text for display with agent-internal paths removed: a Markdown link to an internal file or a
      * subagent conversation keeps only its text; a bare internal path becomes its file name (or
-     * {@code [internal file]} for a directory).
+     * {@code [internal file]} for a directory). Linear in the text for the bare paths.
      */
     static String sanitize(String text) {
         if (text == null || text.isEmpty()) return text == null ? "" : text;
-        String out = INTERNAL_LINK.matcher(text).replaceAll(m -> Matcher.quoteReplacement(m.group(1)));
-        Matcher m = INTERNAL_PATH.matcher(out);
-        StringBuilder sb = new StringBuilder();
-        while (m.find()) {
-            String path = m.group();
-            while (path.endsWith(".") || path.endsWith(",") || path.endsWith(";") || path.endsWith(":")) path = path.substring(0, path.length() - 1);
-            String rest = m.group().substring(path.length());
-            int slash = path.lastIndexOf('/');
-            String base = slash >= 0 ? path.substring(slash + 1) : path;
-            String shown = base.matches("[^/]{1,80}\\.[A-Za-z0-9]{1,8}") ? base : "[internal file]";
-            m.appendReplacement(sb, Matcher.quoteReplacement(shown + rest));
+        // Every internal link or path contains one of these; most replies contain none.
+        boolean paths = text.contains(AGENT_DATA) || text.contains(SEGMENT_MARKERS[0]) || text.contains(SEGMENT_MARKERS[1]);
+        if (!paths && !text.contains("conversation://")) return text;
+        String out = text.contains("](") ? INTERNAL_LINK.matcher(text).replaceAll(m -> Matcher.quoteReplacement(m.group(1))) : text;
+        if (!paths) return out;
+        StringBuilder sb = new StringBuilder(out.length());
+        int n = out.length(), copied = 0;
+        for (int a = 0; a < n; ) {
+            if (pathDelimiter(out.charAt(a))) { a++; continue; }
+            int b = a;
+            while (b < n && !pathDelimiter(out.charAt(b))) b++;
+            // A match never crosses a delimiter and its tail runs to the token's end: at most one per token.
+            int start = internalPathStart(out, a, b);
+            if (start >= 0) {
+                sb.append(out, copied, start);
+                String match = out.substring(start, b), path = match;
+                while (path.endsWith(".") || path.endsWith(",") || path.endsWith(";") || path.endsWith(":")) path = path.substring(0, path.length() - 1);
+                String rest = match.substring(path.length());
+                int slash = path.lastIndexOf('/');
+                String base = slash >= 0 ? path.substring(slash + 1) : path;
+                sb.append(base.matches("[^/]{1,80}\\.[A-Za-z0-9]{1,8}") ? base : "[internal file]").append(rest);
+                copied = b;
+            }
+            a = b;
         }
-        m.appendTail(sb);
-        return sb.toString();
+        return copied == 0 ? out : sb.append(out, copied, n).toString();
+    }
+
+    /** {@code D} of the internal path definition: regex {@code \s} (ASCII only) and {@code ) ] " ' ` < >}. */
+    private static boolean pathDelimiter(char c) {
+        switch (c) {
+            case ' ': case '\t': case '\n': case 0x0B: case '\f': case '\r':
+            case ')': case ']': case '"': case '\'': case '`': case '<': case '>':
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Where the leftmost internal path in the delimiter-free token {@code t[a, b)} starts, or -1. One
+     * pass: {@code chain} is the leftmost start of a run of non-empty {@code segment/} units ending at
+     * the current segment boundary {@code segment} (an empty segment, {@code //}, restarts it).
+     */
+    static int internalPathStart(String t, int a, int b) {
+        int best = -1, chain = a, segment = a;
+        for (int p = a; p < b; p++) {
+            if (t.startsWith(AGENT_DATA, p)) best = leftmost(best, agentDataStart(t, a, p));
+            for (String marker : SEGMENT_MARKERS)
+                if (t.startsWith(marker, p)) best = leftmost(best, prefixedStart(t, a, p == segment ? chain : p));
+            if (best == a) return a;
+            if (t.charAt(p) == '/') {
+                if (p == segment) chain = p + 1;
+                segment = p + 1;
+            }
+        }
+        return best;
+    }
+
+    private static int leftmost(int best, int candidate) {
+        return best < 0 ? candidate : Math.min(best, candidate);
+    }
+
+    /** {@code (?:file://)?(?:(?:\.\./)+|/)?} before {@code data/local/agentos/} at {@code m}. */
+    private static int agentDataStart(String t, int a, int m) {
+        int best = withFileScheme(t, a, m);
+        if (m - 1 >= a && t.charAt(m - 1) == '/') best = Math.min(best, withFileScheme(t, a, m - 1));
+        int up = m;
+        while (up - 3 >= a && t.startsWith("../", up - 3)) up -= 3;
+        if (up < m) best = Math.min(best, withFileScheme(t, a, up));
+        return best;
+    }
+
+    /**
+     * {@code (?:file://)?(?:(?:\.\./)+|/)?} before a segment run starting at {@code c} ({@code ../}
+     * units are segments of the run already).
+     */
+    private static int prefixedStart(String t, int a, int c) {
+        int best = withFileScheme(t, a, c);
+        if (c - 1 >= a && t.charAt(c - 1) == '/') best = Math.min(best, withFileScheme(t, a, c - 1));
+        return best;
+    }
+
+    private static int withFileScheme(String t, int a, int c) {
+        return c - 7 >= a && t.startsWith("file://", c - 7) ? c - 7 : c;
     }
 }
