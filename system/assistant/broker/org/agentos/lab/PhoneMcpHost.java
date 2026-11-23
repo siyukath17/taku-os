@@ -89,13 +89,22 @@ final class PhoneMcpHost {
 
     private static void listen(LocalServerSocket server, String name) {
         Thread listener = new Thread(() -> {
-            while (true) try {
-                LocalSocket socket = server.accept();
-                Thread worker = new Thread(() -> serve(socket), "phone-mcp");
-                worker.setDaemon(true);
-                worker.start();
-            } catch (Exception stopped) {
-                break;
+            while (true) {
+                LocalSocket socket;
+                try {
+                    socket = server.accept();
+                } catch (Throwable stopped) {
+                    break;
+                }
+                try {
+                    Thread worker = new Thread(() -> serve(socket), "phone-mcp");
+                    worker.setDaemon(true);
+                    worker.start();
+                } catch (Throwable noThread) {
+                    // Never an uncaught throwable on a broker thread (it ends app_process): drop this client.
+                    System.err.println("phone mcp: " + noThread.getClass().getSimpleName());
+                    try { socket.close(); } catch (Exception ignored) {}
+                }
             }
         }, name);
         listener.setDaemon(true);
@@ -121,7 +130,8 @@ final class PhoneMcpHost {
             AcpConversations.phoneSessionStarted(session.threadId);
             new PhoneMcpBridge(PhoneNativeTools::definitions, PhoneMcpHost::execute, PhoneMcpBridge.modePolicy(), session)
                     .serve(in, s.getOutputStream());
-        } catch (Exception closed) {
+        } catch (Throwable closed) {
+            // Throwable, not Exception: a worker thread's uncaught Error would end the broker's app_process.
             System.err.println("phone mcp: " + closed.getClass().getSimpleName());
         }
     }

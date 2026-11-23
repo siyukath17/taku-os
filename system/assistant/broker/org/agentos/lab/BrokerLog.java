@@ -5,6 +5,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -53,6 +54,21 @@ final class BrokerLog extends OutputStream {
     private void open() throws IOException {
         out = new FileOutputStream(file, true);
         size = file.length();
+        // A previous broker killed mid-line (or a write that failed half way) leaves the file without its
+        // final newline; our next stamped line would be glued to it ("...partial11-23 10:00:00.000 broker
+        // start pid 1") and line-anchored readers such as scripts/acp-ttft-report.py would lose it.
+        if (lineStart && size > 0 && !endsWithNewline()) {
+            out.write('\n');
+            size++;
+        }
+    }
+
+    private boolean endsWithNewline() throws IOException {
+        try (RandomAccessFile tail = new RandomAccessFile(file, "r")) {
+            if (tail.length() == 0) return true;
+            tail.seek(tail.length() - 1);
+            return tail.read() == '\n';
+        }
     }
 
     @Override

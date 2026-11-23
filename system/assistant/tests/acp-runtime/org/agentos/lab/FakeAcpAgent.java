@@ -70,7 +70,9 @@ final class FakeAcpAgent implements AcpProcessTransport {
          */
         STEER,
         /** As STEER, but the steer's answer arrives before the original prompt's. */
-        STEER_REVERSED
+        STEER_REVERSED,
+        /** Exits (stdout EOF, exit 1) on initialize, as a crashing agy binary would during a warm-up. */
+        EXIT_ON_INITIALIZE
     }
 
     /** agy's refusal text for a steer prompt, or null to accept it. */
@@ -110,6 +112,8 @@ final class FakeAcpAgent implements AcpProcessTransport {
     volatile long subagentDelayMillis = 300;
     /** Delays the warm-up's session/list answer (a turn then waits for the warm-up in flight). */
     volatile long sessionListDelayMillis;
+    /** The process stays alive but never answers the pool's {@code $/ping} probe (a wedged agy). */
+    volatile boolean silentPing;
 
     FakeAcpAgent(Scenario... scenarios) {
         for (Scenario scenario : scenarios) this.scenarios.add(scenario);
@@ -279,8 +283,13 @@ final class FakeAcpAgent implements AcpProcessTransport {
             String method = message.optString("method");
             Object id = message.opt("id");
             if ("session/list".equals(method) && sessionListDelayMillis > 0) Thread.sleep(sessionListDelayMillis);
+            if ("$/ping".equals(method) && silentPing) return false;
             switch (method) {
                 case "initialize":
+                    if (scenario == Scenario.EXIT_ON_INITIALIZE) {
+                        exit = 1;
+                        return true;
+                    }
                     send(new JSONObject().put("id", id).put("result", new JSONObject()
                             .put("protocolVersion", 1)
                             .put("agentCapabilities", new JSONObject().put("loadSession", loadSession)

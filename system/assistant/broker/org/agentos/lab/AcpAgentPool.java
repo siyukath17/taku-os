@@ -79,6 +79,12 @@ final class AcpAgentPool {
         volatile long idleSince;
         int turns;
         /**
+         * Checked out to a turn ({@link #startCold} / {@link #take}) and not yet released; guarded by the
+         * pool. Makes {@link #release} idempotent: a second release of the same process must neither
+         * count {@code checkedOut} down twice nor destroy the process it just parked as idle.
+         */
+        boolean lent;
+        /**
          * Set by {@link AcpAgentPool#take} on the process it hands out: whether it waited for a warm-up in
          * flight, how long the whole take took, and how long the liveness probe ({@code $/ping}) took.
          */
@@ -297,6 +303,7 @@ final class AcpAgentPool {
         started.incrementAndGet();
         synchronized (this) {
             checkedOut++;
+            agent.lent = true;
         }
         return agent;
     }
@@ -348,6 +355,7 @@ final class AcpAgentPool {
             if (!candidate.fingerprint.equals(fingerprint)) return null;
             idle = null;
             checkedOut++;
+            candidate.lent = true;
         }
         long probeBegin = System.nanoTime();
         boolean answered = probe(candidate);
@@ -356,6 +364,7 @@ final class AcpAgentPool {
             probeFailures.incrementAndGet();
             synchronized (this) {
                 checkedOut--;
+                candidate.lent = false;
             }
             retire(candidate, "probe-failed");
             return null;
@@ -384,6 +393,9 @@ final class AcpAgentPool {
         if (agent == null) return;
         String reason = null;
         synchronized (this) {
+            // Released already (now idle, or retired): a repeated release changes nothing.
+            if (!agent.lent) return;
+            agent.lent = false;
             checkedOut = Math.max(0, checkedOut - 1);
             agent.turns++;
             if (!reusable) reason = "turn-not-reusable";

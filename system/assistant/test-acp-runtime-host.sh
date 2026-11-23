@@ -70,6 +70,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpSteerRuntimeTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/ThreadListOrderTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpWarmPoolTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpPoolEdgesTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpReadWarmupTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/BrokerLogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TaskWakeTest.java \
@@ -81,8 +82,12 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonReader.java \
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
+# BrokerLogTest also writes real broker.log output (BrokerLog + Timings.summary) for the report script's test.
+export ACP_TTFT_SAMPLE_DIR="$task_out/ttft-sample"
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpPoolEdgesTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json:$task_app_cp" "$main"
 done | tee "$task_out/result.txt"
+# scripts/acp-ttft-report.py must parse exactly what the broker writes (the sample above).
+python3 scripts/test-acp-ttft-report.py 2>&1 | tee -a "$task_out/result.txt"

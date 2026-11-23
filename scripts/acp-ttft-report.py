@@ -55,13 +55,13 @@ def number(value):
 
 
 def parse_log(text):
-    """Turns, prewarm events and broker starts in log order."""
+    """Turns, prewarm events and broker starts in log order; seq is the line's position in the input."""
     turns, prewarms, starts = [], [], []
-    for line in text.splitlines():
+    for seq, line in enumerate(text.splitlines()):
         match = TURN.match(line)
         if match:
             fields = dict(pair.split("=", 1) for pair in match.group("fields").split() if "=" in pair)
-            turn = {"time": match.group("time"), "id": match.group("id"), "status": match.group("status"),
+            turn = {"seq": seq, "time": match.group("time"), "id": match.group("id"), "status": match.group("status"),
                     "poolState": None if fields.get("pool", "-") == "-" else fields["pool"]}
             for short, key in FIELDS.items():
                 turn[key] = number(fields.get(short))
@@ -70,7 +70,7 @@ def parse_log(text):
         match = PREWARM.match(line)
         if match:
             rest = match.group("rest").strip()
-            event = {"time": match.group("time"), "reason": match.group("reason"), "outcome": "other", "ms": None, "why": None}
+            event = {"seq": seq, "time": match.group("time"), "reason": match.group("reason"), "outcome": "other", "ms": None, "why": None}
             ready = re.match(r"ready in (\d+)ms", rest)
             if ready:
                 event.update(outcome="ready", ms=int(ready.group(1)))
@@ -82,7 +82,7 @@ def parse_log(text):
             continue
         match = START.match(line)
         if match:
-            starts.append({"time": match.group("time"), "pid": int(match.group("pid"))})
+            starts.append({"seq": seq, "time": match.group("time"), "pid": int(match.group("pid"))})
     return {"turns": turns, "prewarms": prewarms, "starts": starts}
 
 
@@ -109,9 +109,11 @@ def percentile(values, fraction):
 def summarize(parsed, limit, since_start=False):
     turns, prewarms = parsed["turns"], parsed["prewarms"]
     if since_start and parsed["starts"]:
-        last = parsed["starts"][-1]["time"]
-        turns = [t for t in turns if t["time"] >= last]
-        prewarms = [p for p in prewarms if p["time"] >= last]
+        # By position, not by timestamp: stamps carry no year (12-31 -> 01-01) and the clock may jump
+        # at boot before network time, so "after the last start" means "later in the log".
+        last = parsed["starts"][-1]["seq"]
+        turns = [t for t in turns if t["seq"] > last]
+        prewarms = [p for p in prewarms if p["seq"] > last]
     turns = turns[-limit:] if limit else turns
     pools = Counter(t.get("poolState") or "-" for t in turns)
     warm = pools.get("warm_hit", 0)
@@ -203,7 +205,9 @@ def render(report):
 
 def adb(serial, command):
     """One read-only `adb shell` command; stdout text."""
-    result = subprocess.run(["adb", "-s", serial, "shell", command], capture_output=True, text=True, timeout=60)
+    # broker.log holds UTF-8 (tool labels, exception text); never decode with the locale's codec.
+    result = subprocess.run(["adb", "-s", serial, "shell", command], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=60)
     if result.returncode != 0 and not result.stdout:
         raise RuntimeError("adb -s %s shell %s: %s" % (serial, command, result.stderr.strip()))
     return result.stdout
@@ -261,6 +265,8 @@ def main(argv=None):
     parser.add_argument("--since-start", action="store_true", help="only since the last 'broker start'")
     parser.add_argument("--json", action="store_true", help="print JSON instead of tables")
     args = parser.parse_args(argv)
+    if args.limit < 0:
+        parser.error("--limit must be 0 (all) or more")
     parsed = read_device(args.device, args.limit, args.since_start) if args.device else read_local(args.log, args.runtime_info_dir)
     report = summarize(parsed, args.limit, args.since_start)
     print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else render(report))

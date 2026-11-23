@@ -262,6 +262,100 @@ public final class PhoneMcpBridgeTest {
         check(interrupted, "interruption is not swallowed");
     }
 
+    private static String[] serveLines(PhoneMcpBridge bridge, byte[] input, int maxLineBytes) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        bridge.serve(new ByteArrayInputStream(input), output, maxLineBytes);
+        String text = output.toString("UTF-8");
+        return text.isEmpty() ? new String[0] : text.split("\n");
+    }
+
+    private static int errorCode(String line) {
+        JSONObject answer = new JSONObject(line);
+        return answer.has("error") ? answer.getJSONObject("error").getInt("code") : 0;
+    }
+
+    /**
+     * phone-mcp.sock carries whatever the agent's relay writes, inside the broker process: oversized,
+     * malformed, non-object, deeply nested, non-UTF-8 and CRLF lines each get one answer (or none for
+     * notifications) and the connection keeps serving; a tool that throws an Error fails that call only.
+     */
+    static void hostileInput() throws Exception {
+        Executor executor = new Executor();
+        String init = rpc(1, "initialize", new JSONObject().put("protocolVersion", "2025-06-18")).toString();
+        String tap = rpc(9, "tools/call", new JSONObject().put("name", "tap").put("arguments", new JSONObject().put("x", 1).put("y", 2))).toString();
+        // Oversized: drained and refused, the next request still runs; also at EOF without a newline.
+        String huge = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\",\"pad\":\"" + "x".repeat(20_000) + "\"}";
+        String[] lines = serveLines(bridge(executor, "full"), (init + "\n" + huge + "\n" + tap + "\n" + huge).getBytes(StandardCharsets.UTF_8), 1024);
+        check(lines.length == 4, "one answer per line, oversized included: " + lines.length);
+        check(errorCode(lines[1]) == PhoneMcpBridge.PARSE_ERROR && new JSONObject(lines[1]).isNull("id")
+                && lines[1].contains("longer than 1024"), "an oversized line is a parse error: " + lines[1]);
+        check(new JSONObject(lines[2]).getInt("id") == 9 && executor.calls.size() == 1, "the request after it is served");
+        check(errorCode(lines[3]) == PhoneMcpBridge.PARSE_ERROR, "an oversized last line without newline is answered too");
+        check(PhoneMcpBridge.MAX_LINE_BYTES >= 1 << 20, "the production cap leaves room for real tool arguments");
+
+        // Malformed, non-object, invalid UTF-8 and CRLF lines.
+        java.io.ByteArrayOutputStream input = new java.io.ByteArrayOutputStream();
+        for (String line : new String[]{init, "[1,2]", "\"text\"", "42", "null", "{\"jsonrpc\":\"2.0\",\"id\":3,"})
+            input.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+        input.write(new byte[]{'{', (byte) 0xff, (byte) 0xfe, '}', '\n'});
+        input.write((rpc(4, "tools/call", new JSONObject().put("name", "request_apps").put("arguments", new JSONObject()
+                .put("packages", new JSONArray().put("com.android.settings")).put("taskTitle", "打开设置 ✓"))) + "\r\n").getBytes(StandardCharsets.UTF_8));
+        input.write((rpc(6, "tools/call", null).put("params", new JSONArray().put(1)) + "\n").getBytes(StandardCharsets.UTF_8));
+        input.write("\r\n   \n".getBytes(StandardCharsets.UTF_8));
+        Executor second = new Executor();
+        lines = serveLines(bridge(second, "full"), input.toByteArray(), PhoneMcpBridge.MAX_LINE_BYTES);
+        check(lines.length == 9, "one answer per non-blank line: " + String.join(" | ", lines));
+        for (int i = 1; i <= 6; i++) check(errorCode(lines[i]) == PhoneMcpBridge.PARSE_ERROR, "line " + i + " is a parse error: " + lines[i]);
+        JSONObject apps = new JSONObject(lines[7]);
+        check(apps.getInt("id") == 4 && !apps.getJSONObject("result").optBoolean("isError")
+                && second.calls.size() == 1 && second.calls.get(0).contains("打开设置 ✓"), "a CRLF line with non-ASCII arguments runs intact: " + second.calls);
+        check(errorCode(lines[8]) == PhoneMcpBridge.INVALID_PARAMS, "non-object params: an unknown-tool error, no crash: " + lines[8]);
+
+        // Deep nesting: Android's org.json recurses without a depth limit; on a small stack it overflows.
+        String deep = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{\"a\":" + "[".repeat(5000) + "]".repeat(5000) + "}}";
+        AtomicReferenceHolder holder = new AtomicReferenceHolder();
+        Thread small = new Thread(null, () -> {
+            try {
+                holder.value = bridge(new Executor(), "full").handleLine(deep);
+            } catch (Throwable thrown) {
+                holder.thrown = thrown;
+            }
+        }, "small-stack", 64 * 1024);
+        small.start();
+        small.join();
+        check(holder.thrown == null && holder.value != null && errorCode(holder.value) == PhoneMcpBridge.PARSE_ERROR,
+                "deep nesting is a parse error, never a thrown Error: " + holder.thrown);
+
+        // A tool that throws an Error (an Android-missing API, a runaway recursion) fails that call only.
+        List<Throwable> errors = List.of(new NoSuchFieldError("DISCARD"), new StackOverflowError());
+        int[] calls = {0};
+        PhoneMcpBridge broken = new PhoneMcpBridge(PhoneMcpBridgeTest::definitions, (tool, arguments, session) -> {
+            int n = calls[0]++;
+            if (n < errors.size()) {
+                Throwable error = errors.get(n);
+                if (error instanceof LinkageError) throw (LinkageError) error;
+                throw (StackOverflowError) error;
+            }
+            return new JSONObject().put("success", true).put("contentItems", new JSONArray());
+        }, null, new PhoneMcpBridge.Session("acp-err", "full", "turn-err"));
+        broken.handle(rpc(0, "initialize", new JSONObject()));
+        for (int i = 0; i < errors.size(); i++) {
+            JSONObject result = call(broken, 20 + i, "tap", new JSONObject().put("x", 1).put("y", 2)).getJSONObject("result");
+            check(result.getBoolean("isError") && "TOOL_FAILED".equals(result.getJSONObject("structuredContent").getString("code"))
+                    && result.getJSONArray("content").getJSONObject(0).getString("text").contains(errors.get(i).getClass().getSimpleName()),
+                    "an Error in the tool is one failed call: " + result);
+        }
+        check(!call(broken, 30, "tap", new JSONObject().put("x", 1).put("y", 2)).getJSONObject("result").optBoolean("isError"),
+                "the next call on the same connection works");
+        PhoneMcpBridge.Failures.take("turn-err", "tap");
+        PhoneMcpBridge.Failures.take("turn-err", "tap");
+    }
+
+    private static final class AtomicReferenceHolder {
+        volatile String value;
+        volatile Throwable thrown;
+    }
+
     public static void main(String[] args) throws Exception {
         failuresRecordedPerTurn();
         deviceInfoWithoutScreen();
@@ -271,6 +365,7 @@ public final class PhoneMcpBridgeTest {
         invalidArguments();
         permissions();
         protocolErrors();
+        hostileInput();
         System.out.println("PhoneMcpBridgeTest passed " + checks + " checks");
     }
 }

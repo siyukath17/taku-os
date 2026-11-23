@@ -3,10 +3,10 @@ package org.agentos.lab;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -34,6 +34,12 @@ final class PhoneMcpBridge {
      * offered over MCP until that flow is runtime-neutral.
      */
     static final Set<String> NOT_EXPOSED = Set.of("ask_user", "confirm_action");
+    /**
+     * Longest inbound line kept. The bridge runs inside the broker (phone-mcp.sock); an unbounded line
+     * would grow until OutOfMemoryError ends app_process. A longer line is drained and answered with a
+     * parse error; the connection keeps serving.
+     */
+    static final int MAX_LINE_BYTES = 4 * 1024 * 1024;
 
     /** Who is calling: the per-task thread identity that owns a background screen. */
     static final class Session {
@@ -131,14 +137,30 @@ final class PhoneMcpBridge {
 
     /** Serve one MCP client until EOF. Messages are processed in order; responses are flushed per line. */
     void serve(InputStream input, OutputStream output) throws Exception {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (line.isBlank()) continue;
-            String answer = handleLine(line);
-            if (answer == null) continue;
-            output.write((answer + "\n").getBytes(StandardCharsets.UTF_8));
-            output.flush();
+        serve(input, output, MAX_LINE_BYTES);
+    }
+
+    void serve(InputStream input, OutputStream output, int maxLineBytes) throws Exception {
+        InputStream in = new BufferedInputStream(input);
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        for (; ; ) {
+            buffer.reset();
+            boolean oversized = false;
+            int c;
+            while ((c = in.read()) != -1 && c != '\n') {
+                if (buffer.size() < maxLineBytes) buffer.write(c);
+                else oversized = true; // drain the rest of the line without keeping it
+            }
+            if (c == -1 && buffer.size() == 0 && !oversized) return;
+            String line = oversized ? "" : buffer.toString("UTF-8");
+            if (line.endsWith("\r")) line = line.substring(0, line.length() - 1); // CRLF, as readLine did
+            String answer = oversized ? error(JSONObject.NULL, PARSE_ERROR, "Parse error: message longer than " + maxLineBytes + " bytes", null).toString()
+                    : line.isBlank() ? null : handleLine(line);
+            if (answer != null) {
+                output.write((answer + "\n").getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            }
+            if (c == -1) return;
         }
     }
 
@@ -147,7 +169,8 @@ final class PhoneMcpBridge {
         JSONObject message;
         try {
             message = new JSONObject(line);
-        } catch (Exception malformed) {
+        } catch (Exception | StackOverflowError malformed) {
+            // Android's org.json parses nesting recursively without a depth limit.
             return error(JSONObject.NULL, PARSE_ERROR, "Parse error", null).toString();
         }
         JSONObject answer = handle(message);
@@ -181,7 +204,7 @@ final class PhoneMcpBridge {
                 default:
                     return notification ? null : error(id, METHOD_NOT_FOUND, "Method not found: " + method, null);
             }
-        } catch (Exception failure) {
+        } catch (Exception | StackOverflowError failure) {
             return notification ? null : error(id, INTERNAL_ERROR, "Internal error", null);
         }
     }
@@ -252,6 +275,10 @@ final class PhoneMcpBridge {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return ok(id, failed(name, "INTERRUPTED", "The phone operation was interrupted"));
+        } catch (LinkageError | StackOverflowError broken) {
+            // An Android-missing API (NoSuchFieldError...) or a runaway tool: one failed call, never an
+            // uncaught throwable on the broker's phone-mcp thread (that ends app_process).
+            return ok(id, failed(name, "TOOL_FAILED", "The phone operation failed: " + broken.getClass().getSimpleName()));
         } catch (Exception failure) {
             String detail = failure.getMessage() == null ? "" : failure.getMessage();
             if (detail.matches("[A-Z][A-Z0-9_]{2,63}")) return ok(id, failed(name, detail, "Phone tool failed: " + detail));
