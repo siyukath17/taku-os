@@ -23,7 +23,8 @@ export const routeKinds = ['lan', 'ipv6', 'tailscale', 'relay', 'internet'] as c
 export type RouteKind = typeof routeKinds[number];
 export interface ConnectRoute {label?: string; kind: RouteKind; url: string}
 /** One route in a probe: the broker picks the route the taku client will use (`selected`). */
-export interface RouteProbe extends ConnectRoute {status: 'online' | 'offline' | 'unauthorized'; latencyMs?: number; error?: string; selected: boolean}
+/** `standby`: a backup still answering when the choice settled (25 ms after the first live route); not known dead. */
+export interface RouteProbe extends ConnectRoute {status: 'online' | 'offline' | 'unauthorized' | 'standby'; latencyMs?: number; error?: string; selected: boolean}
 
 export interface ConnectCapabilities {
   runtime?: string; version?: string; device?: string; os?: string; arch?: string; mode?: string;
@@ -270,13 +271,36 @@ export function validateAddForm(form: AddForm): AddValidation {
   return {ok: Object.keys(errors).length === 0, errors, url: url ?? ''};
 }
 
+// ---- probing ----
+
+/**
+ * Concurrent probes per page round. The Agent UI gateway admits 4 calls at once and answers the rest
+ * `BUSY` immediately, so a round must leave room for the page's other calls (list, toggles).
+ */
+export const PROBE_CONCURRENCY = 3;
+
+/** Runs [fn] over [items] with at most [limit] in flight, preserving nothing but completion. */
+export async function forEachLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const lane = async () => { while (next < items.length) await fn(items[next++]); };
+  await Promise.all(Array.from({length: Math.max(1, Math.min(limit, items.length))}, lane));
+}
+
+/** A gateway refusal for load (`BUSY`) says nothing about the device: retry, never show it offline. */
+export const isTransientProbeError = (code: unknown) => code === 'BUSY';
+
 // ---- orbit layout ----
 
 export interface OrbitSlot {x: number; y: number; ring: 0 | 1}
 
+/** Half the width of a bubble's name label (ConnectScreen `bubbleLabel`). */
+export const ORBIT_LABEL_HALF = 75;
+
 /**
- * Staggered positions around the centre (Taku Phone): the inner ring takes up to 4 bubbles, the
- * outer the rest, each ring rotated so neighbours never line up. The add bubble is always last.
+ * Positions around the centre (Taku Phone); the add bubble is always last. Up to 4 slots sit on the
+ * inner ring. 5–6 slots share one evenly spaced ring: the two rings are only ~1.3× apart, so a bubble
+ * on each (plus its name label below) would overlap. The single ring's radius keeps the side labels
+ * on the canvas. Beyond 6 the inner ring takes 4 and the outer the rest, rotated to interleave.
  */
 export function orbitLayout(count: number, width: number, height: number): {center: {x: number; y: number}; radii: [number, number]; slots: OrbitSlot[]} {
   const center = {x: width / 2, y: height / 2};
@@ -285,6 +309,19 @@ export function orbitLayout(count: number, width: number, height: number): {cent
   const outer = Math.max(0, Math.min(span * 0.47, width / 2 - 44));
   const radii: [number, number] = [Math.min(span * 0.34, outer * 0.78), outer];
   const slots: OrbitSlot[] = [];
+  if (count === 5 || count === 6) {
+    // Bound the widest horizontal offset by the label half-width so names never run off the sides.
+    const step = (2 * Math.PI) / count;
+    let widest = 0;
+    for (let i = 0; i < count; i++) widest = Math.max(widest, Math.abs(Math.sin(step * i)));
+    const ring = Math.max(radii[0], Math.min(outer, (width / 2 - ORBIT_LABEL_HALF) / widest));
+    radii[1] = ring;
+    for (let i = 0; i < count; i++) {
+      const angle = -Math.PI / 2 + step * i;
+      slots.push({x: center.x + ring * Math.cos(angle), y: center.y + ring * Math.sin(angle), ring: 1});
+    }
+    return {center, radii, slots};
+  }
   const inner = Math.min(count, 4);
   const rest = count - inner;
   for (let i = 0; i < inner; i++) {

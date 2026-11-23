@@ -84,12 +84,27 @@ final class TakuConnect {
      * Actions: list, probe {id}, test {url|urls, token|tokenFile}, add, remove {id}, setEnabled {id, enabled},
      * appearance {id, …}, routes {id, routes:[{label,kind,url}]}.
      */
-    synchronized JSONObject control(JSONObject input) throws Exception {
+    JSONObject control(JSONObject input) throws Exception {
         String action = input.optString("action", "list");
+        // Probes read the node under the lock but do their network round trips outside it, so the
+        // page's concurrent per-node probes run in parallel instead of queueing behind each other
+        // (and behind dead backup routes).
+        if (action.equals("probe")) {
+            JSONObject node;
+            String file;
+            synchronized (this) {
+                node = node(input.getString("id"));
+                file = tokenFile(node.getString("id"));
+            }
+            return probe(node, file);
+        }
+        if (action.equals("test")) return test(input);
+        return locked(action, input);
+    }
+
+    private synchronized JSONObject locked(String action, JSONObject input) throws Exception {
         switch (action) {
             case "list": return list();
-            case "probe": return probe(node(input.getString("id")));
-            case "test": return test(input);
             case "add": return add(input);
             case "remove": return remove(input.getString("id"));
             case "setEnabled": return setEnabled(input.getString("id"), input.getBoolean("enabled"));
@@ -254,8 +269,7 @@ final class TakuConnect {
 
     // ---- probing ----
 
-    JSONObject probe(JSONObject node) throws Exception {
-        String file = tokenFile(node.getString("id"));
+    JSONObject probe(JSONObject node, String file) throws Exception {
         String token = file.isEmpty() ? "" : readToken(new File(file));
         return probe(node.getJSONArray("routes"), token).put("id", node.getString("id")).put("enabled", node.getBoolean("enabled"));
     }
@@ -296,45 +310,55 @@ final class TakuConnect {
         return -1;
     }
 
-    /** Best of two /healthz round trips per route, all routes at once, bounded by {@link #PROBE_BUDGET_MS}. */
+    /**
+     * One {@code /healthz} round trip per route, all routes at once (the taku client's probe). Returns as
+     * soon as the choice is settled: {@link #ROUTE_GRACE_MS} after the first live answer (a later answer
+     * could not win {@link #select}), when every route finished, or at {@link #PROBE_BUDGET_MS}. A dead
+     * backup route therefore never delays a probe once a live one answered; it reports {@code TIMEOUT}.
+     */
     static long[] health(List<String> urls, String[] errors) throws InterruptedException {
         int n = urls.size();
         long[] latencies = new long[n];
         java.util.Arrays.fill(latencies, -1);
         java.util.Arrays.fill(errors, "TIMEOUT");
-        CountDownLatch done = new CountDownLatch(n);
+        int[] finished = {0};
+        long[] firstLive = {0};
         for (int r = 0; r < n; r++) {
             final int route = r;
             Thread worker = new Thread(() -> {
+                long started = System.nanoTime();
+                String failure = "";
                 try {
-                    for (int attempt = 0; attempt < 2; attempt++) {
-                        long started = System.nanoTime();
-                        String failure = "";
-                        try {
-                            Response health = get(urls.get(route) + "/healthz", "", HEALTH_TIMEOUT_MS, HEALTH_TIMEOUT_MS);
-                            if (health.code != 200) failure = "HTTP_" + health.code;
-                        } catch (IOException unreachable) {
-                            failure = "UNREACHABLE";
-                        }
-                        long elapsed = (System.nanoTime() - started) / 1_000_000L;
-                        synchronized (latencies) {
-                            if (failure.isEmpty()) {
-                                latencies[route] = latencies[route] < 0 ? elapsed : Math.min(latencies[route], elapsed);
-                                errors[route] = "";
-                            } else if (latencies[route] < 0) errors[route] = failure;
-                        }
-                        if (!failure.isEmpty()) break;
-                    }
-                } finally {
-                    done.countDown();
+                    Response health = get(urls.get(route) + "/healthz", "", HEALTH_TIMEOUT_MS, HEALTH_TIMEOUT_MS);
+                    if (health.code != 200) failure = "HTTP_" + health.code;
+                } catch (IOException unreachable) {
+                    failure = "UNREACHABLE";
+                }
+                long elapsed = (System.nanoTime() - started) / 1_000_000L;
+                synchronized (latencies) {
+                    if (failure.isEmpty()) {
+                        latencies[route] = elapsed;
+                        errors[route] = "";
+                        if (firstLive[0] == 0) firstLive[0] = System.nanoTime();
+                    } else errors[route] = failure;
+                    finished[0]++;
+                    latencies.notifyAll();
                 }
             }, "taku-connect-probe");
             worker.setDaemon(true);
             worker.start();
         }
-        done.await(PROBE_BUDGET_MS, TimeUnit.MILLISECONDS);
+        long deadline = System.nanoTime() + PROBE_BUDGET_MS * 1_000_000L;
         synchronized (latencies) {
-            return latencies.clone();
+            while (finished[0] < n) {
+                long until = firstLive[0] == 0 ? deadline : Math.min(deadline, firstLive[0] + ROUTE_GRACE_MS * 1_000_000L);
+                long waitMs = (until - System.nanoTime()) / 1_000_000L;
+                if (waitMs <= 0) break;
+                latencies.wait(waitMs);
+            }
+            long[] snapshot = latencies.clone();
+            for (int i = 0; i < n; i++) if (snapshot[i] < 0 && errors[i].isEmpty()) errors[i] = "TIMEOUT";
+            return snapshot;
         }
     }
 
@@ -354,9 +378,13 @@ final class TakuConnect {
         for (int i = 0; i < urls.size(); i++) {
             JSONObject source = configured.getJSONObject(i);
             JSONObject route = new JSONObject().put("label", source.optString("label")).put("kind", source.optString("kind", routeKind(urls.get(i))))
-                    .put("url", urls.get(i)).put("status", latencies[i] >= 0 ? "online" : "offline").put("selected", i == chosen);
+                    .put("url", urls.get(i)).put("selected", i == chosen);
+            // "standby": still answering when the choice settled (it could not have won), so neither
+            // live nor known dead; a backup route the page lists quietly.
+            boolean pending = latencies[i] < 0 && chosen >= 0 && "TIMEOUT".equals(errors[i]);
+            route.put("status", latencies[i] >= 0 ? "online" : pending ? "standby" : "offline");
             if (latencies[i] >= 0) route.put("latencyMs", latencies[i]);
-            else route.put("error", errors[i]);
+            else if (!pending) route.put("error", errors[i]);
             routes.put(route);
         }
         String url = urls.get(chosen < 0 ? 0 : chosen);

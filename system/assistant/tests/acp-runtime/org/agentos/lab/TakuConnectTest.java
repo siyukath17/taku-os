@@ -204,10 +204,41 @@ public final class TakuConnectTest {
                     && url.equals(probe.getJSONObject("route").getString("url")) && probe.has("capabilities"), "selected relay: " + probe);
             check(probed.length() == 3 && "offline".equals(probed.getJSONObject(0).getString("status")) && !probed.getJSONObject(0).getBoolean("selected")
                     && !probed.getJSONObject(0).has("latencyMs") && probed.getJSONObject(1).getBoolean("selected")
-                    && "online".equals(probed.getJSONObject(2).getString("status")) && probed.getJSONObject(2).getLong("latencyMs") >= 100
-                    && !probed.getJSONObject(2).getBoolean("selected") && "Mac mini 转发".equals(probed.getJSONObject(1).getString("label")), "per-route results: " + probed);
+                    && "standby".equals(probed.getJSONObject(2).getString("status")) && !probed.getJSONObject(2).has("latencyMs")
+                    && !probed.getJSONObject(2).has("error") && !probed.getJSONObject(2).getBoolean("selected") && "Mac mini 转发".equals(probed.getJSONObject(1).getString("label")), "per-route results: " + probed);
             check(probe.getLong("latencyMs") == probed.getJSONObject(1).getLong("latencyMs"), "top-level latency is the selected route's");
-            check(elapsed < TakuConnect.PROBE_BUDGET_MS + 1500, "routes probed concurrently within budget: " + elapsed + "ms");
+            check(elapsed < 110, "settles 25 ms after the first live answer, without waiting for the slow backup: " + elapsed + "ms");
+
+            // Probes run outside the store lock: a node whose routes all hang (black-holed Tailscale)
+            // must not hold up a concurrent probe of a healthy node, and is bounded by the budget.
+            HttpServer hang = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            hang.createContext("/healthz", exchange -> {
+                try { Thread.sleep(4000); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+                reply(exchange, 200, "{\"ok\":true}");
+            });
+            hang.start();
+            try {
+                String hangUrl = "http://127.0.0.1:" + hang.getAddress().getPort();
+                long[] hungMs = {0};
+                Thread hung = new Thread(() -> {
+                    long t0 = System.nanoTime();
+                    try {
+                        connect.control(new JSONObject().put("action", "test").put("urls", new JSONArray().put(hangUrl)).put("token", token));
+                    } catch (Exception ignored) {
+                    }
+                    hungMs[0] = (System.nanoTime() - t0) / 1_000_000L;
+                });
+                hung.start();
+                Thread.sleep(50);
+                long t1 = System.nanoTime();
+                JSONObject healthy = connect.control(new JSONObject().put("action", "probe").put("id", "taku_macmini"));
+                long healthyMs = (System.nanoTime() - t1) / 1_000_000L;
+                check("online".equals(healthy.getString("status")) && healthyMs < 500, "probe not queued behind a hanging one: " + healthyMs + "ms");
+                hung.join();
+                check(hungMs[0] >= TakuConnect.HEALTH_TIMEOUT_MS - 100 && hungMs[0] < TakuConnect.PROBE_BUDGET_MS + 500, "hanging route bounded: " + hungMs[0] + "ms");
+            } finally {
+                hang.stop(0);
+            }
 
             // Earliest within grace: two fast routes → the first listed one.
             JSONObject tested = connect.control(new JSONObject().put("action", "test").put("urls", new JSONArray().put(fastUrl).put(url)).put("token", token));

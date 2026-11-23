@@ -20,7 +20,8 @@ import {languageFor, type Language} from '../i18n';
 import {callAgent, type AgentGatewayError} from '../native/agent';
 import {SecretField, type SecretFieldHandle} from '../native/SecretField';
 import {
-  capabilityChips, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, hostPort, isLive, nodeState, orbitLayout,
+  capabilityChips, connectError, connectLabel, dispatchDraft, displayName, effectiveDeviceType, forEachLimited, hostPort, isLive,
+  isTransientProbeError, nodeState, orbitLayout, PROBE_CONCURRENCY,
   resolveIcon, routeRows, stateTone, statusLine, validateAddForm, type ConnectNode, type ConnectProbe, type NodeState, type RouteRow,
   type RouteTone, type StateTone,
 } from '../model/connect';
@@ -94,15 +95,36 @@ export function ConnectScreen() {
   const nodesRef = useRef<ConnectNode[] | null>(null);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
+  // One probe round at a time: the 10 s timer, focus and refresh must not stack rounds on the broker.
+  // A request during a round (e.g. after adding a device) runs once more right after it, with the newest list.
+  const probing = useRef(false);
+  const queued = useRef<ConnectNode[] | null>(null);
   const probeAll = useCallback(async (list: ConnectNode[]) => {
-    await Promise.all(list.map(async node => {
-      try {
-        const probe = await callAgent<ConnectProbe>('connect/probe', {id: node.id});
-        if (mounted.current) setProbes(current => ({...current, [node.id]: probe}));
-      } catch {
-        if (mounted.current) setProbes(current => ({...current, [node.id]: {status: 'offline', online: false, error: 'PROBE_FAILED'}}));
+    if (probing.current) { queued.current = list; return; }
+    probing.current = true;
+    try {
+      for (let round: ConnectNode[] | null = list; round && mounted.current; round = queued.current, queued.current = null) {
+        await forEachLimited(round, PROBE_CONCURRENCY, async node => {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const probe = await callAgent<ConnectProbe>('connect/probe', {id: node.id});
+              if (mounted.current) setProbes(current => ({...current, [node.id]: probe}));
+              return;
+            } catch (error) {
+              // Gateway load is not the device's state: retry briefly, else keep the last result.
+              if (isTransientProbeError((error as AgentGatewayError).code)) {
+                if (attempt < 3) { await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1))); continue; }
+                return;
+              }
+              if (mounted.current) setProbes(current => ({...current, [node.id]: {status: 'offline', online: false, error: 'PROBE_FAILED'}}));
+              return;
+            }
+          }
+        });
       }
-    }));
+    } finally {
+      probing.current = false;
+    }
   }, []);
 
   const load = useCallback(async () => {

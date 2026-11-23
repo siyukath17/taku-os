@@ -3,7 +3,7 @@ import test from 'node:test';
 import {Buffer} from 'node:buffer';
 import {
   capabilityChips, connectError, customIcon, dispatchDraft, displayName, effectiveDeviceType, hostPort, isLive, latencyLabel,
-  nodeState, normalizeUrl, orbitLayout, resolveIcon, routeKindLabel, routeLabel, routeRows, stateTone, statusLine, validateAddForm,
+  forEachLimited, isTransientProbeError, PROBE_CONCURRENCY, nodeState, normalizeUrl, ORBIT_LABEL_HALF, orbitLayout, resolveIcon, routeKindLabel, routeLabel, routeRows, stateTone, statusLine, validateAddForm,
 } from './connect.ts';
 
 const mac = {id: 'taku_macmini', url: 'http://192.168.1.205:7878', host: '192.168.1.205', network: 'lan', enabled: true, hasToken: true, appearance: {}};
@@ -111,6 +111,9 @@ test('routes list: selected first with latency, backups in order, offline ones q
     'before a probe: configured order, no status');
   assert.deepEqual(routeRows(mac, null, 'en').map(r => [r.label, r.url]), [['LAN', 'http://192.168.1.205:7878']], 'legacy single-url node');
   assert.equal(routeRows({...multi, enabled: false}, routed, 'en').some(r => r.selected), false, 'a switched-off node has no active route');
+  const settled = {...routed, routes: routed.routes.map(r => r.selected ? r : {...r, status: 'standby', latencyMs: undefined, error: undefined})};
+  assert.deepEqual(routeRows(multi, settled, 'en').slice(1).map(r => [r.tone, r.latency]), [['standby', ''], ['standby', '']],
+    'a backup still answering when the choice settled stays quiet, not offline');
   const rejected = {...routed, status: 'unauthorized', routes: routed.routes.map(r => r.selected ? {...r, status: 'unauthorized'} : r)};
   assert.equal(routeRows(multi, rejected, 'en')[0].tone, 'attention');
   assert.equal(hostPort('http://[fd7a::1]:7878'), '[fd7a::1]:7878');
@@ -143,11 +146,28 @@ test('add form validation mirrors the broker', () => {
   assert.equal(validateAddForm({name: 'a', url: 'x', tokenMode: 'file', tokenFile: '/data/local/agentos/acp/secrets/tv.token', tokenTyped: false}).ok, true);
 });
 
+test('orbit layout: 5–6 slots share one ring, bubbles and labels never overlap', () => {
+  for (const count of [5, 6]) {
+    const {center, radii, slots} = orbitLayout(count, 411, 560);
+    assert.ok(slots.every(s => s.ring === 1 && Math.abs(Math.hypot(s.x - center.x, s.y - center.y) - radii[1]) < 1e-6));
+    // A node is a 64dp bubble (y −32…32) with a 150-wide one-line label under it (y 38…60).
+    for (const s of slots) assert.ok(s.x - ORBIT_LABEL_HALF >= -1e-6 && s.x + ORBIT_LABEL_HALF <= 411 + 1e-6, `${count}: label off-canvas at ${s.x}`);
+    for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
+      const [upper, lower] = slots[i].y <= slots[j].y ? [slots[i], slots[j]] : [slots[j], slots[i]];
+      const dx = Math.abs(upper.x - lower.x), dy = lower.y - upper.y;
+      const bubbles = dx < 64 && dy < 64, labels = dx < 2 * ORBIT_LABEL_HALF && dy < 22;
+      const labelOnBubble = dx < ORBIT_LABEL_HALF + 32 && dy < 60 + 32;
+      assert.ok(!bubbles && !labels && !labelOnBubble, `${count}: slots ${i} and ${j} overlap (dx ${dx}, dy ${dy})`);
+    }
+    assert.ok(radii[1] >= 42 + 32 + 40, `${count}: ring clears the orb (${radii[1]})`);
+  }
+});
+
 test('orbit layout staggers two rings around the centre', () => {
-  const {center, radii, slots} = orbitLayout(6, 400, 500);
+  const {center, radii, slots} = orbitLayout(8, 400, 500);
   assert.deepEqual(center, {x: 200, y: 250});
-  assert.equal(slots.length, 6);
-  assert.deepEqual(slots.map(s => s.ring), [0, 0, 0, 0, 1, 1]);
+  assert.equal(slots.length, 8);
+  assert.deepEqual(slots.map(s => s.ring), [0, 0, 0, 0, 1, 1, 1, 1]);
   for (const slot of slots) {
     const r = Math.hypot(slot.x - center.x, slot.y - center.y);
     assert.ok(Math.abs(r - radii[slot.ring]) < 1e-6);
@@ -158,6 +178,22 @@ test('orbit layout staggers two rings around the centre', () => {
   const phone = orbitLayout(2, 411, 560);
   assert.ok(phone.radii[0] >= 42 + 32 + 40, `inner ${phone.radii[0]}`);
   assert.ok(phone.radii[1] + 32 <= 411 / 2, `outer ${phone.radii[1]}`);
+});
+
+test('probe rounds stay under the gateway limit; BUSY is not offline', async () => {
+  let inFlight = 0, peak = 0;
+  const seen = [];
+  await forEachLimited([1, 2, 3, 4, 5, 6], PROBE_CONCURRENCY, async n => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    seen.push(n); inFlight--;
+  });
+  assert.equal(peak, PROBE_CONCURRENCY);
+  assert.ok(PROBE_CONCURRENCY < 4, 'leaves a gateway slot for the page');
+  assert.deepEqual(seen.sort(), [1, 2, 3, 4, 5, 6]);
+  await forEachLimited([], 3, async () => { throw new Error('never'); });
+  assert.equal(isTransientProbeError('BUSY'), true);
+  assert.equal(isTransientProbeError('NODE_NOT_FOUND'), false);
 });
 
 test('error codes become readable messages', () => {

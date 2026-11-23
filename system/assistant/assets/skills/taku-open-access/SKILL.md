@@ -263,7 +263,7 @@ taku_call "$D" connect/list                 # {nodes:[{id,url,host,network,route
 taku_call "$D" connect/probe '{"id":"taku_macmini"}'
 # {status:"online"|"unauthorized"|"offline",online,url,network,latencyMs,capabilities:{device,os,arch,mode,engine,
 #  tools:[{name,description}],reservedTools,exec:{enabled,allowedRoots,defaultTimeoutMs,maxTimeoutMs,maxOutputBytes},appearance},
-#  route:{…the selected one…}, routes:[{label,kind,url,status:"online"|"offline"|"unauthorized",latencyMs?,error?,selected}]}
+#  route:{…the selected one…}, routes:[{label,kind,url,status:"online"|"offline"|"unauthorized"|"standby",latencyMs?,error?,selected}]}
 taku_call "$D" connect/routes '{"id":"taku_macmini","routes":[{"label":"局域网","kind":"lan","url":"192.168.1.205:7878"},
   {"kind":"ipv6","url":"http://[240e:3a1::5]:7878"},{"kind":"tailscale","url":"100.101.1.2:7878"},
   {"label":"Mac mini 转发","kind":"relay","url":"192.168.1.10:17878"}]}'   # → {node}; rewrites --urls in mcpServers
@@ -297,7 +297,8 @@ route; direct route hosts join `NO_PROXY`). The url set and order always come fr
 labels/kinds only decorate it. Route choice is the taku client's: all `/healthz` probed concurrently
 (≈1.5 s each, 2.5 s total), then the earliest-listed live route within 25 ms of the fastest; `probe`
 applies the same rule and reads `/v1/capabilities` through that route, so the page shows the route the
-agent will use.
+agent will use. A probe settles 25 ms after the first live answer; routes still answering then are
+`standby` (could not have won; not known dead). Probes run in parallel (not behind the config lock).
 Errors: `NODE_NOT_FOUND`, `NODE_UNREACHABLE`, `NODE_UNAUTHORIZED`, `TOKEN_REQUIRED`, `INVALID_URL`, `INVALID_NAME`,
 `INVALID_TOKEN`, `TOKEN_FILE_NOT_FOUND`, `TOKEN_FILE_LOCATION_NOT_ALLOWED`, `INVALID_ICON`, `ICON_TOO_LARGE`,
 `ICON_TYPE_NOT_SUPPORTED`, `ICON_FILE_NOT_FOUND`, `INVALID_DEVICE_TYPE`, `NOTHING_TO_UPDATE`, `TOO_MANY_NODES`, `REVISION_CONFLICT`,
