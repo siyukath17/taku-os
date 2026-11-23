@@ -71,12 +71,13 @@ export function tvChips(state: TvControls, language: Language): ControlChip<TvAc
   ];
 }
 
-/** What the TV visual shows: `Living Room · Ambient Mode` until something plays or casts. */
+/** What the TV visual shows: `Living Room` / `Ambient Mode` until something plays or casts. */
 export function tvScreen(state: TvControls, language: Language): {title: string; caption: string; badge: string; progress: boolean} {
   const t = tvText[language];
   if (state.casting) return {title: t.castFrom, caption: `${t.room} · ${state.playing ? t.playing : t.paused}`, badge: t.hdr, progress: state.playing};
-  if (state.playing) return {title: t.playing, caption: `${t.room} · ${t.hdr}`, badge: t.hdr, progress: true};
-  return {title: t.ambient, caption: `${t.room} · ${t.ambient}`, badge: t.hdr, progress: false};
+  // The caption names the room only: the screen is ~300 dp wide and the title already says the mode.
+  if (state.playing) return {title: t.playing, caption: t.room, badge: t.hdr, progress: true};
+  return {title: t.ambient, caption: t.room, badge: t.hdr, progress: false};
 }
 
 /** The note shown when "Dispatch task" is pressed on a demo node (no agent tools exist for it). */

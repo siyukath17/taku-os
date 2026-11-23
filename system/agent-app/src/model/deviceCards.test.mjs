@@ -14,7 +14,7 @@ test('car card: Climate, Unlock and Frunk toggle independently with their labels
 
 test('TV card: play/pause, stepping volume that wraps, cast; the screen follows', () => {
   assert.deepEqual(tvChips(initialTv, 'en').map(c => c.label), ['Play / Pause', 'Volume', 'Cast']);
-  assert.deepEqual(tvScreen(initialTv, 'en'), {title: 'Ambient Mode', caption: 'Living Room · Ambient Mode', badge: '4K HDR', progress: false});
+  assert.deepEqual(tvScreen(initialTv, 'en'), {title: 'Ambient Mode', caption: 'Living Room', badge: '4K HDR', progress: false});
   const playing = tvReducer(initialTv, 'play');
   assert.equal(tvChips(playing, 'en')[0].active, true);
   assert.equal(tvScreen(playing, 'en').title, 'Now playing');
