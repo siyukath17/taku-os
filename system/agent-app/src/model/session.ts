@@ -1,5 +1,5 @@
 /** Read-only presentation of native records. The native thread remains authoritative. */
-import {statusNoteLine} from './toolStream.ts';
+import {phoneToolKeys, phoneToolResultText, statusNoteLine} from './toolStream.ts';
 import {isStateCardItem, parseUiRequest, type CardPresentation, type MainReply, type UiRequest} from './genui.ts';
 import {parseMainReply} from './genuiCompose.ts';
 import {subagentTask, type SubagentTask} from './subagents.ts';
@@ -137,9 +137,7 @@ const toolTypes = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dyn
 const toolKeys: Record<string, string> = {
   commandExecution: 'command', fileChange: 'fileChange', webSearch: 'webSearch', contextCompaction: 'compaction',
   collabAgentToolCall: 'collaboration', collabToolCall: 'collaboration', enteredReviewMode: 'review', exitedReviewMode: 'review',
-  device_info: 'deviceInfo', observe_background: 'observeScreen', open_app: 'openApp', tap: 'tap', type_text: 'typeText', apps: 'apps',
-  request_apps: 'requestApps', release_apps: 'releaseApps', screen_status: 'screenStatus', screenshot: 'screenshot',
-  swipe: 'swipe', touch: 'touch',
+  ...phoneToolKeys,
 };
 // Tools of the on-device ACP agent (agy), reported by the broker with server "agy" and the bare tool name.
 const agentToolKeys: Record<string, string> = {
@@ -153,17 +151,22 @@ function activity(item: Json, turnId: string, outputs: Json, index: number): Act
   const type = string(item.type);
   const tool = string(item.tool);
   const short = tool.replace(/^.*(?:__|\/|\.)/, '');
-  const phone = tool.startsWith('taku_phone') || item.namespace === 'taku_phone';
+  // A bare phone tool name without a namespace (an older Codex record, an agy update without its MCP
+  // prefix) is still a phone tool: only taku_phone registers these names, and its raw name never shows.
+  const phone = tool.startsWith('taku_phone') || item.namespace === 'taku_phone'
+    || ((type === 'dynamicToolCall' || item.server === 'agy') && !label(item.namespace) && phoneToolKeys[tool] !== undefined);
   const agent = item.server === 'agy' && !phone;
   const mcp = !phone && (type === 'mcpToolCall' || type === 'dynamicToolCall') && !(agent && agentToolKeys[tool])
     ? mcpTool(string(item.server), tool, string(item.namespace)) : null;
   const named = mcp ? mcpPresentation(mcp) : null;
   const titleKey = toolKeys[type] || (phone && (toolKeys[short] || 'phoneTool')) || (agent && agentToolKeys[tool]) || named?.titleKey || (type === 'agentMessage' ? 'statusNote' : 'tool');
   const details: string[] = [];
-  for (const value of [item.command, item.aggregatedOutput || outputs[string(item.id)]]) if (typeof value === 'string' && value) details.push(value);
+  // A phone tool's JSON answer is for the agent; the stream keeps only its human message (BUG-0033).
+  const output = (text: string) => phone ? phoneToolResultText(text) : text;
+  for (const value of [item.command, item.aggregatedOutput || outputs[string(item.id)]]) if (typeof value === 'string' && value) details.push(output(value));
   if (type === 'agentMessage') details.push(string(item.text));
-  for (const block of list(item.contentItems)) { const b = record(block); if (b.type === 'inputText') details.push(string(b.text)); }
-  for (const block of list(record(item.result).content)) { const b = record(block); if (b.type === 'text') details.push(string(b.text)); }
+  for (const block of list(item.contentItems)) { const b = record(block); if (b.type === 'inputText') details.push(output(string(b.text))); }
+  for (const block of list(record(item.result).content)) { const b = record(block); if (b.type === 'text') details.push(output(string(b.text))); }
   for (const change of list(item.changes)) { const c = record(change); if (typeof c.path === 'string') details.push(c.path); }
   const error = typeof item.error === 'string' ? item.error : string(record(item.error).message);
   if (error) details.push(error);

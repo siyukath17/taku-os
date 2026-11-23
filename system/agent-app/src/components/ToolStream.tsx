@@ -5,7 +5,7 @@ import {textFor, type Language, type TextKey} from '../i18n';
 import {chatColors, chatType, themedStyles} from '../chat/chatTheme';
 import {activityName, type Activity} from '../model/session';
 import {formatClock, formatDuration} from '../model/subagents';
-import {cleanToolDetail, isStatusNote, statusNoteLine, toolStepElapsed, toolStreamSummary, visibleToolSteps} from '../model/toolStream';
+import {cleanToolDetail, humanizeToolNames, isStatusNote, statusNoteLine, toolStepElapsed, toolStreamSummary, visibleToolSteps} from '../model/toolStream';
 import {Icon} from './Icon';
 import {PulseDot, useNow} from './SubagentCards';
 
@@ -59,7 +59,7 @@ function ToolStep({item, language, now}: {item: Activity; language: Language; no
 function ToolCallStep({item, language, now}: {item: Activity; language: Language; now: number}) {
   const t = textFor(language), [open, setOpen] = useState(false);
   const name = activityName(item, key => t(key as TextKey));
-  const detail = item.text ? cleanToolDetail(item.text) : '';
+  const detail = item.text ? cleanToolDetail(humanizeToolNames(item.text, key => t(key as TextKey))) : '';
   const elapsed = toolStepElapsed(item, now);
   const live = item.status === 'running' || item.status === 'waiting';
   const time = elapsed === null ? '' : live ? formatClock(elapsed) : formatDuration(elapsed);

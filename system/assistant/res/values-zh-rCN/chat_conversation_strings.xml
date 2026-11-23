@@ -7,6 +7,14 @@
     <string name="chat_tool_open_app">打开应用</string>
     <string name="chat_tool_tap">点击后台画面</string>
     <string name="chat_tool_type_text">输入文字</string>
+    <string name="chat_tool_screenshot">查看屏幕</string>
+    <string name="chat_tool_swipe">滑动屏幕</string>
+    <string name="chat_tool_touch">触摸屏幕</string>
+    <string name="chat_tool_apps">查找应用</string>
+    <string name="chat_tool_request_apps">申请后台专屏</string>
+    <string name="chat_tool_release_apps">释放后台专屏</string>
+    <string name="chat_tool_screen_status">查看专屏状态</string>
+    <string name="chat_tool_phone">操作手机</string>
     <string name="chat_tool_command">运行命令</string>
     <string name="chat_tool_file_change">文件变更</string>
     <string name="chat_tool_extension">调用扩展工具</string>

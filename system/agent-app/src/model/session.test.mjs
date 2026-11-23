@@ -45,6 +45,36 @@ test('on-device ACP agent tools show translated labels, never raw agent names', 
   assert.deepEqual(result.blocks[1].subagents.map(task => task.id), ['turn-1/t3']);
 });
 
+test('BUG-0033: release_apps and its sibling phone tools never show a raw name or JSON result', () => {
+  const released = '{"released":["com.xingin.xhs"],"held":[]}';
+  const result = projectSession({thread: {id: 'thread-1', turns: [{id: 'turn-1', status: 'completed', items: [
+    {id: 'u', type: 'userMessage', content: [{type: 'text', text: '查小红书'}]},
+    // Codex with its namespace, Codex without one (older record), agy canonical, agy bare.
+    {id: 'c1', type: 'dynamicToolCall', namespace: 'taku_phone', tool: 'release_apps', arguments: {packages: ['com.xingin.xhs']},
+      status: 'completed', success: true, contentItems: [{type: 'inputText', text: released}]},
+    {id: 'c2', type: 'dynamicToolCall', tool: 'release_apps', status: 'completed', success: true, contentItems: [{type: 'inputText', text: released}]},
+    {id: 'a1', type: 'mcpToolCall', server: 'agy', tool: 'taku_phone__release_apps', namespace: 'taku_phone', status: 'completed',
+      result: {content: [{type: 'text', text: released}]}},
+    {id: 'a2', type: 'mcpToolCall', server: 'agy', tool: 'release_apps', title: '释放后台专屏', status: 'completed', result: {content: [{type: 'text', text: released}]}},
+    {id: 'c3', type: 'dynamicToolCall', namespace: 'taku_phone', tool: 'screen_status', status: 'completed', contentItems: [{type: 'inputText', text: '{"screens":[]}'}]},
+    {id: 'c4', type: 'dynamicToolCall', namespace: 'taku_phone', tool: 'open_app', status: 'failed', success: false,
+      contentItems: [{type: 'inputText', text: '{"error":"APP_NOT_HELD","message":"Hold it first: request_apps, then open_app."}'}]},
+    {id: 'c5', type: 'dynamicToolCall', namespace: 'taku_phone', tool: 'tap', status: 'completed', contentItems: [{type: 'inputText', text: 'Tapped at 10,20'}]},
+    {id: 'a', type: 'agentMessage', phase: 'final_answer', text: 'Done.'},
+  ]}]}, native: {}, historyComplete: true});
+  const activity = result.blocks[1].activity;
+  assert.deepEqual(activity.map(a => a.titleKey), ['releaseApps', 'releaseApps', 'releaseApps', 'releaseApps', 'screenStatus', 'openApp', 'tap']);
+  assert.deepEqual(activity.map(a => a.name), ['', '', '', '', '', '', '']);
+  for (const a of activity) assert.equal(/[{}]|"released"|packages/.test(a.text), false, `${a.id}: ${a.text}`);
+  assert.equal(activity[5].text, 'Hold it first: request_apps, then open_app.');
+  assert.equal(activity[6].text, 'Tapped at 10,20');
+  // Non-phone tools keep their output as is.
+  const other = projectSession({thread: {id: 't', turns: [{id: '1', status: 'completed', items: [
+    {id: 'x', type: 'mcpToolCall', server: 'github', tool: 'search', status: 'completed', result: {content: [{type: 'text', text: '{"total":3}'}]}},
+  ]}]}});
+  assert.equal(other.blocks[0].activity[0].text, '{"total":3}');
+});
+
 test('private reasoning and credential records are never conversation text', () => {
   const result = projectSession({thread: {id: 't', turns: [{id: '1', status: 'completed', items: [
     {id: 'r', type: 'reasoning', text: 'private thought'},

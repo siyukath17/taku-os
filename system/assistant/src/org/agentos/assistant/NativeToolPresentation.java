@@ -14,16 +14,8 @@ final class NativeToolPresentation {
         switch (string(item, "type")) {
             case "dynamicToolCall":
                 String name = string(item, "tool");
-                String shortName = name.substring(Math.max(name.lastIndexOf('.'), name.lastIndexOf('/')) + 1);
-                if (shortName.startsWith("taku_phone__")) shortName = shortName.substring(12);
-                boolean phone = name.startsWith("taku_phone") || "taku_phone".equals(string(item, "namespace"));
-                if (phone) switch (shortName) {
-                    case "device_info": return label(labels, "device_info", "Read device information");
-                    case "observe_background": return label(labels, "observe_background", "View background screen");
-                    case "open_app": return label(labels, "open_app", "Open app");
-                    case "tap": return label(labels, "tap", "Tap background screen");
-                    case "type_text": return label(labels, "type_text", "Enter text");
-                }
+                String phoneTool = phoneTool(item);
+                if (phoneTool != null) return phoneLabel(labels, phoneTool);
                 return name.isEmpty() ? label(labels, "tool", "Call tool") : name;
             case "commandExecution": return label(labels, "command", "Run command");
             case "fileChange": return label(labels, "file_change", "File changes");
@@ -31,6 +23,8 @@ final class NativeToolPresentation {
                 // ACP items carry a display "title" (AcpToolLabels); "tool" is then an internal id.
                 String display = string(item, "title");
                 if (!display.isEmpty()) return display;
+                String mcpPhone = phoneTool(item);
+                if (mcpPhone != null) return phoneLabel(labels, mcpPhone);
                 String tool = string(item, "tool");
                 return tool.isEmpty() ? label(labels, "extension", "Call extension tool") : tool;
             case "webSearch": return label(labels, "web_search", "Search the web");
@@ -68,17 +62,22 @@ final class NativeToolPresentation {
 
     static String details(JSONObject item, String streamedOutput, Labels labels) {
         StringBuilder out = new StringBuilder();
+        // A taku_phone tool's server, arguments and JSON answer are for the agent, not the user (BUG-0033):
+        // only human text (plain output, a JSON result's message/error) is shown; the thread keeps the rest.
+        boolean phone = phoneTool(item) != null;
         append(out, string(item, "command"));
-        append(out, string(item, "server"));
-        JSONObject arguments = item.optJSONObject("arguments");
-        if (arguments != null) append(out, arguments.toString());
+        if (!phone) {
+            append(out, string(item, "server"));
+            JSONObject arguments = item.optJSONObject("arguments");
+            if (arguments != null) append(out, arguments.toString());
+        }
         String output = string(item, "aggregatedOutput");
-        append(out, output.isEmpty() ? streamedOutput : output);
+        append(out, result(phone, output.isEmpty() ? streamedOutput : output));
         JSONArray content = item.optJSONArray("contentItems");
         if (content != null) for (int i = 0; i < content.length(); i++) {
             JSONObject part = content.optJSONObject(i);
             if (part == null) continue;
-            if ("inputText".equals(part.optString("type"))) append(out, part.optString("text"));
+            if ("inputText".equals(part.optString("type"))) append(out, result(phone, part.optString("text")));
             else if ("inputImage".equals(part.optString("type"))) append(out, label(labels, "image_result", "The tool returned an image"));
         }
         JSONObject result = item.optJSONObject("result");
@@ -86,7 +85,7 @@ final class NativeToolPresentation {
             JSONArray blocks = result.optJSONArray("content");
             if (blocks != null) for (int i = 0; i < blocks.length(); i++) {
                 JSONObject block = blocks.optJSONObject(i);
-                if (block != null && "text".equals(block.optString("type"))) append(out, block.optString("text"));
+                if (block != null && "text".equals(block.optString("type"))) append(out, result(phone, block.optString("text")));
             }
         }
         JSONArray changes = item.optJSONArray("changes");
@@ -102,6 +101,61 @@ final class NativeToolPresentation {
         // Keep large command output scrollable without allocating an unbounded TextView.
         return out.length() > 16000 ? label(labels, "output_tail", "…(Showing only the end of the output)")
                 + "\n" + out.substring(out.length() - 16000) : out.toString();
+    }
+
+    /** taku_phone tools by bare name → {label key, English fallback}. */
+    private static final java.util.Map<String, String[]> PHONE_LABELS = java.util.Map.ofEntries(
+            java.util.Map.entry("device_info", new String[]{"device_info", "Read device information"}),
+            java.util.Map.entry("observe_background", new String[]{"observe_background", "View background screen"}),
+            java.util.Map.entry("screenshot", new String[]{"screenshot", "View the screen"}),
+            java.util.Map.entry("open_app", new String[]{"open_app", "Open app"}),
+            java.util.Map.entry("tap", new String[]{"tap", "Tap background screen"}),
+            java.util.Map.entry("swipe", new String[]{"swipe", "Swipe the screen"}),
+            java.util.Map.entry("touch", new String[]{"touch", "Touch the screen"}),
+            java.util.Map.entry("type_text", new String[]{"type_text", "Enter text"}),
+            java.util.Map.entry("apps", new String[]{"apps", "Find apps"}),
+            java.util.Map.entry("request_apps", new String[]{"request_apps", "Request a background screen"}),
+            java.util.Map.entry("release_apps", new String[]{"release_apps", "Release the background screen"}),
+            java.util.Map.entry("screen_status", new String[]{"screen_status", "Check the background screen"}));
+
+    /**
+     * The bare taku_phone tool of a dynamic (Codex) or MCP (ACP) tool item, else null: by namespace,
+     * by a {@code taku_phone.}/{@code taku_phone__} prefix, or a known phone tool name without any
+     * namespace (only taku_phone registers those names).
+     */
+    static String phoneTool(JSONObject item) {
+        String type = string(item, "type");
+        if (!"dynamicToolCall".equals(type) && !"mcpToolCall".equals(type)) return null;
+        String name = string(item, "tool");
+        String shortName = name.substring(Math.max(name.lastIndexOf('.'), name.lastIndexOf('/')) + 1);
+        if (shortName.startsWith("taku_phone__")) shortName = shortName.substring(12);
+        String namespace = string(item, "namespace");
+        if (name.startsWith("taku_phone") || "taku_phone".equals(namespace)) return shortName;
+        boolean bare = namespace.isEmpty() && ("dynamicToolCall".equals(type) || "agy".equals(string(item, "server")));
+        return bare && PHONE_LABELS.containsKey(name) ? name : null;
+    }
+
+    private static String phoneLabel(Labels labels, String tool) {
+        String[] pair = PHONE_LABELS.get(tool);
+        return pair == null ? label(labels, "phone_tool", "Use the phone") : label(labels, pair[0], pair[1]);
+    }
+
+    /** A phone tool's JSON answer keeps only its human message/error; plain text and other tools' output pass. */
+    static String result(boolean phone, String text) {
+        String trimmed = text == null ? "" : text.trim();
+        if (!phone || !(trimmed.startsWith("{") || trimmed.startsWith("["))) return text;
+        Object value;
+        try {
+            value = new JSONTokener(trimmed).nextValue();
+        } catch (JSONException e) {
+            return text;
+        }
+        if (!(value instanceof JSONObject)) return value instanceof JSONArray ? "" : text;
+        JSONObject o = (JSONObject) value;
+        Object error = o.opt("error");
+        String errorText = error instanceof JSONObject ? ((JSONObject) error).optString("message") : error instanceof String ? (String) error : "";
+        String message = string(o, "message").trim();
+        return !message.isEmpty() ? message : errorText.trim();
     }
 
     private static String label(Labels labels, String key, String fallback, Object... arguments) {

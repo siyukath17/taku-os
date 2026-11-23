@@ -7,6 +7,14 @@
     <string name="chat_tool_open_app">Open app</string>
     <string name="chat_tool_tap">Tap background screen</string>
     <string name="chat_tool_type_text">Enter text</string>
+    <string name="chat_tool_screenshot">View the screen</string>
+    <string name="chat_tool_swipe">Swipe the screen</string>
+    <string name="chat_tool_touch">Touch the screen</string>
+    <string name="chat_tool_apps">Find apps</string>
+    <string name="chat_tool_request_apps">Request a background screen</string>
+    <string name="chat_tool_release_apps">Release the background screen</string>
+    <string name="chat_tool_screen_status">Check the background screen</string>
+    <string name="chat_tool_phone">Use the phone</string>
     <string name="chat_tool_command">Run command</string>
     <string name="chat_tool_file_change">File changes</string>
     <string name="chat_tool_extension">Call extension</string>
