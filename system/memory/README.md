@@ -194,7 +194,7 @@ Taku 首页（`system/agent-app/modules/taku-home`，Vela 的 `vela/TAKU-new-UI`
 
 新增接口（签名调用方，需开启 Agent 查询）：`board`、`profile`（`forAgent` + `text` 时按消息挑选）、`agenda`。本应用或受控 root：`maintain`、`clearDerived`、`deleteBoardItem {part,name}`、`deleteProfileItem {kind: me|person|note, item, note}`；Broker 内部：`genInput`、`genResult`。Broker 的记忆网关另有 `organizeModels`（整理模型列表）；`board`、`profile` 的结果带 `revokedAt`。
 
-向量依赖：`system/memory/vector-dependencies.json` 固定 ONNX Runtime Android 1.29.0 AAR 与 Xenova/bge-small-zh-v1.5 量化版 `model_quantized.onnx`（约 24MB）的地址和 SHA-256，`scripts/prepare-memory-vectors.py` 下载校验到忽略的 `system/memory/downloads/`，并为 `Android.bp` 准备 `downloads/assets/bge/`（模型不压缩存放）。`build.sh`（含 `npm run build:android`）首次构建会自动运行它，之后只校验；ROM 构建前需先运行一次。也可用 `TAKU_ORT_AAR`、`TAKU_BGE_DIR` 指定别处的依赖。APK 约 37MB，主要是模型和 ONNX Runtime。
+向量依赖：`system/memory/vector-dependencies.json` 固定 ONNX Runtime Android 1.29.0 AAR 与 Xenova/bge-small-zh-v1.5 量化版 `model_quantized.onnx`（约 24MB）的地址和 SHA-256，`scripts/prepare-memory-vectors.py` 下载校验到忽略的 `system/memory/downloads/`，并为 `Android.bp` 准备 `downloads/assets/bge/`（模型不压缩存放）。`build.sh`（含 `npm run build:android`）首次构建会自动运行它，之后只校验；ROM 构建前需先运行一次。`Android.bp` 的 `TakuMemory` 必须保留 `use_embedded_native_libs: true`（否则 Soong 会丢掉 AAR 里的 `libonnxruntime.so` / `libonnxruntime4j_jni.so`），清单也不能写 `extractNativeLibs="true"`；`system/memory/test-host.sh` 在主机上校验这一打包契约，并验证缺原生库时召回降级为纯关键词、进程不崩。也可用 `TAKU_ORT_AAR`、`TAKU_BGE_DIR` 指定别处的依赖。APK 约 37MB，主要是模型和 ONNX Runtime。
 
 0.4–0.5 分支验收（emulator_verified，2026-10-28 北京时间，专用 AVD `TakuRecall`，Android 16 / API 36 / ARM64，基线 `96e2409`）：[记录](../../docs/reviews/taku-memory-0.5-2026-10-28/README.md)。合并后的 0.7.0 复测：[记录](../../docs/reviews/taku-memory-0.7-2026-10-28/README.md)。0.8.0：[记录](../../docs/reviews/taku-memory-0.8-2026-10-29/README.md)。同版真机、完整 ROM、冷启动和长期耗电未验收。
 
@@ -294,6 +294,7 @@ Authority：`content://org.agentos.memory`，状态版本 `taku.memory/2`。调�
 bash system/memory/build.sh                      # 正式构建（首次自动准备向量依赖）；回放评测用 TAKU_DEBUG_HOOKS=1
 bash system/assistant/build.sh
 bash system/memory/build-tests.sh
+bash system/memory/test-host.sh                  # 主机端：ROM 原生库打包契约 + 缺原生库降级（不连设备）
 ```
 
 输出分别为独立记忆 APK、原助手与 Broker、不同签名的合成页面／隔离测试 APK，以及首页卡片流替身 `TakuHomeFeedStub.apk`（只在没装首页的测试机上用，装真首页前要卸载）。测试组件不进入产品 APK 或 ROM。

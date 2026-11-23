@@ -194,7 +194,7 @@ The card holds the needed item at 74/80 moments (0.8.1: 68; evenings 67/70 vs. 6
 - **Language**: the new settings, board and card pages use the same English and Chinese resources as 0.6.0. Board and card content is written by the organizing model in Chinese and is not translated.
 - **Build flags**: simulated time (`testNow`), organizing at a given time (`maintain {now}`) and rebuilding only the card (`buildProfile`) exist only in `TAKU_DEBUG_HOOKS=1` debug builds and only for root; release builds reject them and must bundle the vector model.
 
-Vector dependencies: `system/memory/vector-dependencies.json` pins the ONNX Runtime Android 1.29.0 AAR and Xenova/bge-small-zh-v1.5 `model_quantized.onnx` (about 24 MB) by URL and SHA-256. `scripts/prepare-memory-vectors.py` downloads and verifies them into the ignored `system/memory/downloads/` and prepares `downloads/assets/bge/` for `Android.bp` (model stored uncompressed). `build.sh` runs it on first build. The APK is about 37 MB.
+Vector dependencies: `system/memory/vector-dependencies.json` pins the ONNX Runtime Android 1.29.0 AAR and Xenova/bge-small-zh-v1.5 `model_quantized.onnx` (about 24 MB) by URL and SHA-256. `scripts/prepare-memory-vectors.py` downloads and verifies them into the ignored `system/memory/downloads/` and prepares `downloads/assets/bge/` for `Android.bp` (model stored uncompressed). `build.sh` runs it on first build. `TakuMemory` in `Android.bp` must keep `use_embedded_native_libs: true` (otherwise Soong drops `libonnxruntime.so` / `libonnxruntime4j_jni.so` from the AAR) and the manifest must not set `extractNativeLibs="true"`; `system/memory/test-host.sh` checks that packaging contract on the host and that recall degrades to keyword-only, without crashing, when the native libraries are missing. The APK is about 37 MB.
 
 Acceptance: 0.4–0.5 branch on the dedicated `TakuRecall` AVD ([record](../../docs/reviews/taku-memory-0.5-2026-10-28/README.md)); merged 0.7.0 re-test ([record](../../docs/reviews/taku-memory-0.7-2026-10-28/README.md)); 0.8.0 ([record](../../docs/reviews/taku-memory-0.8-2026-10-29/README.md)). Same-version physical phone, full ROM, cold boot and long-term battery are not verified.
 
@@ -233,6 +233,7 @@ Use Assistant v59 with **this revision of the Broker** (including `memoryFocus`)
 ```sh
 bash system/memory/build.sh
 bash system/memory/build-tests.sh
+bash system/memory/test-host.sh   # host only: ROM native-library packaging contract + missing-library fallback
 bash system/assistant/build.sh
 bash system/surfaces/build.sh
 ```

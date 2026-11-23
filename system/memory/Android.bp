@@ -15,6 +15,10 @@ android_app {
     asset_dirs: ["assets", "downloads/assets"],
     aaptflags: ["-0", "onnx"],
     static_libs: ["taku-surfaces-client", "taku-markdown", "taku-memory-onnxruntime"],
+    // Soong drops prebuilt JNI from AARs (extract_jni) unless the app embeds its native libraries; without this the ROM
+    // APK ships without libonnxruntime.so / libonnxruntime4j_jni.so and vector recall fails to link. Embedded libs are
+    // stored uncompressed and Soong sets extractNativeLibs=false, so AndroidManifest.xml must not set it to true.
+    use_embedded_native_libs: true,
     platform_apis: true,
     certificate: "platform",
     privileged: true,

@@ -15,6 +15,8 @@ import java.util.*;
 final class Recall {
  static final int LIST=30,HOP_SEEDS=5;
  static Embedder embedder;static String embedderError="";
+ /** Set once the ONNX Runtime native libraries fail to link: a process cannot recover from that, so later calls skip the reload. */
+ static boolean embedderUnlinkable;
  /** Guards the model's first load (copy from the APK, ONNX session): it can take seconds and must not hold Recall.class, which every search needs. */
  static final Object EMBED=new Object();
  /**
@@ -34,8 +36,8 @@ final class Recall {
 
  static Embedder embedder(Context c){
   synchronized(EMBED){
-  if(embedder!=null)return embedder;
-  try{
+  if(embedder!=null||embedderUnlinkable)return embedder;
+  embedder=load(()->{
    File model=new File(c.getFilesDir(),"bge-small-zh-v1.5.onnx");
    long size=-1;try(android.content.res.AssetFileDescriptor fd=c.getAssets().openFd("bge/model.onnx")){size=fd.getLength();}catch(IOException devBuildWithoutModel){}
    if(size<0&&!model.isFile())throw new IOException(c.getString(R.string.error_vector_model_missing));
@@ -44,10 +46,22 @@ final class Recall {
     try(InputStream in=c.getAssets().open("bge/model.onnx");OutputStream out=new FileOutputStream(tmp)){byte[] b=new byte[1<<16];int n;while((n=in.read(b))>0)out.write(b,0,n);}
     if(!tmp.renameTo(model))throw new IOException(c.getString(R.string.error_vector_model_copy));
    }
-   embedder=new Embedder(c.getAssets().open("bge/vocab.txt"),model.getPath());embedderError="";
-  }catch(Exception e){embedderError=String.valueOf(e.getMessage());android.util.Log.w("TakuMemory","Embedding model unavailable",e);}
+   return new Embedder(c.getAssets().open("bge/vocab.txt"),model.getPath());
+  });
   return embedder;
   }
+ }
+
+ /**
+  * Opens the embedder, or returns null so memory falls back to keyword-only recall. A missing ONNX Runtime native library
+  * (UnsatisfiedLinkError on first use, NoClassDefFoundError after) is a LinkageError, not an Exception: it must degrade the
+  * same way instead of killing the process. Other Errors (OutOfMemoryError, ...) still propagate.
+  */
+ static Embedder load(java.util.concurrent.Callable<Embedder> open){
+  try{Embedder e=open.call();embedderError="";return e;}
+  catch(LinkageError e){embedderUnlinkable=true;embedderError=e.toString();android.util.Log.e("TakuMemory","ONNX Runtime native libraries unavailable; vector recall disabled until restart",e);}
+  catch(Exception e){embedderError=String.valueOf(e.getMessage());android.util.Log.w("TakuMemory","Embedding model unavailable",e);}
+  return null;
  }
 
  static String evidenceText(String title,String head,String show){return title+" "+head+"\n"+show;}
