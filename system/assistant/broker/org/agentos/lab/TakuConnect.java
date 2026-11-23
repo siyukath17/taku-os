@@ -75,6 +75,9 @@ final class TakuConnect {
     static final int MAX_ROUTES = 8, MAX_ROUTE_LABEL_CHARS = 32;
     static final Set<String> ROUTE_KINDS = Set.of("lan", "ipv6", "tailscale", "relay", "internet");
 
+    /** {@code appearance} keys; the app gateway's whitelist ({@code TakuConnectContract}) must match. */
+    static final List<String> APPEARANCE_FIELDS = List.of("displayName", "shortName", "deviceType", "icon");
+
     /** Validation failure; the message is a stable public error code. */
     static final class Invalid extends IOException {
         Invalid(String code) { super(code); }
@@ -775,7 +778,7 @@ final class TakuConnect {
         JSONObject appearance = entry.optJSONObject("appearance");
         if (appearance == null) entry.put("appearance", appearance = new JSONObject());
         boolean changed = false;
-        for (String key : new String[]{"displayName", "shortName", "deviceType", "icon"}) {
+        for (String key : APPEARANCE_FIELDS) {
             if (!input.has(key)) continue;
             changed = true;
             Object value = input.get(key);

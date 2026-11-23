@@ -270,6 +270,7 @@ taku_call "$D" connect/routes '{"id":"taku_macmini","routes":[{"label":"局域�
 taku_call "$D" connect/appearance '{"id":"taku_macmini","displayName":"书房 Mac mini","deviceType":"mac_mini","icon":"builtin:mac_mini"}'
 taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":"/data/local/tmp/mini.png"}'   # inlined as data:image/png;base64
 taku_call "$D" connect/appearance '{"id":"taku_macmini","icon":null}'                          # clear: next icon tier applies
+taku_call "$D" connect/appearance '{"id":"demo_tesla","shortName":"Tesla"}'                      # orbit label; null or "" clears it
 taku_call "$D" connect/setEnabled '{"id":"taku_macmini","enabled":false}'   # leaves mcpServers (agent stops using it), kept in connect.json
 taku_call "$D" connect/test '{"url":"192.168.1.30:7878","token":"…"}'       # probe without saving; or "urls":["…","…"]
 taku_call "$D" connect/add '{"name":"客厅电视","url":"192.168.1.30:7878","token":"…","deviceType":"tv"}'

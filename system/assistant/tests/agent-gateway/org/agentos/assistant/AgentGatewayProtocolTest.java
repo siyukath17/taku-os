@@ -269,6 +269,12 @@ public final class AgentGatewayProtocolTest {
         rejects(()->PanelProtocol.parse("panels/rename",new JSONObject().put("panelId",THREAD).put("requestId",KEY).put("expectedMetadataRevision",-1).put("title","name")));
         check(PanelProtocol.parse("panels/rename",new JSONObject().put("panelId",THREAD).put("requestId",KEY).put("expectedMetadataRevision",0).put("title","  "+"𐐀".repeat(120)+"  ")).getString("title").codePointCount(0,240)==120);
         primaryReplies();
+        // Taku Connect: the Agent UI gateway admits every connect/* action and hands appearance
+        // (including shortName and its null clear) to TakuConnectContract unchanged.
+        check(AgentGatewayProtocol.ACTIONS.containsAll(TakuConnectContract.ACTIONS));
+        JSONObject connectAppearance = new JSONObject().put("id", "taku_mini").put("shortName", JSONObject.NULL).put("displayName", "Mac mini");
+        JSONObject connectRequest = TakuConnectContract.request("connect/appearance", AgentGatewayProtocol.request("connect/appearance", connectAppearance.toString()), null);
+        check(connectRequest.isNull("shortName") && connectRequest.getString("displayName").equals("Mac mini") && connectRequest.getString("action").equals("appearance"));
         System.out.println("AgentGatewayProtocolTest: " + assertions + " assertions passed");
     }
 }

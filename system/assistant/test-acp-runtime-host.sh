@@ -8,10 +8,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/android-env.sh
+source scripts/compile-jvm.sh
 task_out="$PWD/out/acp-runtime-host"
 task_json="$PWD/out/ime-replies-host/json-20240303.jar"
 if [ ! -f "$task_json" ]; then bash system/assistant/test-confirmation-host.sh; fi
-rm -rf "$task_out" && mkdir -p "$task_out/classes" "$task_out/android-check"
+rm -rf "$task_out" && mkdir -p "$task_out/classes" "$task_out/android-check" "$task_out/app-contract"
+# The app gateway's Taku Connect contract (Kotlin, no Android dependency), checked against the broker.
+compile_jvm "$task_out/app-contract" "$task_json" \
+ system/assistant/src/org/agentos/assistant/TakuConnectContract.kt
+task_app_cp="$task_out/app-contract:$KOTLIN_LIB/kotlin-stdlib.jar"
 task_sources=(
  system/assistant/broker/org/agentos/lab/TaskRecords.java
  system/assistant/broker/org/agentos/lab/TaskRuntime.java
@@ -43,7 +48,7 @@ task_sources=(
  system/assistant/src/org/agentos/assistant/AcpIslandProjection.java
 )
 "$JDK/bin/javac" --release 17 -cp "$ANDROID_JAR" -d "$task_out/android-check" "${task_sources[@]}"
-"$JDK/bin/javac" --release 17 -Xlint:all -Werror -Xlint:-serial -cp "$task_json" -d "$task_out/classes" \
+"$JDK/bin/javac" --release 17 -Xlint:all -Werror -Xlint:-serial -cp "$task_json:$task_app_cp" -d "$task_out/classes" \
  "${task_sources[@]}" \
  system/assistant/tests/acp-runtime/org/agentos/lab/FakeAcpAgent.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/RuntimeRouterTest.java \
@@ -52,6 +57,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpRuntimeSettingsTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TakuConnectTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TakuConnectInvariantsTest.java \
+ system/assistant/tests/connect-gateway/org/agentos/lab/TakuConnectGatewayContractTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpAuthHelperTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpIslandProjectionTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/RemoteT3RuntimeTest.java \
@@ -76,7 +82,7 @@ task_sources=(
  system/assistant/tests/acp-runtime/android/util/JsonToken.java \
  system/island/src/com/android/systemui/taku/island/IslandPayload.java
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
- "$JDK/bin/java" -cp "$task_out/classes:$task_json" "$main"
+ "$JDK/bin/java" -cp "$task_out/classes:$task_json:$task_app_cp" "$main"
 done | tee "$task_out/result.txt"

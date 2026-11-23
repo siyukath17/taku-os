@@ -15,6 +15,7 @@ compile_jvm "$task_out/classes" "$task_json:$ANDROID_JAR" \
  system/assistant/src/org/agentos/assistant/AgentGatewaySubmissions.kt \
  system/assistant/src/org/agentos/assistant/PanelProtocol.kt \
  system/assistant/src/org/agentos/assistant/TaskDetails.kt \
+ system/assistant/src/org/agentos/assistant/TakuConnectContract.kt \
  system/assistant/tests/agent-gateway/org/agentos/assistant/*.java \
  system/assistant/tests/frontend-route/org/agentos/assistant/*.java
 "$JDK/bin/java" -cp "$task_out/classes:$task_json:$KOTLIN_LIB/kotlin-stdlib.jar" org.agentos.assistant.AgentGatewayProtocolTest
