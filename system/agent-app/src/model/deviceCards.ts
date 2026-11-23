@@ -54,11 +54,11 @@ export function tvReducer(state: TvControls, action: TvAction): TvControls {
 const tvText = {
   en: {
     play: 'Play / Pause', volume: 'Volume', cast: 'Cast', casting: 'Casting',
-    room: 'Living Room', ambient: 'Ambient Mode', playing: 'Now playing', paused: 'Paused', castFrom: 'Casting from Taku Phone', hdr: '4K HDR',
+    room: 'Living Room', ambient: 'Ambient Mode', playing: 'Now playing', paused: 'Paused', castFrom: 'Casting from Taku Phone',
   },
   zh: {
     play: '播放 / 暂停', volume: '音量', cast: '投屏', casting: '投屏中',
-    room: '客厅', ambient: '氛围模式', playing: '正在播放', paused: '已暂停', castFrom: '正在从 Taku Phone 投屏', hdr: '4K HDR',
+    room: '客厅', ambient: '氛围模式', playing: '正在播放', paused: '已暂停', castFrom: '正在从 Taku Phone 投屏',
   },
 } as const;
 
@@ -71,13 +71,12 @@ export function tvChips(state: TvControls, language: Language): ControlChip<TvAc
   ];
 }
 
-/** What the TV visual shows: `Living Room` / `Ambient Mode` until something plays or casts. */
-export function tvScreen(state: TvControls, language: Language): {title: string; caption: string; badge: string; progress: boolean} {
+/** How the TV card describes the TV's state to screen readers: `Living Room` / `Ambient Mode` until something plays or casts. */
+export function tvStatus(state: TvControls, language: Language): {title: string; caption: string} {
   const t = tvText[language];
-  if (state.casting) return {title: t.castFrom, caption: `${t.room} · ${state.playing ? t.playing : t.paused}`, badge: t.hdr, progress: state.playing};
-  // The caption names the room only: the screen is ~300 dp wide and the title already says the mode.
-  if (state.playing) return {title: t.playing, caption: t.room, badge: t.hdr, progress: true};
-  return {title: t.ambient, caption: t.room, badge: t.hdr, progress: false};
+  if (state.casting) return {title: t.castFrom, caption: `${t.room} · ${state.playing ? t.playing : t.paused}`};
+  if (state.playing) return {title: t.playing, caption: t.room};
+  return {title: t.ambient, caption: t.room};
 }
 
 /** The note shown when "Dispatch task" is pressed on a demo node (no agent tools exist for it). */
