@@ -3,7 +3,8 @@
 # router, phone MCP bridge, runtime.json settings, the oauth-personal sign-in trigger and the
 # progress.json -> taku.island.v1 projection: host tests with an in-process fake ACP agent, an
 # in-memory remote T3 host and a loopback HTTP server. AcpFaultInjectionTest injects agent faults
-# (stdout noise, crashes, oversized lines, silence, floods, stdin stalls) and drives real /bin/sh processes.
+# (stdout noise, crashes, oversized lines, silence, floods, stdin stalls) and drives real /bin/sh processes;
+# AcpProcessGroupTest reclaims a real agent's whole process group (setsid, TERM, grace, KILL) and never the broker's.
 # Production sources compile first against android.jar ALONE (Android's org.json: checked
 # JSONException, no keySet), then against the host json jar ALONE (no Android dependency).
 set -euo pipefail
@@ -23,6 +24,7 @@ task_sources=(
  system/assistant/broker/org/agentos/lab/TaskRuntime.java
  system/assistant/broker/org/agentos/lab/RuntimeRouter.java
  system/assistant/broker/org/agentos/lab/AcpProcessTransport.java
+ system/assistant/broker/org/agentos/lab/AcpProcessGroup.java
  system/assistant/broker/org/agentos/lab/AcpAgentPool.java
  system/assistant/broker/org/agentos/lab/AcpReadWarmup.java
  system/assistant/broker/org/agentos/lab/BrokerLog.java
@@ -80,6 +82,7 @@ task_app_cp="$task_app_cp:$task_out/gesture"
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpWarmPoolTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpPoolEdgesTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpFaultInjectionTest.java \
+ system/assistant/tests/acp-runtime/org/agentos/lab/AcpProcessGroupTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/AcpReadWarmupTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/BrokerLogTest.java \
  system/assistant/tests/acp-runtime/org/agentos/lab/TaskWakeTest.java \
@@ -95,7 +98,7 @@ task_app_cp="$task_app_cp:$task_out/gesture"
 # BrokerLogTest also writes real broker.log output (BrokerLog + Timings.summary) for the report script's test.
 export ACP_TTFT_SAMPLE_DIR="$task_out/ttft-sample"
 for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettingsTest AcpAuthHelperTest AcpIslandProjectionTest \
- RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpPoolEdgesTest AcpFaultInjectionTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest AcpPhoneTurnBoundaryTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
+ RemoteT3RuntimeTest AcpConversationStoreTest AcpChatRuntimeTest AcpStandaloneConversationTest AcpModelCatalogTest AcpSubagentRuntimeTest AcpSteerRuntimeTest AcpWarmPoolTest AcpPoolEdgesTest AcpFaultInjectionTest AcpProcessGroupTest AcpReadWarmupTest BrokerLogTest TaskWakeTest GestureOwnersTest AcpPhoneTurnBoundaryTest ThreadListOrderTest TakuConnectTest TakuConnectInvariantsTest TakuConnectGatewayContractTest assistant.AcpChatProjectionTest; do
  case "$test" in assistant.*) main="org.agentos.$test" ;; *) main="org.agentos.lab.$test" ;; esac
  "$JDK/bin/java" -cp "$task_out/classes:$task_json:$task_app_cp" "$main"
 done | tee "$task_out/result.txt"
