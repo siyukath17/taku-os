@@ -12,5 +12,11 @@
       <meta-data android:name="com.android.settings.summary" android:resource="@string/taku_ai_summary" />
       <meta-data android:name="com.android.settings.order" android:value="-50" />
     </activity>
+    <service android:name="org.agentos.agent.bridge.TakuConnectTileService" android:exported="true"
+      android:label="@string/taku_connect_title" android:icon="@drawable/taku_connect_tile"
+      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+      <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+      <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="false" />
+    </service>
   </application>
 </manifest>

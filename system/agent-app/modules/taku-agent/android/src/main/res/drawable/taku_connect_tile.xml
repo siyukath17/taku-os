@@ -1,0 +1,9 @@
+<!-- Taku Connect: a core with an orbit and three linked satellites. Monochrome, tinted by the QS panel. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+  <path android:fillColor="#FFFFFFFF" android:pathData="M12,8.75a3.25,3.25 0,1 0,0 6.5a3.25,3.25 0,1 0,0 -6.5z"/>
+  <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:fillColor="#00000000"
+    android:pathData="M15.46,4.23A8.5,8.5 0,0 1,20.45,12.89M17,18.88A8.5,8.5 0,0 1,7,18.88M3.55,12.89A8.5,8.5 0,0 1,8.54,4.23"/>
+  <path android:fillColor="#FFFFFFFF" android:pathData="M12,1.5a2,2 0,1 0,0 4a2,2 0,1 0,0 -4z"/>
+  <path android:fillColor="#FFFFFFFF" android:pathData="M19.36,14.25a2,2 0,1 0,0 4a2,2 0,1 0,0 -4z"/>
+  <path android:fillColor="#FFFFFFFF" android:pathData="M4.64,14.25a2,2 0,1 0,0 4a2,2 0,1 0,0 -4z"/>
+</vector>

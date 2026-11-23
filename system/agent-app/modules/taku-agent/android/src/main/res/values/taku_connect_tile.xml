@@ -1,0 +1,7 @@
+<resources>
+  <string name="taku_connect_title">Taku Connect</string>
+  <plurals name="taku_connect_devices">
+    <item quantity="one">%d device</item>
+    <item quantity="other">%d devices</item>
+  </plurals>
+</resources>

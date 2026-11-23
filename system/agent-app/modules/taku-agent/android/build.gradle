@@ -20,4 +20,6 @@ dependencies {
   // The route resolution suspends on the app context's background scope.
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
   testImplementation 'junit:junit:4.13.2'
+  // The tile parses gateway JSON; the android.jar org.json is a stub in local unit tests.
+  testImplementation 'org.json:json:20250517'
 }
