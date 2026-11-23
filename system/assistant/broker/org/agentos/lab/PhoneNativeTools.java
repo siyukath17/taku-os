@@ -117,7 +117,7 @@ final class PhoneNativeTools {
    case "swipe":return text(PhoneGestures.swipe(call,screen.displayId,args).toString());
    case "touch":return text(PhoneGestures.touch(call,screen.displayId,args).toString());
    case "observe_background":
-    screen.command("capture");JSONObject frame=new JSONObject(TaskBroker.read(new File(screen.directory(),"capture.json")));screen.validateCapture(frame);
+    try{screen.command("capture");}catch(IOException refused){throw PhoneExecutionScreens.captureFailure(refused);}JSONObject frame=new JSONObject(TaskBroker.read(new File(screen.directory(),"capture.json")));screen.validateCapture(frame);
     File file=new File(screen.directory(),"screen.png");try(InputStream in=new FileInputStream(file)){ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] bytes=new byte[4096];int n;while((n=in.read(bytes))!=-1){out.write(bytes,0,n);if(out.size()>3000000)throw new IOException("Screen image is too large");}
      return text(screen.json().put("frame",frame).toString()).put("contentItems",new JSONArray()
        .put(new JSONObject().put("type","inputText").put("text",screen.json().put("frame",frame).toString()))

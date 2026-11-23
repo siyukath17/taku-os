@@ -105,6 +105,9 @@ final class PhoneExecutionScreens {
         void validateCapture(JSONObject info)throws Exception {
             if(info.getInt("displayId")!=displayId || (!legacy && (!screenKey.equals(info.optString("screenKey"))||!generation.equals(info.optString("generation")))))
                 throw new IOException("SCREEN_GENERATION_CHANGED");
+            // Hosts refuse these themselves; a capture still reporting one is never shown as a page.
+            String state=info.optString("displayState","ON");
+            if(OFF_STATES.contains(state))throw captureFailure(new IOException("SCREEN_OFF: display state "+state));
         }
         void validateLive(JSONObject info,int peerPid,int peerUid)throws Exception {
             String socket=legacy?"taku-mirror":"taku-mirror-"+screenKey;
@@ -127,6 +130,16 @@ final class PhoneExecutionScreens {
         public String removalState(String key,String generation)throws Exception{return new JSONObject(TaskBroker.command("/system_ext/bin/phone-display","removal-status",key,generation)).getString("state");}
         public int currentUser()throws Exception{return Integer.parseInt(TaskBroker.command("/system/bin/am","get-current-user").trim());}
     };
+    static final java.util.Set<String> OFF_STATES=java.util.Set.of("OFF","DOZE","DOZE_SUSPEND","ON_SUSPEND");
+    static final String SCREEN_OFF_MESSAGE="SCREEN_OFF: This task's background screen is switched off (display not ON, e.g. after the power key), so no screenshot was taken. The App page is not blank. Retry observe_background in a few seconds; if it stays off, tell the user the background screen is off instead of giving up on the task.";
+    static final String SCREEN_BLACK_FRAME_MESSAGE="SCREEN_BLACK_FRAME: Every pixel of the background screen's latest frame is pure black, so no screenshot was returned: nothing is drawn there yet, which is not an App page. If no App has been opened on this screen, call open_app; otherwise retry observe_background in a few seconds.";
+    /** A capture the host refused as off/black, as one clear retryable Agent error; others unchanged. */
+    static IOException captureFailure(IOException failure){
+        String detail=failure.getMessage()==null?"":failure.getMessage();
+        if(detail.contains("SCREEN_OFF"))return new IOException(SCREEN_OFF_MESSAGE,failure);
+        if(detail.contains("SCREEN_BLACK_FRAME"))return new IOException(SCREEN_BLACK_FRAME_MESSAGE,failure);
+        return failure;
+    }
     static void thread(String id)throws IOException{if(id==null||!id.matches("[a-f0-9-]{36}"))throw new IOException("INVALID_SCREEN_THREAD");}
     static void packageName(String pkg)throws IOException{if(pkg==null||!pkg.matches("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z0-9_]+)+"))throw new IOException("INVALID_SCREEN_PACKAGE");}
     static Screen descriptor(String key,JSONObject info,boolean legacy)throws Exception {

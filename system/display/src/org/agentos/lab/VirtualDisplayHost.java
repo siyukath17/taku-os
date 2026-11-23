@@ -54,11 +54,6 @@ public final class VirtualDisplayHost {
         try { Field f=DisplayManager.class.getDeclaredField(name); f.setAccessible(true); return f.getInt(null); }
         catch (Exception e) { return 0; }
     }
-    static int requiredFlag(String name)throws IOException {
-        int value=flag(name);
-        if(value==0)throw new IOException("Required display flag unavailable: "+name);
-        return value;
-    }
     static void write(File file, String text) throws Exception {
         File temp=new File(file.getPath()+".tmp");
         try(FileOutputStream out=new FileOutputStream(temp)){out.write(text.getBytes(StandardCharsets.UTF_8));}
@@ -130,8 +125,9 @@ public final class VirtualDisplayHost {
         DisplayManager manager=(DisplayManager)ctx.getSystemService(Context.DISPLAY_SERVICE);
         Handler handler=new Handler(Looper.getMainLooper());mainHandler=handler;
         ImageReader reader=ImageReader.newInstance(WIDTH,HEIGHT,PixelFormat.RGBA_8888,3);
-        int flags=DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
-        flags|=requiredFlag("VIRTUAL_DISPLAY_FLAG_TRUSTED")|requiredFlag("VIRTUAL_DISPLAY_FLAG_OWN_FOCUS")|requiredFlag("VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED")|flag("VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL")|flag("VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH");
+        // Includes VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP: the power key sleeping the default
+        // display group must not turn this screen STATE_OFF under a running task (BUG-0034).
+        int flags=ScreenGuard.virtualDisplayFlags(DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,VirtualDisplayHost::flag);
         VirtualDisplay vd=manager.createVirtualDisplay(slot.name,WIDTH,HEIGHT,DENSITY,reader.getSurface(),flags);
         if(vd==null)throw new IOException("createVirtualDisplay returned null");
         Display display=vd.getDisplay();displayId=display.getDisplayId();
@@ -139,11 +135,16 @@ public final class VirtualDisplayHost {
             .put("screenKey",slot.key).put("generation",generation).put("stateDirectory",DIR.getPath());
         startServer();write(new File(DIR,"display.json"),info.toString(2));write(new File(DIR,"display.id"),Integer.toString(displayId));
         System.out.println(info.toString());System.out.flush();
-        final Bitmap[] latest={null};final long[] saved={0},sequence={0};
+        final Bitmap[] latest={null};final long[] saved={0},sequence={0};final boolean[] latestBlack={false};
         Runnable capture=()->{try{
             File request=new File(DIR,"capture.request");
             CaptureRequest pending=pendingCapture;
             if((pending==null && !request.exists()) || latest[0]==null)return;
+            // An off/dozing screen renders nothing current and a pure-black frame is never a page:
+            // fail with a retryable code rather than hand the Agent a black image (BUG-0034).
+            int state=display.getState();
+            try{ScreenGuard.requireScreenOn(state);ScreenGuard.requireNotBlack(latestBlack[0]);}
+            catch(IOException refused){if(pending==null)request.delete();throw refused;}
             File temp=new File(DIR,"screen.png.tmp");
             try(FileOutputStream out=new FileOutputStream(temp)){
                 if(!latest[0].compress(Bitmap.CompressFormat.PNG,100,out))throw new IOException("PNG encoding failed");
@@ -152,7 +153,8 @@ public final class VirtualDisplayHost {
             JSONObject result=new JSONObject(info.toString())
                 .put("capturedAt",System.currentTimeMillis()).put("frameAt",frameAt)
                 .put("frameElapsedMs",saved[0]).put("frameAgeMs",android.os.SystemClock.elapsedRealtime()-saved[0])
-                .put("frameSequence",sequence[0]).put("captureRequestId",pending==null?"legacy":pending.id);
+                .put("frameSequence",sequence[0]).put("captureRequestId",pending==null?"legacy":pending.id)
+                .put("displayState",ScreenGuard.stateName(state));
             write(new File(DIR,"capture.json"),result.toString());
             request.delete();
             if(pending!=null){pending.result=result;pending.done.countDown();if(pendingCapture==pending)pendingCapture=null;}
@@ -164,11 +166,12 @@ public final class VirtualDisplayHost {
             if(image==null)return;
             long now=android.os.SystemClock.elapsedRealtime();
             Image.Plane plane=image.getPlanes()[0];ByteBuffer buffer=plane.getBuffer();int paddedWidth=plane.getRowStride()/plane.getPixelStride();
+            boolean black=ScreenGuard.isBlackRgba(buffer,WIDTH,HEIGHT,plane.getRowStride(),plane.getPixelStride());
             Bitmap padded=Bitmap.createBitmap(paddedWidth,HEIGHT,Bitmap.Config.ARGB_8888);padded.copyPixelsFromBuffer(buffer);
             Bitmap frame=Bitmap.createBitmap(padded,0,0,WIDTH,HEIGHT);if(frame!=padded)padded.recycle();
             ByteArrayOutputStream bytes=new ByteArrayOutputStream();
             if(!frame.compress(Bitmap.CompressFormat.JPEG,78,bytes)){frame.recycle();throw new IOException("JPEG encoding failed");}
-            if(latest[0]!=null)latest[0].recycle();latest[0]=frame;saved[0]=now;sequence[0]++;
+            if(latest[0]!=null)latest[0].recycle();latest[0]=frame;latestBlack[0]=black;saved[0]=now;sequence[0]++;
             jpeg=bytes.toByteArray();frameAt=System.currentTimeMillis();frameElapsedMs=now;frameSequence=sequence[0];
             // A pending capture must see this final frame even if no later frame arrives.
             capture.run();
