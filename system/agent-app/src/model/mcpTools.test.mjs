@@ -42,3 +42,53 @@ test('chat activity names MCP tools of other servers instead of a generic tool',
   assert.deepEqual(activity.map(a => activityName(a, en)), ['Search memory', 'Capture to memory', 'Run a command on macmini', 'Check the remote node capabilities', 'github · create issue', 'Read memory note']);
   assert.ok(!JSON.stringify(activity).includes('ab12cd34'));
 });
+
+// ---- boundary hardening: unknown prefixes, unsafe characters, over-long names, fallbacks ----
+
+test('unsafe or malformed names never become an MCP label', async () => {
+  const {runtimeNode} = await import('./mcpTools.ts');
+  // Server + tool reported directly (Codex): each part must be a plain identifier.
+  for (const [server, tool] of [['git hub', 'x'], ['github', 'create issue'], ['../etc', 'passwd'], ['github', 'a/b'], ['github', ''],
+    ['github', '-x'], ['github', 'x$y'], ['github', 'x‮y'], ['服务', 'tool'], ['github', 'x\n']]) {
+    assert.equal(mcpTool(server, tool), null, `${server} / ${JSON.stringify(tool)}`);
+  }
+  // agy names: the mcp_ prefix, lower-case identifiers only, at most 120 characters after it.
+  for (const name of ['mcp_', 'mcp__', 'mcp___x', 'mcp_taku_memory_', 'mcp__taku_macmini__', 'mcp_GitHub_create', 'MCP_github_create',
+    'mcpx_github_create', 'mcp_a$b_c', 'mcp_github_create issue', `mcp_github_${'x'.repeat(120)}`, 'mcp_аpi_tool']) {
+    assert.equal(mcpTool('agy', name), null, name);
+  }
+  assert.deepEqual(mcpTool('agy', `mcp_github_${'x'.repeat(112)}`), {server: 'github', tool: 'x'.repeat(112)}, 'exactly 120 still parses');
+  assert.equal(runtimeNode('taku_'), '');
+  assert.equal(runtimeNode('taku_runtime'), '');
+  assert.equal(runtimeNode('runtime'), '');
+  assert.equal(runtimeNode('custom_node'), 'custom_node');
+});
+
+test('unknown prefixes and namespaces fall back to the first word, or decline', () => {
+  assert.deepEqual(mcpTool('agy', 'mcp_taku_exec'), {server: 'taku', tool: 'exec'}, 'a bare taku_ word is a server named taku');
+  assert.deepEqual(mcpTool('agy', 'mcp_taku_mac_mini_taku_run_prompt'), {server: 'taku_mac_mini', tool: 'taku_run_prompt'}, 'multi-word node');
+  assert.deepEqual(mcpTool('agy', 'mcp_taku_box_custom_tool'), {server: 'taku_box', tool: 'custom_tool'});
+  assert.deepEqual(mcpTool('agy', 'mcp__srv__3013b55d_tool'), {server: 'srv', tool: 'tool'}, 'disambiguator after a double underscore');
+  assert.deepEqual(mcpTool('agy', 'mcp_my-srv_do-thing'), {server: 'my-srv', tool: 'do-thing'});
+  assert.equal(mcpTool('agy', 'other__memory_read', 'taku_memory'), null, 'a different namespace is not taken on trust');
+  assert.equal(mcpTool('agy', '__memory_read', 'taku_memory'), null);
+  assert.equal(mcpTool('', 'run_shell'), null, 'no server and no mcp_ prefix: not an MCP call');
+  assert.deepEqual(mcpTool('', 'mcp_brave_web_search'), {server: 'brave', tool: 'web_search'});
+});
+
+test('presentation fallbacks: unnamed runtime node, memory tools of other servers, literal labels', () => {
+  const zh = textFor('zh'), en = textFor('en');
+  const unnamed = mcpPresentation({server: 'taku_runtime', tool: 'taku_call_tool'});
+  assert.deepEqual(unnamed, {titleKey: 'runtimeCallTool', node: ''});
+  assert.equal(activityName(unnamed, zh), '在 远端节点 调用工具');
+  assert.equal(activityName(unnamed, en), 'Use a tool on the remote node');
+  assert.equal(activityName(mcpPresentation({server: 'taku_mac_mini', tool: 'taku_run_prompt'}), en), 'Hand a task to mac_mini');
+  // A memory_* tool from a server that is not a memory server keeps its literal name.
+  assert.deepEqual(mcpPresentation({server: 'github', tool: 'memory_search'}), {titleKey: 'tool', name: 'github · memory search'});
+  assert.deepEqual(mcpPresentation({server: 'notes_memory', tool: 'memory_read'}), {titleKey: 'memoryRead'});
+  assert.deepEqual(mcpPresentation({server: 'taku_memory', tool: 'memory_delete'}), {titleKey: 'tool', name: 'taku_memory · memory delete'},
+    'an unknown memory tool is not mislabelled as a known one');
+  assert.deepEqual(mcpPresentation({server: 'my-srv', tool: 'do-thing'}), {titleKey: 'tool', name: 'my-srv · do-thing'});
+  // A literal name is shown as is: no {node} filling.
+  assert.equal(activityName({titleKey: 'tool', name: 'srv · {node}'}, en), 'srv · {node}');
+});

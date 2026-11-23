@@ -84,9 +84,12 @@ export interface PinnedSpacerInput {
  * the reading viewport and shrinks naturally to 0 as the reply fills the screen.
  */
 export function pinnedSpacerHeight(input: PinnedSpacerInput): number {
-  const {viewportHeight, userHeight, assistantHeight, footerHeight, itemGap} = input;
+  // A layout value that is not a finite size yet (NaN before a measure) counts as 0, never a NaN spacer height.
+  const size = (value: number) => Number.isFinite(value) ? Math.max(0, value) : 0;
+  const viewportHeight = size(input.viewportHeight), userHeight = size(input.userHeight);
+  const assistantHeight = size(input.assistantHeight), footerHeight = size(input.footerHeight), itemGap = size(input.itemGap);
   if (viewportHeight <= 0 || userHeight <= 0) return 0;
-  const turnHeight = userHeight + (assistantHeight > 0 ? itemGap + assistantHeight : 0) + Math.max(0, footerHeight);
+  const turnHeight = userHeight + (assistantHeight > 0 ? itemGap + assistantHeight : 0) + footerHeight;
   return Math.max(0, Math.round(viewportHeight - turnHeight - itemGap));
 }
 

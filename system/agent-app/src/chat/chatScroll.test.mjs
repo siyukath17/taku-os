@@ -170,3 +170,130 @@ test('sent message binds to the new row, not an earlier row that changed id or g
   const sent = {id: 'optimistic/r3/user', role: 'user', turnId: 'optimistic/r3'};
   assert.equal(findSentUser([...pruned, sent, {id: 'optimistic/r3/assistant', role: 'assistant', turnId: 'optimistic/r3'}], known), sent);
 });
+
+// ---- boundary hardening: rapid sends, switching conversations, short content, keyboard ----
+
+const bound = (userId, turnId) => reduceChatScroll(reduceChatScroll(createChatScrollState(), {type: 'sent'}).state, {type: 'anchorBound', userId, turnId}).state;
+
+test('rapid second send drops the first anchor until the new row binds, then pins the new row', () => {
+  let state = bound('optimistic/r1/user', 'optimistic/r1');
+  state = reduceChatScroll(state, {type: 'sent'}).state;
+  assert.deepEqual(state, {mode: 'pinned', pendingSend: true, anchor: null, showToBottom: false});
+  const step = reduceChatScroll(state, {type: 'anchorBound', userId: 'optimistic/r2/user', turnId: 'optimistic/r2'});
+  assert.deepEqual(step.state.anchor, {userId: 'optimistic/r2/user', turnId: 'optimistic/r2'});
+  assert.equal(step.effect, 'toPinAnimated');
+
+  // Both rows land in one render: the newest unknown row is the one just sent.
+  const rows = [{id: 'n1', role: 'user', turnId: 't1'}, {id: 'a1', role: 'assistant', turnId: 't1'}];
+  const known = knownUsers(rows);
+  const first = {id: 'optimistic/r1/user', role: 'user', turnId: 'optimistic/r1'};
+  const second = {id: 'optimistic/r2/user', role: 'user', turnId: 'optimistic/r2'};
+  assert.equal(findSentUser([...rows, first, {id: 'optimistic/r1/assistant', role: 'assistant', turnId: 'optimistic/r1'}, second], known), second);
+  // Known rows captured after the first row rendered: only the second counts as sent.
+  assert.equal(findSentUser([...rows, first, second], knownUsers([...rows, first])), second);
+});
+
+test('switching conversations resets pin, pending send and the to-bottom button', () => {
+  let state = reduceChatScroll(bound('u1', 't1'), {type: 'contentResized', withinPinSettle: false, distance: 400, spacerActive: false}).state;
+  assert.equal(state.showToBottom, true);
+  assert.deepEqual(reduceChatScroll(state, {type: 'reset', browsing: false}), {state: createChatScrollState(false), effect: 'none'});
+  // Returning to a conversation the user was reading restores browsing, never a stale anchor.
+  state = reduceChatScroll(reduceChatScroll(createChatScrollState(), {type: 'sent'}).state, {type: 'reset', browsing: true}).state;
+  assert.deepEqual(state, {mode: 'browsing', pendingSend: false, anchor: null, showToBottom: false});
+});
+
+test('content shorter than one screen: distance stays 0, no button, finger at the end rejoins following', () => {
+  assert.equal(distanceFromBottom(300, 600, 0), 0);
+  let state = createChatScrollState();
+  let step = reduceChatScroll(state, {type: 'contentResized', withinPinSettle: false, distance: 0});
+  assert.equal(step.effect, 'toBottomInstant');
+  assert.equal(step.state, state, 'unchanged state keeps its identity (no re-render)');
+  state = bound('u1', 't1');
+  // The spacer keeps the end at the pin: a late resize re-pins idempotently.
+  step = reduceChatScroll(state, {type: 'contentResized', withinPinSettle: false, distance: 0, spacerActive: true});
+  assert.equal(step.effect, 'toPinAnimated');
+  assert.equal(step.state, state);
+  // A drag while the spacer is open hands control to the user (no auto-follow into the spacer)…
+  state = reduceChatScroll(state, {type: 'scrolled', distance: 0, byUser: true, spacerActive: true}).state;
+  assert.equal(state.mode, 'browsing');
+  assert.equal(state.showToBottom, false);
+  // …and the next drag that ends at the bottom follows again.
+  state = reduceChatScroll(state, {type: 'scrolled', distance: 0, byUser: true, spacerActive: false}).state;
+  assert.equal(state.mode, 'following');
+});
+
+test('keyboard show/hide (list re-layout) never moves a pinned or browsing page outside the settle window', () => {
+  const pinned = reduceChatScroll(bound('u1', 't1'), {type: 'contentResized', withinPinSettle: false, distance: 300, spacerActive: false}).state;
+  // onLayout before any content size: distance unknown.
+  let step = reduceChatScroll(pinned, {type: 'contentResized', withinPinSettle: false, spacerActive: false});
+  assert.deepEqual(step, {state: pinned, effect: 'none'});
+  const browsing = reduceChatScroll(createChatScrollState(), {type: 'scrolled', distance: 500, byUser: true, spacerActive: false}).state;
+  step = reduceChatScroll(browsing, {type: 'contentResized', withinPinSettle: false});
+  assert.deepEqual(step, {state: browsing, effect: 'none'});
+  // The IME closing right after send (inside the settle window) re-aligns the pin.
+  assert.equal(reduceChatScroll(pinned, {type: 'contentResized', withinPinSettle: true, distance: 300}).effect, 'toPinAnimated');
+  // Following: a resize keeps the latest message in view.
+  assert.equal(reduceChatScroll(createChatScrollState(), {type: 'contentResized', withinPinSettle: false}).effect, 'toBottomInstant');
+});
+
+test('negative and non-finite distances are treated as the bottom', () => {
+  for (const args of [[Number.NaN, 600, 0], [1000, Number.POSITIVE_INFINITY, 0], [1000, 600, Number.NaN]]) assert.equal(distanceFromBottom(...args), 0);
+  const browsing = reduceChatScroll(createChatScrollState(), {type: 'scrolled', distance: 500, byUser: true, spacerActive: false}).state;
+  assert.equal(reduceChatScroll(browsing, {type: 'scrolled', distance: -40, byUser: true, spacerActive: false}).state.mode, 'following');
+  const pinned = bound('u1', 't1');
+  assert.equal(reduceChatScroll(pinned, {type: 'contentResized', withinPinSettle: false, distance: -10, spacerActive: false}).state.showToBottom, false);
+});
+
+test('programmatic scrolls only update the button, never the mode', () => {
+  for (const state of [createChatScrollState(), bound('u1', 't1'), createChatScrollState(true)]) {
+    const step = reduceChatScroll(state, {type: 'scrolled', distance: 900, byUser: false, spacerActive: false});
+    assert.equal(step.state.mode, state.mode);
+    assert.equal(step.effect, 'none');
+  }
+});
+
+test('pinnedSpacerHeight regression: unmeasured (NaN) or negative sizes never yield a NaN or negative spacer', () => {
+  const base = {viewportHeight: 600, userHeight: 48, assistantHeight: 26, footerHeight: 0, itemGap: 20};
+  // Number.NaN <= 0 is false, so a NaN viewport used to slip through to a NaN height.
+  assert.equal(pinnedSpacerHeight({...base, viewportHeight: Number.NaN}), 0);
+  assert.equal(pinnedSpacerHeight({...base, userHeight: Number.NaN}), 0);
+  assert.equal(pinnedSpacerHeight({...base, assistantHeight: Number.NaN}), 532, 'no reply measured yet: user row only');
+  assert.equal(pinnedSpacerHeight({...base, footerHeight: Number.NaN}), 486);
+  assert.equal(pinnedSpacerHeight({...base, itemGap: Number.NaN}), 526);
+  assert.equal(pinnedSpacerHeight({...base, footerHeight: -50, itemGap: -20}), 526, 'negative sizes count as 0');
+  assert.equal(pinnedSpacerHeight({...base, viewportHeight: Number.POSITIVE_INFINITY}), 0);
+  assert.equal(pinnedSpacerHeight({...base, viewportHeight: 0}), 0);
+  assert.equal(pinnedSpacerHeight({...base, footerHeight: 40}), 446, 'the turn footer shrinks the spacer');
+});
+
+test('findPinnedTurn edge cases: no anchor, missing row, last row, user after user, repeated turn ids', () => {
+  const blocks = [
+    {id: 'u1', role: 'user', turnId: 't1'}, {id: 'a1', role: 'assistant', turnId: 't1'},
+    {id: 'u2', role: 'user', turnId: 't2'}, {id: 'u2b', role: 'user', turnId: 't2'},
+  ];
+  assert.equal(findPinnedTurn(blocks, null), null);
+  assert.equal(findPinnedTurn([], {userId: 'u1', turnId: 't1'}), null);
+  assert.equal(findPinnedTurn(blocks, {userId: 'gone', turnId: ''}), null, 'no turn to fall back on');
+  assert.equal(findPinnedTurn(blocks, {userId: 'gone', turnId: 'tX'}), null);
+  assert.deepEqual(findPinnedTurn(blocks, {userId: 'u2', turnId: 't2'}), {userIndex: 2, userId: 'u2', assistantId: null}, 'next row is a user row');
+  assert.deepEqual(findPinnedTurn(blocks, {userId: 'u2b', turnId: 't2'}), {userIndex: 3, userId: 'u2b', assistantId: null}, 'last row');
+  assert.deepEqual(findPinnedTurn(blocks, {userId: 'gone', turnId: 't2'}), {userIndex: 3, userId: 'u2b', assistantId: null}, 'the newest row of the turn');
+  assert.equal(findPinnedTurn([{id: 'a1', role: 'assistant', turnId: 't1'}], {userId: 'a1', turnId: 't1'}), null, 'an assistant row is never the pin');
+});
+
+test('findSentUser: empty lists and rows without a turn id', () => {
+  assert.equal(findSentUser([], knownUsers([])), null);
+  const row = {id: 'u9', role: 'user', turnId: ''};
+  assert.equal(findSentUser([row], knownUsers([])), row);
+  assert.equal(findSentUser([row], knownUsers([row])), null);
+  assert.deepEqual([...knownUsers([row]).turnIds], [], 'an empty turn id never marks other rows as known');
+});
+
+test('scroll intent: a new drag during a fling is the user; programmatic scroll mid-drag disarms it', () => {
+  let intent = nextScrollIntent(nextScrollIntent(createScrollIntent(), 'dragBegin'), 'dragEnd');
+  intent = nextScrollIntent(intent, 'momentumBegin');
+  intent = nextScrollIntent(intent, 'dragBegin');
+  assert.deepEqual(intent, {byUser: true, flingArmed: false});
+  assert.deepEqual(nextScrollIntent(intent, 'programmatic'), {byUser: false, flingArmed: false});
+  assert.deepEqual(nextScrollIntent(createScrollIntent(), 'momentumEnd'), {byUser: false, flingArmed: false});
+});

@@ -163,11 +163,12 @@ test('orbit layout: 5–6 slots share one ring, bubbles and labels never overlap
   }
 });
 
-test('orbit layout: up to 4 slots on the inner ring around the centre', () => {
-  const {center, radii, slots} = orbitLayout(4, 400, 500);
+test('orbit layout: up to 4 slots on one circular ring around the centre', () => {
+  const {center, radii, slots, aspect} = orbitLayout(4, 400, 500);
   assert.deepEqual(center, {x: 200, y: 250});
   assert.equal(slots.length, 4);
-  assert.deepEqual(slots.map(s => s.ring), [0, 0, 0, 0]);
+  assert.equal(aspect, 1);
+  assert.equal(new Set(slots.map(s => s.ring)).size, 1, 'all on the same ring');
   for (const slot of slots) {
     const r = Math.hypot(slot.x - center.x, slot.y - center.y);
     assert.ok(Math.abs(r - radii[slot.ring]) < 1e-6);
@@ -247,4 +248,136 @@ test('orbit layout: 7–8 slots (5 real + 2 demo nodes + add) keep every bubble 
   }
   // Short names fit the dense label (112 dp at 14 sp): the longest fleet name is 13 characters.
   assert.ok(['Mac mini', 'MacBook Air', 'Redmi Note 12', 'Cloud VPS', 'Relay Node', 'Tesla', 'Xiaomi TV', 'Add device'].every(n => n.length * 7 + 16 <= ORBIT_DENSE_LABEL_HALF * 2));
+});
+
+// ---- boundary hardening: orbit fit, dispatch draft, names, mixed states, routes ----
+
+test('orbit regression: 1–4 slots never put a label across the phone orb (3 nodes + add overlapped it by 15 dp)', async () => {
+  const {ORBIT_MIN_GAP, orbitClearance, orbitMargin} = await import('./connect.ts');
+  // Pixel 9 orbit areas above the node card (560) and the taller car card (410), and a 360 dp phone.
+  for (const [width, height] of [[411, 560], [411, 410], [360, 640], [400, 500]]) {
+    for (let count = 1; count <= 4; count++) {
+      const layout = orbitLayout(count, width, height);
+      assert.equal(layout.slots.length, count);
+      assert.ok(orbitClearance(layout) >= ORBIT_MIN_GAP, `${count}@${width}x${height}: clearance ${orbitClearance(layout)}`);
+      assert.ok(orbitMargin(layout, width, height) >= 0, `${count}@${width}x${height}: off-canvas by ${-orbitMargin(layout, width, height)}`);
+      // A 411 dp Pixel 9 keeps the circle; a 360 dp phone may take the ellipse with narrower labels instead.
+      if (width === 411) assert.equal(layout.aspect, 1, `${count}@${width}x${height}: few nodes keep a circle`);
+    }
+  }
+});
+
+test('orbit regression: 5–6 slots keep the lowest label above the sheet on a short orbit area', async () => {
+  const {ORBIT_MIN_GAP, orbitMargin, orbitClearance} = await import('./connect.ts');
+  // 6 slots at 411x410 used to put the bottom label 6 dp behind the card.
+  for (const count of [5, 6]) for (const height of [410, 470, 560]) {
+    const layout = orbitLayout(count, 411, height);
+    assert.ok(orbitMargin(layout, 411, height) >= 0, `${count}@${height}: off-canvas by ${-orbitMargin(layout, 411, height)}`);
+    assert.ok(orbitClearance(layout) >= ORBIT_MIN_GAP, `${count}@${height}: clearance ${orbitClearance(layout)}`);
+  }
+});
+
+test('orbit: an area too short for the circle falls back to the roomier ellipse, still on canvas', async () => {
+  const {orbitMargin} = await import('./connect.ts');
+  // The add sheet is tall: the orbit area shrinks to ~300 dp.
+  for (let count = 1; count <= 8; count++) {
+    const layout = orbitLayout(count, 411, 300);
+    assert.ok(orbitMargin(layout, 411, 300) >= 0, `${count}: off-canvas by ${-orbitMargin(layout, 411, 300)}`);
+  }
+});
+
+test('orbit: 0 nodes, degenerate canvases and the broker maximum stay finite and on canvas', async () => {
+  const {orbitMargin} = await import('./connect.ts');
+  assert.deepEqual(orbitLayout(0, 411, 560).slots, []);
+  // The page always shows the add bubble: 0 nodes is one slot.
+  assert.equal(orbitLayout(1, 411, 560).slots.length, 1);
+  for (const [width, height] of [[0, 0], [1, 1], [120, 0], [120, 120], [411, 0], [0, 560]]) {
+    for (let count = 0; count <= 34; count++) {
+      const layout = orbitLayout(count, width, height);
+      assert.equal(layout.slots.length, count);
+      const values = [layout.center.x, layout.center.y, ...layout.radii, layout.aspect, ...layout.slots.flatMap(s => [s.x, s.y])];
+      assert.ok(values.every(Number.isFinite), `${count}@${width}x${height}: non-finite geometry`);
+      assert.ok(layout.radii.every(r => r >= 0));
+    }
+  }
+  // 32 nodes (TakuConnect.MAX_NODES) + 2 demos + add: crowded, but every bubble and label stays on screen.
+  for (let count = 9; count <= 35; count++) {
+    const layout = orbitLayout(count, 411, 560);
+    assert.ok(orbitMargin(layout, 411, 560) >= 0, `${count}: off-canvas by ${-orbitMargin(layout, 411, 560)}`);
+  }
+});
+
+test('orbit: the same inputs always give the same layout', () => {
+  for (const count of [1, 3, 4, 6, 8]) assert.deepEqual(orbitLayout(count, 411, 470), orbitLayout(count, 411, 470));
+});
+
+test('dispatch draft regression: `$` patterns and `{id}` in a device name stay literal', () => {
+  const named = displayNameValue => ({id: 'taku_box', appearance: {displayName: displayNameValue}});
+  // String.prototype.replace reads `$&` as the match and `$'` as the text after it.
+  assert.equal(dispatchDraft(named('Box $& $$ $\''), null, 'en'), 'On Box $& $$ $\' (taku_box), please: ');
+  assert.equal(dispatchDraft(named('价格 $` 盒子'), null, 'zh'), '请在「价格 $` 盒子」（taku_box）上：');
+  // The second replace used to fill a `{id}` inside the name and leave the template's own `{id}`.
+  assert.equal(dispatchDraft(named('{id} box'), null, 'en'), 'On {id} box (taku_box), please: ');
+  assert.equal(dispatchDraft(named('{name}'), null, 'zh'), '请在「{name}」（taku_box）上：');
+});
+
+test('orbit name falls back from shortName to the display name, the device, then the bare id', async () => {
+  const {orbitName} = await import('./connect.ts');
+  assert.equal(orbitName({id: 'demo_tesla', appearance: {shortName: '  Tesla  ', displayName: 'Tesla Model Y'}}), 'Tesla');
+  assert.equal(orbitName({id: 'demo_tesla', appearance: {shortName: '   ', displayName: 'Tesla Model Y'}}), 'Tesla Model Y');
+  assert.equal(orbitName({id: 'x', appearance: {shortName: 42, displayName: 'Mini'}}), 'Mini', 'a non-string shortName from JSON is ignored');
+  assert.equal(orbitName({id: 'taku_mac_mini', appearance: {}}, {status: 'offline', online: false}), 'mac mini');
+  assert.equal(orbitName({id: 'taku_mac_mini', appearance: {}}, online), 'HaiPro 的 Mac mini', 'advertised display name');
+  assert.equal(orbitName({id: 'taku_', appearance: {}}), 'taku_', 'never an empty label');
+  assert.equal(orbitName({id: 'taku_air', appearance: {shortName: 'Air', displayName: 'MacBook Air'}}, online), 'Air', 'the phone shortName beats the advertised name');
+});
+
+test('mixed fleet: online, offline, rejected, unprobed and demo nodes resolve to one state each', async () => {
+  const {probeFor} = await import('./connect.ts');
+  const nodes = [
+    {...mac, id: 'taku_on'}, {...mac, id: 'taku_off'}, {...mac, id: 'taku_bad'}, {...mac, id: 'taku_new'},
+    {...mac, id: 'taku_disabled', enabled: false}, tesla, {...xiaomi, enabled: false},
+  ];
+  const probes = {taku_on: online, taku_off: {status: 'offline', online: false}, taku_bad: {status: 'unauthorized', online: true}, taku_disabled: online};
+  const states = nodes.map(n => nodeState(n, probeFor(n, probes)));
+  assert.deepEqual(states, ['online', 'offline', 'unauthorized', 'checking', 'disabled', 'online', 'disabled']);
+  assert.deepEqual(states.map(isLive), [true, false, false, false, false, true, false]);
+  // The phone orb pulses while any node is live; a fleet of offline/off nodes leaves it still.
+  assert.equal(nodes.slice(1, 5).some(n => isLive(nodeState(n, probeFor(n, probes)))), false);
+  assert.deepEqual(nodes.map(n => statusLine(n, probeFor(n, probes), 'zh')),
+    ['已连接 · 局域网 2ms', '离线', '密钥无效', '正在检测…', '已关闭', '已连接 · 82% · 410 km', '已关闭']);
+  assert.equal(statusLine({...tesla, demoStatus: '   '}, probeFor(tesla, {}), 'en'), 'Online', 'blank demo detail: no dangling separator');
+});
+
+test('routes: demo nodes, unknown kinds, unselected probes and empty probe routes', () => {
+  assert.deepEqual(routeRows({...tesla, url: ''}, null, 'en').map(r => [r.kind, r.url, r.tone]), [['internet', '', 'unknown']],
+    'a demo node with routes [] keeps one quiet row');
+  assert.deepEqual(routeRows({...mac, network: 'loopback'}, null, 'zh').map(r => r.label), ['局域网']);
+  const odd = {...routed, routes: [{kind: 'moon', url: 'http://m:1', status: 'online', latencyMs: 3, selected: false}]};
+  assert.deepEqual(routeRows(multi, odd, 'en').map(r => [r.kind, r.label, r.tone, r.selected]), [['internet', 'Internet', 'standby', false]]);
+  assert.deepEqual(routeRows(multi, {...routed, routes: []}, 'en').map(r => r.tone), ['unknown', 'unknown', 'unknown'],
+    'a probe without routes falls back to the configured list');
+  const none = {...routed, routes: routed.routes.map(r => ({...r, selected: false}))};
+  assert.equal(routeRows(multi, none, 'en').some(r => r.selected), false);
+  assert.deepEqual(routeRows(multi, none, 'en').map(r => r.label), ['书房', 'IPv6', 'Mac mini 转发'], 'no selection: configured order');
+  // Switching the selected route reorders the list without losing a row.
+  const switched = {...routed, routes: routed.routes.map((r, i) => ({...r, status: 'online', latencyMs: 5 + i, selected: i === 0}))};
+  assert.deepEqual(routeRows(multi, switched, 'zh').map(r => [r.label, r.tone, r.latency]),
+    [['书房', 'selected', '5ms'], ['IPv6', 'standby', '6ms'], ['Mac mini 转发', 'standby', '7ms']]);
+});
+
+test('latency regression: only known networks name the line; bad numbers give no latency', () => {
+  assert.equal(latencyLabel({...online, network: 'toString'}, 'en'), 'Internet 2ms', '`in` accepted Object.prototype keys');
+  assert.equal(latencyLabel({...online, network: 'online'}, 'en'), 'Internet 2ms', '`in` accepted label keys');
+  assert.equal(latencyLabel({...online, network: 'loopback'}, 'zh'), '本机 2ms');
+  assert.equal(latencyLabel({...online, latencyMs: Number.NaN}, 'en'), '');
+  assert.equal(latencyLabel({...online, latencyMs: -3}, 'en'), 'LAN 0ms');
+  assert.equal(latencyLabel({...online, latencyMs: undefined}, 'en'), '');
+});
+
+test('error code regression: prototype keys are unknown codes, not functions', () => {
+  for (const code of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+    assert.equal(connectError(code, 'en'), `Failed (${code})`);
+    assert.equal(connectError(code, 'zh'), `操作失败（${code}）`);
+  }
 });

@@ -199,6 +199,10 @@ export function routeLabel(route: Pick<ConnectRoute, 'label' | 'kind'>, language
   return route.label?.trim() || routeKindLabel(route.kind, language);
 }
 
+const networks: readonly string[] = ['lan', 'ipv6', 'tailscale', 'loopback', 'internet'] satisfies Network[];
+/** Only a known network names the line: `in` would also accept label keys (`online`) and prototype keys (`toString`). */
+const isNetwork = (value: unknown): value is Network => typeof value === 'string' && networks.includes(value);
+
 const ms = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? `${Math.max(0, Math.round(value))}ms` : '';
 
 /** `局域网 2ms` / `Relay 45ms` for the selected route (its kind, for a consistent status line); '' without a latency. */
@@ -207,7 +211,7 @@ export function latencyLabel(probe: ConnectProbe | null | undefined, language: L
   const latency = ms(probe.route?.latencyMs ?? probe.latencyMs);
   if (!latency) return '';
   const name = probe.route ? routeKindLabel(probe.route.kind, language)
-    : connectLabel(language, probe.network && probe.network in text.en ? probe.network : 'internet');
+    : connectLabel(language, isNetwork(probe.network) ? probe.network : 'internet');
   return `${name} ${latency}`;
 }
 
@@ -263,7 +267,10 @@ export function capabilityChips(probe: ConnectProbe | null | undefined): Capabil
 
 /** The composer text for "dispatch a task": names the device so the agent picks its tools. */
 export function dispatchDraft(node: Pick<ConnectNode, 'id' | 'appearance'>, probe: ConnectProbe | null | undefined, language: Language): string {
-  return connectLabel(language, 'dispatch').replace('{name}', displayName(node, probe)).replace('{id}', node.id);
+  // One pass with a replacer function: the name is user- or device-provided, so `$&`/`$'` in it must stay literal
+  // and a `{id}` inside it must not be filled in.
+  const values = {name: displayName(node, probe), id: node.id};
+  return connectLabel(language, 'dispatch').replace(/\{(name|id)\}/g, (_match, key: 'name' | 'id') => values[key]);
 }
 
 // ---- add form ----
@@ -332,7 +339,7 @@ export const ORBIT_LABEL_HALF = 75;
 
 /**
  * Positions around the centre (Taku Phone); the add bubble is always last. Up to 4 slots sit on the
- * inner ring. 5–6 slots share one evenly spaced ring: the two rings are only ~1.3× apart, so a bubble
+ * inner ring (the outer one when the inner cannot keep their labels off the orb). 5–6 slots share one evenly spaced ring: the two rings are only ~1.3× apart, so a bubble
  * on each (plus its name label below) would overlap. The single ring's radius keeps the side labels
  * on the canvas. 7+ slots use one elliptical ring ({@link denseOrbit}) with narrower labels.
  */
@@ -343,6 +350,9 @@ export interface OrbitLayout {
   /** Half width a bubble's name label may take (the label's max width / 2). */
   labelHalf: number;
 }
+
+/** Room every bubble and label keeps from the others and the centre orb when the canvas allows it. */
+export const ORBIT_MIN_GAP = 4;
 
 /** Labels on a dense orbit (7+ slots) are capped narrower so neighbours never touch. */
 export const ORBIT_DENSE_LABEL_HALF = 56;
@@ -368,6 +378,22 @@ export function orbitClearance(layout: Pick<OrbitLayout, 'center' | 'slots' | 'l
   return min;
 }
 
+/** The smallest room between any slot's bubble or label and the canvas edges; < 0 means something is off-canvas. */
+export function orbitMargin(layout: Pick<OrbitLayout, 'slots' | 'labelHalf'>, width: number, height: number): number {
+  let min = Infinity;
+  for (const s of layout.slots) {
+    for (const box of slotBoxes(s.x, s.y, layout.labelHalf)) min = Math.min(min, box.x0, width - box.x1, box.y0, height - box.y1);
+  }
+  return min;
+}
+
+/**
+ * How well a layout fits: ≥ {@link ORBIT_MIN_GAP} when every bubble and label clears the others and the orb by
+ * that much and stays on the canvas (a label's max-width box may touch an edge: its centred text is narrower).
+ */
+const orbitFit = (layout: OrbitLayout, width: number, height: number) =>
+  Math.min(orbitClearance(layout), orbitMargin(layout, width, height) + ORBIT_MIN_GAP);
+
 /**
  * 7+ slots: one evenly spaced elliptical ring filling the free area (taller than wide is fine),
  * rotated to the start angle that leaves the most room between every bubble, label and the centre.
@@ -382,7 +408,9 @@ function denseOrbit(count: number, width: number, height: number): OrbitLayout {
     const offset = (step * k) / 48;
     const angles = Array.from({length: count}, (_, i) => -Math.PI / 2 + offset + step * i);
     const widest = Math.max(...angles.map(a => Math.abs(Math.cos(a))));
-    const rx = Math.max(0, Math.min((width / 2 - labelHalf - 4) / widest, width / 2 - BUBBLE_R - 4));
+    // A lone slot straight up or down has no horizontal reach (widest 0): only the bubble bound applies.
+    const reach = widest > 1e-9 ? (width / 2 - labelHalf - 4) / widest : Infinity;
+    const rx = Math.max(0, Math.min(reach, width / 2 - BUBBLE_R - 4));
     const slots = angles.map(a => ({x: center.x + rx * Math.cos(a), y: center.y + ry * Math.sin(a), ring: 1 as const}));
     const layout: OrbitLayout = {center, radii: [ry * 0.62, ry], slots, aspect: ry > 0 ? rx / ry : 1, labelHalf};
     const gap = orbitClearance(layout);
@@ -391,8 +419,19 @@ function denseOrbit(count: number, width: number, height: number): OrbitLayout {
   return best!;
 }
 
+/**
+ * The designed layout for the count when it fits the canvas with {@link ORBIT_MIN_GAP} to spare;
+ * otherwise (a short orbit area above a tall sheet) whichever of it and the elliptical ring leaves more room.
+ */
 export function orbitLayout(count: number, width: number, height: number): OrbitLayout {
   if (count >= 7) return denseOrbit(count, width, height);
+  const classic = classicOrbit(count, width, height);
+  if (count === 0 || orbitFit(classic, width, height) >= ORBIT_MIN_GAP) return classic;
+  const dense = denseOrbit(count, width, height);
+  return orbitFit(dense, width, height) > orbitFit(classic, width, height) + 1e-9 ? dense : classic;
+}
+
+function classicOrbit(count: number, width: number, height: number): OrbitLayout {
   const center = {x: width / 2, y: height / 2};
   const span = Math.max(0, Math.min(width, height));
   // Inner ring clear of the centre orb and its pulse; outer ring kept inside the canvas width.
@@ -404,7 +443,15 @@ export function orbitLayout(count: number, width: number, height: number): Orbit
     const step = (2 * Math.PI) / count;
     let widest = 0;
     for (let i = 0; i < count; i++) widest = Math.max(widest, Math.abs(Math.sin(step * i)));
-    const ring = Math.max(radii[0], Math.min(outer, (width / 2 - ORBIT_LABEL_HALF) / widest));
+    // …and the lowest label (or highest bubble) inside the orbit area, so none hides behind the sheet or header.
+    let below = 0, above = 0;
+    for (let i = 0; i < count; i++) {
+      const sin = Math.sin(-Math.PI / 2 + step * i);
+      below = Math.max(below, sin);
+      above = Math.max(above, -sin);
+    }
+    const vertical = Math.min((height / 2 - LABEL_BOTTOM - ORBIT_MIN_GAP) / below, (height / 2 - BUBBLE_R - ORBIT_MIN_GAP) / above);
+    const ring = Math.max(radii[0], Math.min(outer, (width / 2 - ORBIT_LABEL_HALF) / widest, vertical));
     radii[1] = ring;
     for (let i = 0; i < count; i++) {
       const angle = -Math.PI / 2 + step * i;
@@ -412,17 +459,28 @@ export function orbitLayout(count: number, width: number, height: number): Orbit
     }
     return {center, radii, slots, aspect: 1, labelHalf: ORBIT_LABEL_HALF};
   }
-  const inner = Math.min(count, 4);
-  const rest = count - inner;
-  for (let i = 0; i < inner; i++) {
-    const angle = -Math.PI / 2 - Math.PI / 5 + (2 * Math.PI * i) / Math.max(inner, 1);
-    slots.push({x: center.x + radii[0] * Math.cos(angle), y: center.y + radii[0] * Math.sin(angle), ring: 0});
+  // 1–4 slots on the inner ring, starting up-left (-90° - 36°). That start can leave a label across the centre
+  // orb (3 nodes + add: the right slot's label ran 15 dp over it), so the ring turns the least it must for every
+  // bubble and label to clear the orb, each other and the edges; if no turn of the inner ring clears, the outer
+  // ring is tried the same way, and when neither clears the roomiest arrangement wins.
+  if (count === 0) return {center, radii, slots, aspect: 1, labelHalf: ORBIT_LABEL_HALF};
+  const step = (2 * Math.PI) / count;
+  const ringAt = (ring: 0 | 1, offset: number): OrbitLayout => ({center, radii, aspect: 1, labelHalf: ORBIT_LABEL_HALF,
+    slots: Array.from({length: count}, (_, i) => {
+      const angle = -Math.PI / 2 - Math.PI / 5 + offset + step * i;
+      return {x: center.x + radii[ring] * Math.cos(angle), y: center.y + radii[ring] * Math.sin(angle), ring};
+    })});
+  const turns = 96;
+  let best = ringAt(0, 0), bestFit = orbitFit(best, width, height);
+  for (const ring of [0, 1] as const) {
+    // 0, +1, −1, +2, −2, … steps of step/96: the nearest turn to the designed start wins.
+    for (let k = ring === 0 ? 1 : 0; k <= turns && bestFit < ORBIT_MIN_GAP; k++) {
+      const offset = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step / turns;
+      const candidate = ringAt(ring, offset), fit = orbitFit(candidate, width, height);
+      if (fit > bestFit + 1e-9) { best = candidate; bestFit = fit; }
+    }
   }
-  for (let i = 0; i < rest; i++) {
-    const angle = -Math.PI / 2 + Math.PI / 7 + (2 * Math.PI * i) / Math.max(rest, 1);
-    slots.push({x: center.x + radii[1] * Math.cos(angle), y: center.y + radii[1] * Math.sin(angle), ring: 1});
-  }
-  return {center, radii, slots, aspect: 1, labelHalf: ORBIT_LABEL_HALF};
+  return best;
 }
 
 /** User-facing message for a gateway/broker error code. */
@@ -440,5 +498,7 @@ export function connectError(code: string, language: Language): string {
     TOO_MANY_NODES: 'Too many devices.', REVISION_CONFLICT: 'Settings just changed. Try again.', SECRET_EMPTY: 'Enter a token.',
     NODE_NOT_FOUND: 'This device no longer exists.',
   };
-  return (language === 'zh' ? zh : en)[code] ?? (language === 'zh' ? `操作失败（${code}）` : `Failed (${code})`);
+  const messages = language === 'zh' ? zh : en;
+  // Own keys only: a code such as `toString` or `constructor` must not resolve to an Object.prototype member.
+  return Object.prototype.hasOwnProperty.call(messages, code) ? messages[code] : language === 'zh' ? `操作失败（${code}）` : `Failed (${code})`;
 }
