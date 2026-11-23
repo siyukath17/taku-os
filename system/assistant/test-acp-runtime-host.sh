@@ -7,6 +7,7 @@
 # AcpProcessGroupTest reclaims a real agent's whole process group (setsid, TERM, grace, KILL) and never the broker's.
 # Production sources compile first against android.jar ALONE (Android's org.json: checked
 # JSONException, no keySet), then against the host json jar ALONE (no Android dependency).
+# Also runs test-execution-screens-host.sh (ScreenOffCaptureTest, BUG-0034).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/android-env.sh
@@ -104,3 +105,6 @@ for test in RuntimeRouterTest AcpRuntimeTest PhoneMcpBridgeTest AcpRuntimeSettin
 done | tee "$task_out/result.txt"
 # scripts/acp-ttft-report.py must parse exactly what the broker writes (the sample above).
 python3 scripts/test-acp-ttft-report.py 2>&1 | tee -a "$task_out/result.txt"
+# The phone tools' execution-screen suite, including ScreenOffCaptureTest (BUG-0034: independent-screen
+# display flags, SCREEN_OFF / black-frame captures, display sources compiled against android.jar alone).
+bash system/assistant/test-execution-screens-host.sh 2>&1 | tee -a "$task_out/result.txt"
