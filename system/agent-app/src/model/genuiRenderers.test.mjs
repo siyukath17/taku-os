@@ -29,6 +29,7 @@ const react = moduleUrl(`
 const native = moduleUrl(`
   export const View = 'View', Text = 'Text', TextInput = 'TextInput', Switch = 'Switch', Pressable = 'Pressable', ScrollView = 'ScrollView', Image = 'Image', ActivityIndicator = 'ActivityIndicator';
   export const Platform = {OS: 'android'};
+  export const PanResponder = {create: () => ({panHandlers: {}})};
   export const StyleSheet = {create: value => value, absoluteFill: {}, hairlineWidth: 1};
   export const AppState = {currentState: 'active', addEventListener: () => ({remove() {}})};
   export const Linking = {openSettings: async () => {}};
@@ -52,7 +53,7 @@ const mocks = new Map([
   ['expo-file-system/legacy', moduleUrl("export const copyAsync = async () => {throw new Error('Files unavailable in host');};")],
   ['expo-media-library', moduleUrl('export const Asset = {};')],
   ['expo-image-manipulator', moduleUrl('export const ImageManipulator = {}, SaveFormat = {};')],
-  ['react-native-svg', moduleUrl("export default 'Svg'; export const Defs = 'Defs', LinearGradient = 'LinearGradient', Rect = 'Rect', Stop = 'Stop', Path = 'Path', SvgAst = 'SvgAst', Filter = 'Filter', FeColorMatrix = 'FeColorMatrix', Image = 'SvgImage', Line = 'Line'; export const parse = xml => {if (!xml.startsWith('<svg')) throw new Error('Invalid SVG'); return {tag: 'svg', xml};};")],
+  ['react-native-svg', moduleUrl("export default 'Svg'; export const Defs = 'Defs', LinearGradient = 'LinearGradient', Rect = 'Rect', Stop = 'Stop', Path = 'Path', SvgAst = 'SvgAst', Filter = 'Filter', FeColorMatrix = 'FeColorMatrix', Image = 'SvgImage', Line = 'Line', Circle = 'Circle', Polygon = 'Polygon', Polyline = 'Polyline'; export const parse = xml => {if (!xml.startsWith('<svg')) throw new Error('Invalid SVG'); return {tag: 'svg', xml};};")],
 ]);
 registerHooks({
   resolve(specifier, context, nextResolve) {

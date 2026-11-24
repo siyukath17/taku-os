@@ -46,9 +46,13 @@ export function formatUiValue(value: UiValue | undefined, locale = 'en'): string
       const seconds = Math.floor(Number(value.value) / 1000), h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
       return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
     }
-    case 'number': return `${new Intl.NumberFormat(locale, {maximumFractionDigits: 8}).format(Number(value.value))}${value.unit ? ` ${value.unit}` : ''}`;
+    case 'number': {
+      const number = new Intl.NumberFormat(locale, {maximumFractionDigits: 8}).format(Number(value.value));
+      // A currency sign given as a unit goes in front ($19), as people write prices.
+      return value.unit && /^[$¥€£]$/.test(value.unit) ? `${value.unit}${number}` : `${number}${unitSuffix(value.unit)}`;
+    }
     case 'boolean': return value.value ? (locale.startsWith('zh') ? '是' : 'Yes') : (locale.startsWith('zh') ? '否' : 'No');
-    default: return `${String(value.value)}${value.unit ? ` ${value.unit}` : ''}`;
+    default: return `${String(value.value)}${unitSuffix(value.unit)}`;
   }
 }
 
@@ -57,4 +61,10 @@ export function compareUiMoney(a: UiValue, b: UiValue): number | null {
   if (a.type !== 'money' || b.type !== 'money' || a.value === null || b.value === null || a.currency !== b.currency) return null;
   const scale = Math.max(a.scale ?? 0, b.scale ?? 0), x = BigInt(String(a.value)) * 10n ** BigInt(scale - (a.scale ?? 0)), y = BigInt(String(b.value)) * 10n ** BigInt(scale - (b.scale ?? 0));
   return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** Percent and degree signs sit against the number (50%, 24°C); word units take a space (12 km), CJK units none (3 人). */
+function unitSuffix(unit: string | undefined): string {
+  if (!unit) return '';
+  return /^(%|°|℃|℉|′|″)/.test(unit) || /^[\u3400-\u9fff]/.test(unit) ? unit : ` ${unit}`;
 }

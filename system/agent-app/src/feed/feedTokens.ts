@@ -11,6 +11,16 @@ export const surface = {
 } as const;
 export const main = {foreground: '#1b1b1b', surface: '#ffffff', canvas: '#e3e3e3'} as const;
 export const accent = {green: '#64ce74', brand: '#ff713e', uberBlue: '#005fb9', mentionBg: '#f8ecc5', mentionInk: '#0066a8'} as const;
+/** Panel accents (GenUI 场景框架 v0.1): one per Panel, chosen from its content; used only for selected, primary, fill and progress. */
+export const panelAccents = {
+  amber: '#D9822B', terracotta: '#B9533A', moss: '#3F7D58', lake: '#2F6FB3', indigo: '#4C55C8', berry: '#B83E6A', graphite: '#1B1B1B',
+} as const;
+export type PanelAccentName = keyof typeof panelAccents;
+/** The 12–16% wash of an accent used behind icons and fills. */
+export const accentWash = (hex: string, alpha = 0.14): string => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+};
 export const spacing = {2: 2, 4: 4, 6: 6, 8: 8, 12: 12, 16: 16} as const;
 export const radii = {none: 0, sm: 2, base: 4, md: 6, lg: 8, xl: 12, '3xl': 24, full: 9999} as const;
 

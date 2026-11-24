@@ -1,7 +1,7 @@
 import React, {Component, useMemo, useState, type ReactNode} from 'react';
 import {Alert, Pressable, StyleSheet, View} from 'react-native';
 import {JSONUIProvider, Renderer, createStandardActionHandlers, type Spec} from '@json-render/react-native';
-import {spacing} from '../feed/feedTokens';
+import {accentWash, panelAccents, spacing} from '../feed/feedTokens';
 import {textFor, type Language} from '../i18n';
 import {chatText} from '../chat/chatText';
 import {presentationRequest, templateSpec, type CardPresentation} from '../model/genui';
@@ -11,7 +11,8 @@ import {isTextReplySpec} from '../model/chatReplySurface';
 import {CardLanguage, CardMatter, openSafeUrl} from './genuiWidgets';
 import {MatterSourceStatus} from './MatterSourceStatus';
 import {assemblySpec} from '../model/genuiAssembly';
-import {FeedButton, FeedPressable, FeedStatus, FeedText} from '../feed/feedVisual';
+import {FeedButton, FeedPressable, FeedStatus, FeedText, PanelLook, PanelSurface} from '../feed/feedVisual';
+import {panelAccent, panelScene} from '../model/panelScene';
 import {list, record, type Json} from '../model/session';
 import {formatUiValue} from './genuiFormat';
 import {openAiSetup} from '../native/aiSetup';
@@ -58,6 +59,12 @@ function LiveCard({threadId, presentation, language, active = true, preload = fa
   const {jevSetupNeeded} = card;
   const renderSpec = useMemo(() => assemblySpec(surface === 'panel' ? panelContentSpec(spec, request.title, panelTitle) : spec), [spec, surface, request.title, panelTitle]);
   const fields = useMemo(() => checklistFields(request, spec), [request, spec]);
+  // One accent per Panel, read from the icons; the scene decides how controls, choices and stops are drawn.
+  const look = useMemo(() => {
+    if (surface !== 'panel') return null;
+    const accent = panelAccents[panelAccent(request)];
+    return {accent, wash: accentWash(accent), scene: panelScene(request)};
+  }, [surface, request]);
   const checklist = useMemo(() => fields ? {fields, pending: !!primary && ['streaming', 'sealed'].includes(primary.lifecycle.phase)} : null, [fields, primary]);
   const handlers = useMemo(() => ({
     setState: createStandardActionHandlers().setState,
@@ -72,9 +79,12 @@ function LiveCard({threadId, presentation, language, active = true, preload = fa
   const failed = card.submission?.phase === 'unknown' || ['notSent', 'deliveryUnknown', 'failed'].includes(phase);
   const sending = card.submission?.phase === 'sending';
   const textReply = surface !== 'panel' && request.mode !== 'panel' && !!primary && isTextReplySpec(spec);
-  const render = (s: Spec, useChecklist = true) => <ChecklistContext.Provider value={useChecklist ? checklist : null}><ChatReplySurface.Provider value={textReply}><JSONUIProvider registry={registry} store={store} handlers={handlers}>
-    <Renderer spec={s} registry={registry} includeStandard={false}/>
-  </JSONUIProvider></ChatReplySurface.Provider></ChecklistContext.Provider>;
+  // Checklists keep their own Figma card; every other Panel lays its modules straight onto the wallpaper.
+  const render = (s: Spec, useChecklist = true) => <PanelLook.Provider value={look}><PanelSurface.Provider value={surface === 'panel' && !(useChecklist && checklist)}>
+    <ChecklistContext.Provider value={useChecklist ? checklist : null}><ChatReplySurface.Provider value={textReply}><JSONUIProvider registry={registry} store={store} handlers={handlers}>
+      <Renderer spec={s} registry={registry} includeStandard={false}/>
+    </JSONUIProvider></ChatReplySurface.Provider></ChecklistContext.Provider>
+  </PanelSurface.Provider></PanelLook.Provider>;
   const presentationFailed = primary?.lifecycle.phase === 'failed' || primary?.lifecycle.phase === 'interrupted';
   const busy = primary?.lifecycle.phase === 'streaming' || primary?.lifecycle.phase === 'sealed';
   const pinAction = (run: () => Promise<unknown>) => {
@@ -147,7 +157,7 @@ export function GenUiCard(props: CardProps & {superseded?: boolean}) {
 }
 
 const styles = StyleSheet.create({
-  container: {gap: spacing[4]},
+  container: {gap: spacing[8]},
   setup: {gap: spacing[4], alignItems: 'flex-start'},
   review: {gap: spacing[8]},
   reviewToggle: {minHeight: 36, paddingHorizontal: spacing[4], flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing[12]},

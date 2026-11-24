@@ -1,13 +1,73 @@
-import React, {useEffect, useLayoutEffect, useRef, type ReactNode} from 'react';
+import React, {createContext, useContext, useEffect, useLayoutEffect, useRef, type ComponentType, type ReactNode} from 'react';
 import {ActivityIndicator, Image, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View} from 'react-native';
 import Slider from '@react-native-community/slider';
-import Svg, {Path, SvgAst} from 'react-native-svg';
+import Svg, {Circle, Line, Path, Polygon, Polyline, Rect, SvgAst} from 'react-native-svg';
 import {ICONS, type IconName} from './feedCatalog';
 import {accent, containsCjk, content, fills, frosted, main, radii, shell, surface, textStyle, tones, type Fill, type TextVariant, type Tone} from './feedTokens';
 import {imageUri, isSvg, useSvgAsset} from './assets';
 import {splitValue} from './value';
 import iconPaths from '../theme/icons.json';
 import {Icon, type IconName as AppIconName} from '../components/Icon';
+import lucideSource from './lucideIcons.json';
+
+/** True inside a pinned Panel page: modules sit directly on the wallpaper as separate glass surfaces. */
+export const PanelSurface = createContext(false);
+/** True for the content placed directly inside one Panel module surface. */
+export const PanelTile = createContext(false);
+
+/** A Row of two or three short facts on a Panel: each draws as a glass pill, icon and value (Figma Panel/Status). */
+export const PanelPill = createContext(false);
+/** A Row of declared actions on a Panel: one glass bar, secondary actions quiet, the primary one solid (Figma Panel/Actions). */
+export const PanelActionBar = createContext(false);
+/** The Panel's one accent and its wash (GenUI 场景框架 v0.1). Null outside a Panel: the feed keeps its own black. */
+export type PanelLookValue = {accent: string; wash: string; scene: string};
+export const PanelLook = createContext<PanelLookValue | null>(null);
+/** A tile that found no neighbour to pair with draws as one compact full-width row instead. */
+export const PanelRow = createContext(false);
+/** Selected, on, primary and filled states: the Panel accent, or Main/Foreground outside a Panel. */
+export const useAccent = (): string => useContext(PanelLook)?.accent ?? main.foreground;
+
+/** Figma Panel/Toggle: 40 × 24, on Main/Foreground, off Content/300. Drawn, not interactive: the tile owns the press. */
+export function FeedToggleMark({on}: {on: boolean}) {
+  const ink = useAccent();
+  return <View style={[styles.toggleMark, {backgroundColor: on ? ink : content[300]}]}>
+    <View style={[styles.toggleKnob, on ? styles.toggleKnobOn : null]}/>
+  </View>;
+}
+/** Pick mark for options the user adds (dishes, products): a quiet plus, a solid check once chosen. */
+export function FeedPickMark({on, inverse, size = 28}: {on: boolean; inverse?: boolean; size?: number}) {
+  const fill = useAccent(), ink = inverse ? fill : main.surface;
+  return <View style={[styles.pickMark, {width: size, height: size}, on ? {backgroundColor: inverse ? main.surface : fill, borderColor: 'transparent'} : null]}>
+    <Svg width={size * 0.5} height={size * 0.5} viewBox="0 0 12 12">
+      <Path d={on ? 'M2.5 6.2l2.3 2.3 4.7-5' : 'M6 2.5v7M2.5 6h7'} stroke={on ? ink : content[700]} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+    </Svg>
+  </View>;
+}
+/** Figma checklist mark: 22 circle, filled when done. */
+export function FeedCheckMark({on, round = true}: {on: boolean; round?: boolean}) {
+  const fill = useAccent();
+  return <View style={[styles.checkMark, !round && styles.checkMarkSquare, on && {backgroundColor: fill, borderColor: fill}]}>
+    {on ? <Svg width={12} height={12} viewBox="0 0 12 12"><Path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="#fff" strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg> : null}
+  </View>;
+}
+
+/**
+ * Panel module surface: Rounded/3xl, 12 padding. One per module; modules never nest.
+ * A white raised module is something to press; a quiet translucent one is only read (GenUI 场景框架 v0.1).
+ */
+export function FeedModule({children, flex, minHeight, look = 'plain', padding = 12}: {children: ReactNode; flex?: number; minHeight?: number; look?: 'plain' | 'raised' | 'quiet'; padding?: number}) {
+  const body = <View style={[styles.module, {padding}, look === 'quiet' && styles.moduleQuiet, look === 'raised' ? styles.fill : [flex != null && {flex, minWidth: 0}, minHeight != null && {minHeight}]]}>
+    <PanelTile.Provider value={true}>{children}</PanelTile.Provider>
+  </View>;
+  return look === 'raised' ? <View style={[styles.raised, flex != null && {flex, minWidth: 0}, minHeight != null && {minHeight}]}>{body}</View> : body;
+}
+/** Figma tile icon: 24 glyph in a 40 circle. Quiet Content/100; soft is the accent wash; on is the solid accent. */
+export function FeedIconBadge({name, image, tone = 'quiet', size = 40}: {name?: string; image?: string; tone?: 'quiet' | 'soft' | 'on'; size?: number}) {
+  const look = useContext(PanelLook), accentInk = look?.accent ?? main.foreground;
+  const background = tone === 'on' ? accentInk : tone === 'soft' ? look?.wash ?? content[100] : content[100];
+  return <View style={[styles.iconBadge, {width: size, height: size, backgroundColor: background}]}>{image ? <FeedImage src={image} width={size} height={size} radius={radii.full}/>
+    : name ? tone === 'quiet' ? <FeedIcon name={name} size="medium"/> : <FeedIcon name={name} size="medium" color={tone === 'on' ? main.surface : accentInk}/> : null}</View>;
+}
 
 export type FeedControlState = {disabled?: boolean; busy?: boolean; selected?: boolean};
 
@@ -19,11 +79,15 @@ export function FeedText({text, variant = 'body-md', tone = 'primary', align, li
 }
 
 export function FeedValue({text, size = 'xl', tone = 'primary', selectable}: {text: string; size?: 'lg' | 'xl' | '2xl'; tone?: Tone; selectable?: boolean}) {
-  const number = textStyle(size === '2xl' ? 'heading-2xl' : size === 'lg' ? 'heading-lg' : 'heading-xl');
+  const panel = useContext(PanelSurface);
+  const variant = size === '2xl' ? 'heading-2xl' : size === 'lg' ? 'heading-lg' : 'heading-xl';
+  const parts = splitValue(text);
+  // A value without digits ("已完成", "Central Park") is the value itself, not a unit: keep it at display size.
+  const uniform = panel || !parts.some(part => part.kind === 'number');
   return <View accessible accessibilityLabel={text} style={styles.valueRow}>
-    {splitValue(text).map((part, index) => part.kind === 'number'
-      ? <Text key={index} selectable={selectable} style={[number, styles.valueRun, {color: tones[tone]}]}>{part.text}</Text>
-      : <Text key={index} selectable={selectable} style={[textStyle('body-lg'), styles.valueRun, styles.unit, {color: tones[tone]}]}>{part.text}</Text>)}
+    {parts.map((part, index) => part.kind === 'number' || uniform
+      ? <Text key={index} selectable={selectable} style={[textStyle(variant, containsCjk(part.text)), styles.valueRun, {color: tones[tone]}]}>{part.text}</Text>
+      : <Text key={index} selectable={selectable} style={[textStyle('body-lg', containsCjk(part.text)), styles.valueRun, styles.unit, {color: tones[tone]}]}>{part.text}</Text>)}
   </View>;
 }
 
@@ -59,15 +123,56 @@ const weatherPaths: Record<string, string> = {
   storm: 'M5 15a3 3 0 0 1 .2-6 5 5 0 0 1 9.7-.8A3.5 3.5 0 1 1 18 15M13 13l-4 5h4l-2 4',
   fog: 'M5 11a3 3 0 0 1 .2-6 5 5 0 0 1 9.7-.8A3.5 3.5 0 1 1 18 11M3 15h18M5 19h14',
 };
-export function FeedIcon({name, tone = 'primary', size = 'small'}: {name: string; tone?: Tone; size?: 'small' | 'medium' | 'large'}) {
+type GlyphNode = [string, Record<string, string>];
+const lucide = lucideSource as unknown as Record<string, GlyphNode[] | string>;
+const GLYPH_PARTS: Record<string, ComponentType<Record<string, string>>> = {
+  path: Path as never, circle: Circle as never, rect: Rect as never, line: Line as never, polyline: Polyline as never, polygon: Polygon as never,
+};
+/** Everyday names the model reaches for, mapped onto the Lucide set (ISC) we ship. */
+const GLYPH_ALIASES: Record<string, string> = {
+  time: 'clock', alarm: 'alarm-clock', date: 'calendar', schedule: 'calendar-days', deadline: 'hourglass',
+  location: 'map-pin', place: 'map-pin', address: 'map-pin', pushpin: 'pin', directions: 'navigation', park: 'trees', nature: 'trees', forest: 'trees',
+  beach: 'palmtree', museum: 'landmark', home: 'house', city: 'building-2', office: 'building',
+  food: 'utensils', meal: 'utensils', restaurant: 'utensils', dining: 'utensils', lunch: 'utensils', dinner: 'utensils', breakfast: 'croissant',
+  cafe: 'coffee', 'coffee-cup': 'coffee', tea: 'coffee', drink: 'cup-soda', bar: 'wine', dessert: 'cake', noodles: 'soup',
+  shop: 'store', shopping: 'shopping-bag', bag: 'shopping-bag', money: 'banknote', cash: 'banknote', price: 'tag', card: 'credit-card', payment: 'credit-card', bill: 'receipt',
+  flight: 'plane', airplane: 'plane', departure: 'plane-takeoff', takeoff: 'plane-takeoff', arrival: 'plane-landing', landing: 'plane-landing',
+  train: 'train-front', subway: 'train-front', metro: 'train-front', tram: 'tram-front', taxi: 'car-taxi-front', walk: 'footprints', walking: 'footprints', boat: 'ship', ferry: 'ship',
+  suitcase: 'luggage', baggage: 'luggage', seat: 'armchair', gate: 'door-open', door: 'door-open', checkin: 'ticket', 'check-in': 'ticket', boarding: 'ticket',
+  passport: 'id-card', id: 'id-card', document: 'file-text', key: 'key-round', mobile: 'smartphone', cellphone: 'smartphone', 'phone-device': 'smartphone',
+  battery: 'battery-full', 'power-bank': 'battery-charging', powerbank: 'battery-charging', charger: 'plug-zap', photo: 'camera', picture: 'image',
+  done: 'circle-check', complete: 'circle-check', warning: 'circle-alert', alert: 'circle-alert', note: 'sticky-note', todo: 'list-checks', tasks: 'list-checks', checklist: 'list-checks',
+  gym: 'dumbbell', workout: 'dumbbell', sleep: 'bed', hotel: 'hotel', medicine: 'pill', doctor: 'stethoscope', delivery: 'truck', parcel: 'package', school: 'graduation-cap',
+  temperature: 'thermometer', humidity: 'droplets', fire: 'flame', energy: 'zap', message: 'message-circle', email: 'mail', people: 'users', person: 'user', internet: 'globe',
+  expand: 'maximize-2', favorite: 'heart', rating: 'star', reminder: 'bell', movie: 'film', game: 'gamepad-2', clothes: 'shirt', rain: 'umbrella',
+};
+const glyphName = (name: string): string | null => {
+  const key = name.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  const target = Object.hasOwn(lucide, key) && !key.startsWith('_') ? key : Object.hasOwn(GLYPH_ALIASES, key) ? GLYPH_ALIASES[key] : null;
+  return target && Array.isArray(lucide[target]) ? target : null;
+};
+function FeedGlyph({name, color, size}: {name: string; color: string; size: number}) {
+  const nodes = lucide[name] as GlyphNode[];
+  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" accessibilityLabel={name.replace(/-/g, ' ')}>
+    {nodes.map(([tag, attrs], index) => {
+      const Part = GLYPH_PARTS[tag];
+      return Part ? <Part key={String(index)} {...attrs} stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill={attrs.fill ?? 'none'}/> : null;
+    })}
+  </Svg>;
+}
+export function FeedIcon({name, tone = 'primary', size = 'small', color}: {name: string; tone?: Tone; size?: 'small' | 'medium' | 'large'; color?: string}) {
+  const panel = useContext(PanelSurface);
   const pixels = {small: 16, medium: 24, large: 36}[size];
+  const glyph = typeof name === 'string' ? glyphName(name) : null;
+  // Panels draw one line-icon family; the feed keeps its own illustrated assets first.
+  if (panel && glyph) return <FeedGlyph name={glyph} color={color ?? tones[tone]} size={pixels}/>;
   if (Object.hasOwn(ICONS, name)) return <FeedImage src={iconRef(name as IconName)} width={pixels} height={pixels}/>;
   const path = Object.hasOwn(weatherPaths, name) ? weatherPaths[name] : undefined;
   if (path) return <Svg width={pixels} height={pixels} viewBox="0 0 24 24" accessibilityLabel={name.replace(/-/g, ' ')}>
     <Path d={path} stroke={tones[tone]} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" fill="none"/>
   </Svg>;
-  return Object.hasOwn(iconPaths, name) || name === 'tree' || name === 'tako' || name === 'panel'
-    ? <Icon name={name as AppIconName} color={tones[tone]} size={pixels}/> : null;
+  if (Object.hasOwn(iconPaths, name) || name === 'tree' || name === 'tako' || name === 'panel') return <Icon name={name as AppIconName} color={tones[tone]} size={pixels}/>;
+  return glyph ? <FeedGlyph name={glyph} color={color ?? tones[tone]} size={pixels}/> : null;
 }
 
 export function FeedCornerTag({label, tone = 'ai', icon}: {label: string; tone?: 'ai' | 'solid' | 'quiet'; icon?: IconName}) {
@@ -84,6 +189,9 @@ export function FeedCornerTag({label, tone = 'ai', icon}: {label: string; tone?:
   </View>;
 }
 export function FeedTags({items}: {items: string[]}) {
+  const panel = useContext(PanelSurface), tile = useContext(PanelTile);
+  // On the wallpaper a tag is a Surface/900 pill (Figma Chip); inside a module it stays a quiet chip.
+  if (panel && !tile) return <View style={styles.pills}>{items.map(item => <View key={item} style={styles.pill}><FeedText text={item} variant="body-md"/></View>)}</View>;
   return <View style={styles.tags}>{items.map(item => <View key={item} style={styles.chip}><FeedText text={item} variant="body-sm" tone="tertiary"/></View>)}</View>;
 }
 export function FeedHeader({title, icon, wordmark, wordmarkWidth, trailing, trailingIcon, count, gap}: {
@@ -111,10 +219,13 @@ export function FeedButton({label, variant = 'secondary', appearance = 'light', 
   label: string; variant?: 'primary' | 'secondary'; appearance?: 'light' | 'dark'; size?: 'lg' | 'md'; icon?: 'sparkle'; flex?: number; onPress: () => void;
 }) {
   const primary = variant === 'primary', inverse = appearance === 'dark' ? !primary : primary;
-  const ink = inverse ? main.surface : main.foreground;
-  const background = appearance === 'dark' ? (primary ? main.surface : surface[200]) : (primary ? main.foreground : content[200]);
+  const ink = inverse ? main.surface : main.foreground, panel = useContext(PanelSurface), tile = useContext(PanelTile), bar = useContext(PanelActionBar);
+  const fill = useAccent();
+  // On a Panel the primary takes the accent; in an action bar secondaries sit on the bar itself.
+  const background = appearance === 'dark' ? (primary ? main.surface : surface[200])
+    : primary ? fill : bar ? 'transparent' : panel && !tile ? surface[900] : content[200];
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{busy, selected, disabled: disabled || busy}} disabled={disabled || busy} onPress={onPress}
-    style={({pressed}) => [styles.button, size === 'md' ? styles.buttonMd : styles.buttonLg, {backgroundColor: background},
+    style={({pressed}) => [styles.button, size === 'md' ? styles.buttonMd : styles.buttonLg, {backgroundColor: background}, bar && styles.buttonBar, bar && primary && styles.buttonBarPrimary,
       flex != null ? {flex, minWidth: 0} : {alignSelf: 'stretch'}, selected && styles.selected, (pressed || busy) && styles.pressed, disabled && styles.disabled]}>
     {busy ? <ActivityIndicator size={size === 'md' ? 12 : 16} color={ink}/> : icon === 'sparkle' ? <FeedIcon name="sparkle"/> : null}
     <FeedText text={label} variant={size === 'md' ? 'body-md' : 'body-lg'} tone={inverse ? 'inverse' : 'foreground'} lines={1}/>
@@ -126,13 +237,16 @@ export function FeedPressable({label, role = 'button', expanded, onPress, onLong
   return <Pressable accessibilityRole={role} accessibilityLabel={label} accessibilityState={{expanded, disabled, busy, selected}} disabled={disabled || busy}
     onPress={onPress} onLongPress={onLongPress} style={({pressed}) => [pressed && styles.pressed, disabled && styles.disabled]}>{children}</Pressable>;
 }
-export function FeedItem({leading, children, trailing, corner, onPress, label, layout = 'row'}: {
-  leading?: ReactNode; children: ReactNode; trailing?: ReactNode; corner?: ReactNode; onPress?: () => void; label?: string; layout?: 'row' | 'tile';
+export function FeedItem({leading, children, trailing, corner, onPress, label, layout = 'row', raised}: {
+  leading?: ReactNode; children: ReactNode; trailing?: ReactNode; corner?: ReactNode; onPress?: () => void; label?: string; layout?: 'row' | 'tile'; raised?: boolean;
 }) {
-  const body = <><View style={[styles.itemLead, layout === 'tile' && styles.tile]}>{leading}{children}</View>{trailing}
-    {corner ? <View style={styles.itemCorner}>{corner}</View> : null}</>;
-  return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({pressed}) => [styles.item, layout === 'tile' && styles.tile, pressed && styles.pressed]}>{body}</Pressable>
-    : <View style={[styles.item, layout === 'tile' && styles.tile]}>{body}</View>;
+  const panel = useContext(PanelSurface), tile = useContext(PanelTile);
+  // On the wallpaper an item the user can open lifts on white; one that is only read stays translucent.
+  const surfaceStyle = panel ? tile ? styles.itemInModule : [styles.itemModule, raised || onPress ? styles.itemRaised : styles.itemQuiet] : styles.item;
+  const body = <PanelTile.Provider value={panel || tile}><View style={[styles.itemLead, layout === 'tile' && styles.tile]}>{leading}{children}</View>{trailing}
+    {corner ? <View style={styles.itemCorner}>{corner}</View> : null}</PanelTile.Provider>;
+  return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({pressed}) => [surfaceStyle, layout === 'tile' && styles.tile, pressed && styles.pressed]}>{body}</Pressable>
+    : <View style={[surfaceStyle, layout === 'tile' && styles.tile]}>{body}</View>;
 }
 export function FeedSelection({label, kind, checked, disabled, children, onPress, compact = false, appearance = 'selection'}: {
   label: string; kind: 'checkbox' | 'radio'; checked: boolean | 'mixed'; disabled?: boolean; children: ReactNode; onPress: () => void; compact?: boolean; appearance?: 'selection' | 'checklist';
@@ -153,7 +267,8 @@ export function FeedProgress({value, tone = 'green', label, valueText}: {value: 
   return label || valueText ? <View style={styles.stack}>{label && <FeedText text={label} tone="secondary"/>}{track}{valueText && <FeedText text={valueText} variant="body-sm" tone="secondary"/>}</View> : track;
 }
 export function FeedStatus({text, state, children, selectable}: {text: string; state: 'info' | 'pending' | 'error' | 'review'; children?: ReactNode; selectable?: boolean}) {
-  return <View accessibilityRole={state === 'error' || state === 'review' ? 'alert' : undefined} accessibilityLiveRegion="polite" accessibilityState={{busy: state === 'pending'}} style={styles.status}>
+  const panel = useContext(PanelSurface), tile = useContext(PanelTile);
+  return <View accessibilityRole={state === 'error' || state === 'review' ? 'alert' : undefined} accessibilityLiveRegion="polite" accessibilityState={{busy: state === 'pending'}} style={[styles.status, panel && !tile && styles.statusPanel]}>
     <View style={styles.statusRow}>{state === 'pending' ? <FeedSpinner/> : state === 'error' || state === 'review' ? <FeedIcon name="info" tone="secondary"/> : null}
       <FeedText text={text} variant="body-sm" tone="secondary" selectable={selectable} flex={1}/></View>{children}
   </View>;
@@ -163,7 +278,8 @@ export function FeedPlaceholder({kind}: {kind: 'text' | 'value' | 'item' | 'medi
     style={[styles.placeholder, kind === 'value' ? styles.placeholderValue : kind === 'item' ? styles.placeholderItem : kind === 'media' ? styles.placeholderMedia : kind === 'action' ? styles.placeholderAction : null]}/>;
 }
 export function FeedMediaFrame({kind, aspectRatio, height, children}: {kind: 'image' | 'audio' | 'video' | 'camera'; aspectRatio?: number; height?: number; children: ReactNode}) {
-  return <View style={[styles.media, {height, aspectRatio: aspectRatio ?? (kind === 'video' ? 16 / 9 : kind === 'camera' ? 3 / 4 : undefined)},
+  const panel = useContext(PanelSurface);
+  return <View style={[styles.media, panel && styles.mediaPanel, {height, aspectRatio: aspectRatio ?? (kind === 'video' ? 16 / 9 : kind === 'camera' ? 3 / 4 : undefined)},
     (kind === 'video' || kind === 'camera') && styles.nativeMedia]}>{children}</View>;
 }
 export function FeedTextInput({value, onChangeText, onSubmit, onBlur, label, hint, placeholder, mode = 'text', multiline, disabled, secure, keyboardType}: {
@@ -185,8 +301,9 @@ export function FeedToggle({value, onChange, label, disabled}: {value: boolean; 
 export function FeedSlider({value, min, max, step, label, disabled, onChange, onComplete}: {
   value: number; min: number; max: number; step?: number; label?: string; disabled?: boolean; onChange?: (value: number) => void; onComplete?: (value: number) => void;
 }) {
+  const fill = useAccent();
   return <Slider accessibilityLabel={label} minimumValue={min} maximumValue={max} step={step ?? 0} value={value} disabled={disabled}
-    minimumTrackTintColor={main.foreground} maximumTrackTintColor={content[300]} thumbTintColor={main.foreground} style={[styles.slider, disabled && styles.disabled]}
+    minimumTrackTintColor={fill} maximumTrackTintColor={content[300]} thumbTintColor={fill} style={[styles.slider, disabled && styles.disabled]}
     onValueChange={onChange} onSlidingComplete={onComplete}/>;
 }
 export function FeedDivider({direction = 'horizontal'}: {direction?: 'horizontal' | 'vertical'}) {
@@ -203,7 +320,24 @@ const styles = StyleSheet.create({
   tag: {flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', paddingVertical: 2, borderTopLeftRadius: radii.lg, borderBottomRightRadius: radii.lg, overflow: 'hidden'},
   tagAi: {paddingHorizontal: 6, gap: 4}, tagGlow: {position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, borderTopLeftRadius: radii.lg, borderBottomRightRadius: radii.lg, borderWidth: 1, borderColor: 'rgba(255,255,255,0.24)'},
   tagSolid: {paddingHorizontal: 4, gap: 2, backgroundColor: accent.uberBlue}, tagQuiet: {paddingHorizontal: 6, gap: 4, backgroundColor: content[50]},
-  tags: {flexDirection: 'row', flexWrap: 'wrap', gap: 4}, chip: {paddingHorizontal: 4, paddingVertical: 2, borderRadius: radii.base, backgroundColor: content[50]},
+  tags: {flexDirection: 'row', flexWrap: 'wrap', gap: 4},
+  pills: {flexDirection: 'row', flexWrap: 'wrap', gap: 8}, pill: {paddingHorizontal: 12, paddingVertical: 6, borderRadius: radii.full, backgroundColor: surface[900]},
+  module: {backgroundColor: surface[900], borderRadius: radii['3xl'], padding: 12, gap: 8, overflow: 'hidden'},
+  moduleQuiet: {backgroundColor: surface[700]}, fill: {flexGrow: 1, minWidth: 0},
+  raised: {borderRadius: radii['3xl'], boxShadow: '0px 10px 24px -14px rgba(30,40,70,0.38), 0px 1px 2px rgba(30,40,70,0.06)'},
+  iconBadge: {width: 40, height: 40, borderRadius: radii.full, backgroundColor: content[100], alignItems: 'center', justifyContent: 'center', overflow: 'hidden'},
+  insetBare: {gap: 8, minWidth: 0},
+  itemModule: {flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: radii['3xl'], backgroundColor: surface[900], overflow: 'hidden'},
+  itemRaised: {boxShadow: '0px 10px 24px -14px rgba(30,40,70,0.38), 0px 1px 2px rgba(30,40,70,0.06)', overflow: 'visible'}, itemQuiet: {backgroundColor: surface[700]},
+  itemInModule: {flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minWidth: 0},
+  mediaPanel: {borderRadius: radii['3xl']},
+  toggleMark: {width: 40, height: 24, borderRadius: radii.full, padding: 2, justifyContent: 'center'},
+  toggleKnob: {width: 20, height: 20, borderRadius: radii.full, backgroundColor: main.surface},
+  toggleKnobOn: {alignSelf: 'flex-end'},
+  checkMark: {width: 22, height: 22, borderRadius: radii.full, borderWidth: 1.5, borderColor: content[300], alignItems: 'center', justifyContent: 'center'},
+  checkMarkSquare: {borderRadius: 6},
+  pickMark: {width: 28, height: 28, borderRadius: radii.full, borderWidth: 1.5, borderColor: content[300], alignItems: 'center', justifyContent: 'center'}, checkMarkOn: {backgroundColor: main.foreground, borderColor: main.foreground},
+  buttonBar: {height: 52, flex: 1, minWidth: 0}, buttonBarPrimary: {flex: 1.3}, chip: {paddingHorizontal: 4, paddingVertical: 2, borderRadius: radii.base, backgroundColor: content[50]},
   surfaceCard: {...shell.card, overflow: 'hidden'}, surfaceControl: {...shell.control, height: undefined, minHeight: shell.control.height, overflow: 'hidden'}, sheet: {...shell.card, borderBottomLeftRadius: 0, borderBottomRightRadius: 0, overflow: 'hidden'}, inset: {overflow: 'hidden'},
   button: {flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, borderRadius: radii.full, overflow: 'hidden', paddingHorizontal: 12},
   buttonLg: {height: 40}, buttonMd: {height: 32}, pressed: {opacity: 0.6}, disabled: {opacity: 0.4}, selected: {borderWidth: 1, borderColor: main.foreground},
@@ -218,6 +352,7 @@ const styles = StyleSheet.create({
   track: {height: 8, borderRadius: radii.full, backgroundColor: content[200], overflow: 'hidden'}, trackFill: {height: 8, borderRadius: radii.full}, stack: {gap: 6},
   status: {paddingHorizontal: 12, paddingVertical: 8, borderRadius: radii.xl, backgroundColor: content[50], gap: 8, minWidth: 0},
   statusRow: {flexDirection: 'row', alignItems: 'center', gap: 8},
+  statusPanel: {backgroundColor: surface[800], borderRadius: radii['3xl'], padding: 12},
   placeholder: {height: 12, minWidth: 48, width: '65%', borderRadius: radii.md, backgroundColor: content[100]},
   placeholderValue: {height: 32}, placeholderItem: {height: 48, width: '100%'}, placeholderMedia: {height: 72, width: '100%', borderRadius: radii.xl},
   placeholderAction: {height: 40, width: 120, borderRadius: radii.full}, media: {width: '100%', borderRadius: radii.xl, overflow: 'hidden', backgroundColor: content[100]}, nativeMedia: {backgroundColor: main.foreground},
