@@ -27,7 +27,11 @@ class ReactCardPool(private val activity: Activity, private val limit: Int = 14)
    * Native is unavailable. Each page owns this root and its subscriptions, so pages mount and
    * release independently.
    */
-  fun acquirePanel(panelId: String): View? = acquire(panelKey(panelId), PANEL_COMPONENT, Bundle().apply { putString("panelId", panelId) })
+  /** [bottomInset] (dp) is the height of the bottom glass the page body runs under; the root pads its scroll end by it. */
+  fun acquirePanel(panelId: String, bottomInset: Float): View? = acquire(panelKey(panelId), PANEL_COMPONENT, Bundle().apply {
+    putString("panelId", panelId)
+    putDouble("bottomInset", bottomInset.toDouble())
+  })
 
   /** Stops one Panel page's root and nothing else; the page's next mount creates a fresh surface. */
   fun releasePanel(panelId: String) {

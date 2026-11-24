@@ -3,6 +3,7 @@ package org.agentos.agent.home.assistant
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Uri
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
@@ -1184,7 +1185,8 @@ class AssistantSession private constructor(private val context: Context, private
   private suspend fun ensureComposerThread(generation: Long, current: Editor): String {
     return threadCreation.resolve(generation, current = { flow.value.threadId }, create = {
       val source = composer.read("").also { acceptDraft(current, it) }
-      val id = withContext(worker) { HomeComposer.createThread(gateway) }
+      // Every home reply can become a Panel: select the Taku design skill on the new thread before the first turn.
+      val id = withContext(worker) { HomeComposer.createThread(gateway).also { selectDesignSkill(it) } }
       if (editor !== current) throw kotlinx.coroutines.CancellationException("Assistant session changed")
       val moved = composer.move(source, id)
       current.threadId = id
@@ -1194,6 +1196,36 @@ class AssistantSession private constructor(private val context: Context, private
       synchronized(streamLock) { stream = SessionStreamState(id); baseline = emptySet() }
       flow.update { it.copy(threadId = id) }
     })
+  }
+
+  /**
+   * Every home reply can become a Panel, so a new home thread starts with the Taku design skill
+   * selected (native turn/start then carries it as a skill input). Relying on discovery alone left
+   * some replies composed without it. Best effort: a missing or disabled skill never blocks sending.
+   */
+  private fun selectDesignSkill(threadId: String) {
+    // A new thread has nothing selected and skills/select toggles, so one call selects it; the extra
+    // skills/read round trip cost about two seconds before every first turn.
+    // The Assistant refuses skill changes while it is still finishing the previous turn: retry briefly.
+    for (attempt in 1..6) {
+      val selected = runCatching {
+        openAccess("skills/select", JSONObject().put("threadId", threadId).put("path", DESIGN_SKILL_PATH)).optJSONArray("selected")
+      }.onFailure { Log.w(TAG, "design skill not selected (attempt $attempt): ${it.message}") }.getOrNull()
+      if (selected != null) {
+        if ((0 until selected.length()).any { selected.optString(it) == DESIGN_SKILL_PATH }) return
+        // The call toggled an existing selection off: toggle it back on once.
+        runCatching { openAccess("skills/select", JSONObject().put("threadId", threadId).put("path", DESIGN_SKILL_PATH)) }
+        return
+      }
+      Thread.sleep(400)
+    }
+  }
+
+  private fun openAccess(method: String, arg: JSONObject): JSONObject {
+    val bundle = context.contentResolver.call(OPEN_ACCESS, method, arg.toString(), null) ?: error("assistant unavailable")
+    val envelope = JSONObject(bundle.getString("result") ?: error("no result"))
+    if (!envelope.optBoolean("ok")) error(envelope.optJSONObject("error")?.optString("code") ?: envelope.optString("code"))
+    return envelope.optJSONObject("result") ?: JSONObject()
   }
 
   // ---- Session stream and task status --------------------------------------------------
@@ -1380,6 +1412,8 @@ class AssistantSession private constructor(private val context: Context, private
     /** How long Taku may keep "working" with no network before the home stops it (issue #25 F3). */
     const val OFFLINE_GRACE_MS = 30_000L
     private const val TAG = "TakuAssistant"
+    private const val DESIGN_SKILL_PATH = "/data/local/agentos/home/.codex/skills/taku-genui-design/SKILL.md"
+    private val OPEN_ACCESS: Uri = Uri.parse("content://org.agentos.assistant.open-access")
     @Volatile private var instance: AssistantSession? = null
     fun get(context: Context): AssistantSession = instance ?: synchronized(this) {
       instance ?: AssistantSession(context.applicationContext, AgentGateway(context.applicationContext.contentResolver)).also { instance = it }

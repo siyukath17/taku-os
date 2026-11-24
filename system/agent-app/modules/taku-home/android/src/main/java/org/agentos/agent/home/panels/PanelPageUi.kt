@@ -42,18 +42,20 @@ fun PanelPage(
         .padding(horizontal = TakuSpacing.gutter, vertical = TakuSpacing.md)
         .semantics { heading() },
     )
-    Box(Modifier.fillMaxWidth().weight(1f).padding(bottom = bottom)) {
-      if (mounted) PanelRoot(panelId, pool) else Box(Modifier.fillMaxSize())
+    // The page body runs under the bottom glass, as the feed does: content stays visible down to the
+    // arc and blurs beneath it. The React root pads its scroll content by [bottom] so the end clears it.
+    Box(Modifier.fillMaxWidth().weight(1f)) {
+      if (mounted) PanelRoot(panelId, pool, bottom) else Box(Modifier.fillMaxSize().padding(bottom = bottom))
     }
   }
 }
 
 @Composable
-private fun PanelRoot(panelId: String, pool: ReactCardPool) {
-  val view = remember(panelId) { pool.acquirePanel(panelId) }
+private fun PanelRoot(panelId: String, pool: ReactCardPool, bottom: Dp) {
+  val view = remember(panelId) { pool.acquirePanel(panelId, bottom.value) }
   DisposableEffect(panelId) { onDispose { pool.releasePanel(panelId) } }
   if (view == null) {
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().padding(bottom = bottom)) {
       BasicText(
         "Panels need the TakuOS agent interface; it is unavailable in this build.",
         style = TakuTheme.type.bodyMd.copy(color = TakuTheme.colors.textSecondary),
